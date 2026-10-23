@@ -15,6 +15,8 @@ export type {
   PluginAgentPanelProps,
   PluginClientOpenPanelOptions,
   PluginAgentTabTitleContext,
+  PluginAgentTabTitleLines,
+  PluginAgentTabTitleResult,
   PluginAgentTabTitleResolverContribution,
   PluginAgentTabTitleResolverRegistration,
   PluginClientContext,

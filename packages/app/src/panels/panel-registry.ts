@@ -15,6 +15,7 @@ export interface PanelIconProps {
 
 export interface PanelDescriptor {
   label: string;
+  titleLines?: { primaryLabel: string; secondaryLabel: string };
   subtitle: string;
   tooltip: string;
   titleState: "ready" | "loading";

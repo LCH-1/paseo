@@ -86,6 +86,11 @@ import {
   useHorizontalScrollBoundary,
 } from "@/components/ui/horizontal-scroll-boundary";
 import { useSessionStore } from "@/stores/session-store";
+import {
+  resolveWorkspaceTabTitleLines,
+  workspaceTabTitleSignature,
+  WorkspaceTabTitle,
+} from "./workspace-tab-title";
 
 const DROPDOWN_WIDTH = 220;
 const DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH = 36;
@@ -189,25 +194,29 @@ function AgentTabTooltipBody({
 function TabLabelMeasurement({
   tabKey,
   label,
+  titleLines,
+  signature,
   onMeasure,
 }: {
   tabKey: string;
   label: string;
+  titleLines?: WorkspaceTabPresentation["titleLines"];
+  signature: string;
   onMeasure: (tabKey: string, label: string, event: LayoutChangeEvent) => void;
 }) {
   const handleLayout = useCallback(
-    (event: LayoutChangeEvent) => onMeasure(tabKey, label, event),
-    [label, onMeasure, tabKey],
+    (event: LayoutChangeEvent) => onMeasure(tabKey, signature, event),
+    [signature, onMeasure, tabKey],
   );
 
   return (
-    <Text
-      style={[styles.tabLabel, styles.tabLabelMeasurement]}
-      numberOfLines={1}
+    <WorkspaceTabTitle
+      label={label}
+      titleLines={titleLines}
+      labelStyle={styles.tabLabel}
+      measurement
       onLayout={handleLayout}
-    >
-      {label}
-    </Text>
+    />
   );
 }
 
@@ -471,6 +480,8 @@ interface ResolvedWorkspaceDesktopTabRowItem extends WorkspaceDesktopTabRowItem 
 interface WorkspaceTabLabel {
   key: string;
   label: string;
+  titleLines?: WorkspaceTabPresentation["titleLines"];
+  signature: string;
   modified: boolean;
 }
 
@@ -495,9 +506,9 @@ function completeWorkspaceTabLabelWidths(
   measurements: Map<string, WorkspaceTabLabelMeasurement>,
 ): number[] | null {
   const widths: number[] = [];
-  for (const { key, label, modified } of labels) {
+  for (const { key, signature, modified } of labels) {
     const measurement = measurements.get(key);
-    if (!measurement || measurement.label !== label || measurement.width <= 0) {
+    if (!measurement || measurement.label !== signature || measurement.width <= 0) {
       return null;
     }
     // The modified dot sits in the content row, so a modified tab needs that much more width
@@ -701,9 +712,11 @@ function TabHandleContent({
         <View style={tabLabelSkeletonStyle} />
       ) : null}
       {showLabel && presentation.titleState !== "loading" ? (
-        <Text style={tabLabelStyle} selectable={false} numberOfLines={1} ellipsizeMode="tail">
-          {presentation.label}
-        </Text>
+        <WorkspaceTabTitle
+          label={presentation.label}
+          titleLines={resolveWorkspaceTabTitleLines(presentation)}
+          labelStyle={tabLabelStyle}
+        />
       ) : null}
       {/* The dot is a laid-out sibling of the label, not an overlay, so a truncated label ends
           before it instead of running underneath it. */}
@@ -788,6 +801,7 @@ function TabChip({
   const tabChipStyle = useCallback(
     () => [
       styles.tab,
+      resolveWorkspaceTabTitleLines(presentation) && styles.tabTwoLine,
       isActiveFocused && styles.tabActive,
       isActive && !isFocused && styles.tabActiveUnfocused,
       !isActive && isHovered && styles.tabHovered,
@@ -798,7 +812,7 @@ function TabChip({
         maxWidth: resolvedTabWidth,
       },
     ],
-    [isActive, isActiveFocused, isDragging, isFocused, isHovered, resolvedTabWidth],
+    [isActive, isActiveFocused, isDragging, isFocused, isHovered, presentation, resolvedTabWidth],
   );
 
   const handleTabPointerEnter = useCallback(() => {
@@ -1125,7 +1139,14 @@ function ResolvedWorkspaceDesktopTabsRow({
           tab.presentation.titleState === "loading"
             ? getFallbackTabLabel(tab.tab, fallbackTabLabels)
             : tab.presentation.label;
-        return { key: tab.tab.key, label, modified: tab.presentation.modified };
+        const titleLines = resolveWorkspaceTabTitleLines(tab.presentation);
+        return {
+          key: tab.tab.key,
+          label,
+          titleLines,
+          signature: workspaceTabTitleSignature(label, titleLines),
+          modified: tab.presentation.modified,
+        };
       }),
     [fallbackTabLabels, tabs],
   );
@@ -1197,11 +1218,11 @@ function ResolvedWorkspaceDesktopTabsRow({
       return EMPTY_RESOLVED_TAB_ROWS;
     }
     const currentTabs = new Map(
-      tabs.map((tab, index) => [tab.tab.key, { tab, label: tabLabels[index]?.label }]),
+      tabs.map((tab, index) => [tab.tab.key, { tab, signature: tabLabels[index]?.signature }]),
     );
     return trackSnapshot.tabs.map((snapshotTab, index) => {
       const current = currentTabs.get(snapshotTab.tab.key);
-      return current?.label === trackSnapshot.labels[index]?.label ? current.tab : snapshotTab;
+      return current?.signature === trackSnapshot.labels[index]?.signature ? current.tab : snapshotTab;
     });
   }, [tabLabels, tabs, trackSnapshot]);
 
@@ -1349,11 +1370,13 @@ function ResolvedWorkspaceDesktopTabsRow({
         accessibilityElementsHidden
         importantForAccessibility="no-hide-descendants"
       >
-        {tabLabels.map(({ key, label }) => (
+        {tabLabels.map(({ key, label, titleLines, signature }) => (
           <TabLabelMeasurement
-            key={`${key}:${label}`}
+            key={`${key}:${signature}`}
             tabKey={key}
             label={label}
+            titleLines={titleLines}
+            signature={signature}
             onMeasure={handleTabLabelLayout}
           />
         ))}
@@ -1624,6 +1647,9 @@ const styles = StyleSheet.create((theme) => ({
   tabHovered: {
     backgroundColor: theme.colors.surface1,
   },
+  tabTwoLine: {
+    height: 32,
+  },
   tabActive: {
     backgroundColor: theme.colors.surface2,
   },
@@ -1686,9 +1712,6 @@ const styles = StyleSheet.create((theme) => ({
     opacity: 0,
     alignItems: "flex-start",
     pointerEvents: "none",
-  },
-  tabLabelMeasurement: {
-    flexShrink: 0,
   },
   tabLabelSkeleton: {
     width: 96,

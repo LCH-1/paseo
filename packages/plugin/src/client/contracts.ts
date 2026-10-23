@@ -129,11 +129,19 @@ export interface PluginAgentTabTitleContext {
   readonly subagentId?: string;
   readonly defaultLabel: string;
   readonly sidebarLabel: string | null;
+  readonly projectLabel: string | null;
 }
+
+export interface PluginAgentTabTitleLines {
+  readonly primaryLabel: string;
+  readonly secondaryLabel: string;
+}
+
+export type PluginAgentTabTitleResult = string | PluginAgentTabTitleLines | null;
 
 export interface PluginAgentTabTitleResolverContribution {
   id: string;
-  resolve(context: PluginAgentTabTitleContext): string | null;
+  resolve(context: PluginAgentTabTitleContext): PluginAgentTabTitleResult;
 }
 
 export interface PluginAgentTabTitleResolverRegistration {

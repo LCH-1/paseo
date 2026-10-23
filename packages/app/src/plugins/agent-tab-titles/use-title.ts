@@ -1,12 +1,12 @@
-import type { PluginAgentTabTitleContext } from "@getpaseo/plugin/client";
+import type { PluginAgentTabTitleContext, PluginAgentTabTitleResult } from "@getpaseo/plugin/client";
 import { useSettings } from "@/hooks/use-settings";
 import { useSessionStore } from "@/stores/session-store";
 import { useInstalledPlugins } from "../registry";
-import { resolveAgentTabTitle, selectAgentTabSidebarLabel } from "./resolve";
+import { resolveAgentTabTitle, selectAgentTabProjectLabel, selectAgentTabSidebarLabel } from "./resolve";
 
 export function useAgentTabTitle(
-  context: Omit<PluginAgentTabTitleContext, "sidebarLabel">,
-): string | null {
+  context: Omit<PluginAgentTabTitleContext, "sidebarLabel" | "projectLabel">,
+): PluginAgentTabTitleResult {
   const installations = useInstalledPlugins();
   const { settings } = useSettings();
   const sidebarLabel = useSessionStore((state) =>
@@ -16,6 +16,9 @@ export function useAgentTabTitle(
       workspaceTitleSource: settings.workspaceTitleSource,
     }),
   );
+  const projectLabel = useSessionStore((state) =>
+    selectAgentTabProjectLabel({ session: state.sessions[context.serverId], context }),
+  );
   if (sidebarLabel === null) return null;
-  return resolveAgentTabTitle(installations, { ...context, sidebarLabel });
+  return resolveAgentTabTitle(installations, { ...context, sidebarLabel, projectLabel });
 }

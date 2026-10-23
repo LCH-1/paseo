@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import type { PluginAgentTabTitleContext } from "@getpaseo/plugin/client";
+import type { PluginAgentTabTitleContext, PluginAgentTabTitleResult } from "@getpaseo/plugin/client";
 import type { WorkspaceDescriptor } from "@/stores/session-store";
-import { applyAgentTabTitle, resolveAgentTabTitle, selectAgentTabSidebarLabel } from "./resolve";
+import { applyAgentTabTitle, resolveAgentTabTitle, selectAgentTabProjectLabel, selectAgentTabSidebarLabel } from "./resolve";
 
 const context: PluginAgentTabTitleContext = {
   serverId: "host-a",
@@ -9,11 +9,12 @@ const context: PluginAgentTabTitleContext = {
   agentId: "agent-a",
   defaultLabel: "Saved title",
   sidebarLabel: "  결제 기능 개선 🧩  ",
+  projectLabel: "Payments",
 };
 
 function installation(
   id: string,
-  resolve: (context: PluginAgentTabTitleContext) => string | null,
+  resolve: (context: PluginAgentTabTitleContext) => PluginAgentTabTitleResult,
   serverId = "host-a",
 ) {
   return {
@@ -25,6 +26,33 @@ function installation(
 }
 
 describe("agent tab title resolution", () => {
+  it("passes two original lines to the tab while retaining the legacy combined label and panel state", () => {
+    const titleLines = { primaryLabel: "  Payments 🧩  ", secondaryLabel: "main" };
+    const plugin = installation("two-lines", () => titleLines);
+    const resolved = resolveAgentTabTitle([plugin], context);
+    expect(resolved).toEqual(titleLines);
+    expect(resolved).not.toBe(titleLines);
+    const descriptor = {
+      label: "Saved agent title", tooltip: "Saved agent title", subtitle: "Codex subagent",
+      icon: () => null, statusBucket: "running" as const, titleState: "loading" as const,
+    };
+    expect(applyAgentTabTitle(descriptor, resolved)).toEqual({
+      ...descriptor, label: "  Payments 🧩  -main", tooltip: "  Payments 🧩  -main",
+      titleState: "ready", titleLines,
+    });
+    expect(descriptor.label).toBe("Saved agent title");
+  });
+
+  it.each([
+    { primaryLabel: "", secondaryLabel: "main" },
+    { primaryLabel: "Payments", secondaryLabel: "" },
+    { primaryLabel: "Payments", secondaryLabel: 1 },
+    { primaryLabel: null, secondaryLabel: "main" },
+  ])("declines an invalid structured title %j", (result) => {
+    const plugin = installation("invalid-lines", () => null);
+    Reflect.set(plugin.agentTabTitleResolvers[0], "resolve", () => result);
+    expect(resolveAgentTabTitle([plugin], context)).toBeNull();
+  });
   it("changes only label, default tooltip, and loading state for agent and subagent tabs", () => {
     const descriptor = {
       label: "Task description",
@@ -148,6 +176,18 @@ describe("agent tab sidebar label selection", () => {
       workspaces: new Map<string, WorkspaceDescriptor>([[workspace.id, entry]]),
     };
   }
+
+  it("uses project custom name and updates independently of the workspace label", () => {
+    const cached = session();
+    expect(selectAgentTabProjectLabel({ session: cached, context })).toBe("Payments");
+    cached.workspaces.set(workspace.id, { ...workspace, projectCustomName: "결제 프로젝트" });
+    expect(selectAgentTabProjectLabel({ session: cached, context })).toBe("결제 프로젝트");
+    expect(selectAgentTabSidebarLabel({ session: cached, context, workspaceTitleSource: "title" }))
+      .toBe(workspace.name);
+    expect(selectAgentTabProjectLabel({ session: undefined, context })).toBeNull();
+    cached.agents.set(context.agentId, { workspaceId: "different-workspace" });
+    expect(selectAgentTabProjectLabel({ session: cached, context })).toBeNull();
+  });
 
   it("uses the same raw name and normalized branch fallback as the sidebar", () => {
     const cached = session("  feat/payments  ");

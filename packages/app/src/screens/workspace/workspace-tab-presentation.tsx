@@ -23,6 +23,7 @@ export interface WorkspaceTabPresentation {
   key: string;
   kind: WorkspaceTabDescriptor["kind"];
   label: string;
+  titleLines?: { primaryLabel: string; secondaryLabel: string };
   subtitle: string;
   tooltip: string;
   modified: boolean;
@@ -88,6 +89,7 @@ function WorkspaceTabPresentationResolverInner({
       key: tab.key,
       kind: tab.kind,
       label: descriptor.label,
+      titleLines: descriptor.titleLines,
       subtitle: descriptor.subtitle,
       tooltip: descriptor.tooltip,
       modified: attributes.modified,
@@ -99,6 +101,7 @@ function WorkspaceTabPresentationResolverInner({
     [
       descriptor.icon,
       descriptor.label,
+      descriptor.titleLines,
       descriptor.tooltip,
       descriptor.statusBucket,
       descriptor.subtitle,
