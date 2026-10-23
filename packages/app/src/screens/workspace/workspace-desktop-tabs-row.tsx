@@ -195,12 +195,14 @@ function TabLabelMeasurement({
   tabKey,
   label,
   titleLines,
+  isPreview,
   signature,
   onMeasure,
 }: {
   tabKey: string;
   label: string;
   titleLines?: WorkspaceTabPresentation["titleLines"];
+  isPreview: boolean;
   signature: string;
   onMeasure: (tabKey: string, label: string, event: LayoutChangeEvent) => void;
 }) {
@@ -213,6 +215,7 @@ function TabLabelMeasurement({
     <WorkspaceTabTitle
       label={label}
       titleLines={titleLines}
+      isPreview={isPreview}
       labelStyle={styles.tabLabel}
       measurement
       onLayout={handleLayout}
@@ -481,6 +484,7 @@ interface WorkspaceTabLabel {
   key: string;
   label: string;
   titleLines?: WorkspaceTabPresentation["titleLines"];
+  isPreview: boolean;
   signature: string;
   modified: boolean;
 }
@@ -715,6 +719,7 @@ function TabHandleContent({
         <WorkspaceTabTitle
           label={presentation.label}
           titleLines={resolveWorkspaceTabTitleLines(presentation)}
+          isPreview={presentation.isPreview}
           labelStyle={tabLabelStyle}
         />
       ) : null}
@@ -1140,11 +1145,13 @@ function ResolvedWorkspaceDesktopTabsRow({
             ? getFallbackTabLabel(tab.tab, fallbackTabLabels)
             : tab.presentation.label;
         const titleLines = resolveWorkspaceTabTitleLines(tab.presentation);
+        const isPreview = Boolean(tab.presentation.isPreview);
         return {
           key: tab.tab.key,
           label,
           titleLines,
-          signature: workspaceTabTitleSignature(label, titleLines),
+          isPreview,
+          signature: workspaceTabTitleSignature(label, titleLines, isPreview),
           modified: tab.presentation.modified,
         };
       }),
@@ -1370,12 +1377,13 @@ function ResolvedWorkspaceDesktopTabsRow({
         accessibilityElementsHidden
         importantForAccessibility="no-hide-descendants"
       >
-        {tabLabels.map(({ key, label, titleLines, signature }) => (
+        {tabLabels.map(({ key, label, titleLines, isPreview, signature }) => (
           <TabLabelMeasurement
             key={`${key}:${signature}`}
             tabKey={key}
             label={label}
             titleLines={titleLines}
+            isPreview={isPreview}
             signature={signature}
             onMeasure={handleTabLabelLayout}
           />

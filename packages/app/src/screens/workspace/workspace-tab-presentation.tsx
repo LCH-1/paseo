@@ -24,6 +24,7 @@ export interface WorkspaceTabPresentation {
   kind: WorkspaceTabDescriptor["kind"];
   label: string;
   titleLines?: { primaryLabel: string; secondaryLabel: string };
+  isPreview?: boolean;
   subtitle: string;
   tooltip: string;
   modified: boolean;

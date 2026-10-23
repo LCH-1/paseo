@@ -15,27 +15,31 @@ export function resolveWorkspaceTabTitleLines(
 export function workspaceTabTitleSignature(
   label: string,
   titleLines: WorkspaceTabPresentation["titleLines"],
+  isPreview = false,
 ): string {
-  return JSON.stringify([label, titleLines?.primaryLabel, titleLines?.secondaryLabel]);
+  return JSON.stringify([label, titleLines?.primaryLabel, titleLines?.secondaryLabel, isPreview]);
 }
 
 export function WorkspaceTabTitle({
   label,
   titleLines,
   labelStyle,
+  isPreview = false,
   measurement = false,
   onLayout,
 }: {
   label: string;
   titleLines?: WorkspaceTabPresentation["titleLines"];
   labelStyle: ComponentProps<typeof Text>["style"];
+  isPreview?: boolean;
   measurement?: boolean;
   onLayout?: ComponentProps<typeof View>["onLayout"];
 }) {
+  const fontStyle = isPreview ? styles.preview : styles.pinned;
   if (!titleLines) {
     return (
       <Text
-        style={[labelStyle, measurement && styles.measurement]}
+        style={[labelStyle, fontStyle, measurement && styles.measurement]}
         selectable={false}
         numberOfLines={1}
         ellipsizeMode="tail"
@@ -50,7 +54,7 @@ export function WorkspaceTabTitle({
     <View style={measurement ? styles.measurementLines : styles.lines} onLayout={onLayout}>
       <Text
         testID={measurement ? undefined : "agent-tab-title-line-primary"}
-        style={[labelStyle, styles.primary, measurement && styles.measurement]}
+        style={[labelStyle, styles.primary, fontStyle, measurement && styles.measurement]}
         selectable={false}
         numberOfLines={1}
         ellipsizeMode="tail"
@@ -59,7 +63,7 @@ export function WorkspaceTabTitle({
       </Text>
       <Text
         testID={measurement ? undefined : "agent-tab-title-line-secondary"}
-        style={[labelStyle, styles.secondary, measurement && styles.measurement]}
+        style={[labelStyle, styles.secondary, fontStyle, measurement && styles.measurement]}
         selectable={false}
         numberOfLines={1}
         ellipsizeMode="tail"
@@ -71,6 +75,12 @@ export function WorkspaceTabTitle({
 }
 
 const styles = StyleSheet.create((theme) => ({
+  preview: {
+    fontStyle: "italic",
+  },
+  pinned: {
+    fontStyle: "normal",
+  },
   lines: {
     flexShrink: 1,
     minWidth: 0,
