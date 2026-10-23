@@ -27,7 +27,7 @@ const pluginRegistry = {
   installCatalog(
     serverId: string,
     catalog: Parameters<typeof registry.installCatalog>[1],
-    options: { replacePluginId?: string } = {},
+    options: { replacePluginId?: string; replaceAll?: boolean } = {},
   ) {
     return registry.installCatalog(
       serverId,
@@ -76,6 +76,21 @@ afterEach(() => {
 });
 
 describe("PluginRegistry", () => {
+  it("refreshes every installation lifetime after an authoritative reconnect catalog", () => {
+    const catalog = [
+      { id: "first", clientBundle: bundle("one") },
+      { id: "second", clientBundle: bundle("two") },
+    ];
+    pluginRegistry.installCatalog("host-a", catalog);
+    const previous = pluginRegistry.getSnapshot();
+    pluginRegistry.installCatalog("host-a", catalog, { replaceAll: true });
+    const replacement = pluginRegistry.getSnapshot();
+    expect(replacement.map((item) => item.id)).toEqual(["first", "second"]);
+    expect(replacement[0]).not.toBe(previous[0]);
+    expect(replacement[1]).not.toBe(previous[1]);
+    expect(previous.map((item) => item.lifetime.signal.aborted)).toEqual([true, true]);
+    expect(Reflect.get(globalThis, "__pluginCleanups")).toBe(2);
+  });
   it("publishes synchronous setup once after storing the installation", () => {
     const snapshots: string[][] = [];
     const unsubscribe = pluginRegistry.subscribe(() => {

@@ -20,22 +20,21 @@ export function PluginCatalogSync({
   useEffect(() => {
     let cancelled = false;
     let refreshQueue = Promise.resolve();
+    if (!connected) {
+      return;
+    }
     if (!supported || !audio) {
       pluginRegistry.removeHost(serverId);
       return;
     }
-    if (!connected) {
-      pluginRegistry.removeHost(serverId);
-      return;
-    }
-    const refresh = (replacePluginId?: string) => {
+    const refresh = (options: { replacePluginId?: string; replaceAll?: boolean } = {}) => {
       refreshQueue = refreshQueue.then(() =>
         client
           .getPluginCatalog()
           .then((catalog) => {
             if (!cancelled) {
               pluginRegistry.installCatalog(serverId, catalog, {
-                replacePluginId,
+                ...options,
                 client,
                 audio,
               });
@@ -57,7 +56,7 @@ export function PluginCatalogSync({
     ]);
     observation.subscribe({
       snapshot: () => {
-        void refresh();
+        void refresh({ replaceAll: true });
       },
       update: (message) => {
         if (message.type !== "status") return;
@@ -72,7 +71,7 @@ export function PluginCatalogSync({
         }
         if (message.payload.status === "plugin_catalog_changed") {
           const pluginId = message.payload.pluginId;
-          if (typeof pluginId === "string") void refresh(pluginId);
+          if (typeof pluginId === "string") void refresh({ replacePluginId: pluginId });
         }
       },
     });

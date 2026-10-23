@@ -114,6 +114,7 @@ export function runPluginClientBundle(
     sidebarItems: { header: [], footer: [] },
     legacySidebarItems: [],
     workspacePanels: [],
+    agentTabTitleResolvers: [],
     commandCenterItems: [],
     clientSlashCommands: [],
     attachmentSources: [],
@@ -128,6 +129,7 @@ export function runPluginClientBundle(
     footer: new Set(),
   };
   const workspacePanelIds = new Set<string>();
+  const agentTabTitleResolverIds = new Set<string>();
   const commandCenterItemIds = new Set<string>();
   const clientSlashCommandNames = new Set<string>();
   const attachmentSourceIds = new Set<string>();
@@ -194,6 +196,35 @@ export function runPluginClientBundle(
   }
   const pluginContext: PluginClientContext = {
     ...runtime,
+    addAgentTabTitleResolver(contribution) {
+      if (stopped) throw new Error("Plugin has stopped");
+      if (typeof contribution !== "object" || contribution === null) {
+        throw new Error("addAgentTabTitleResolver takes { id, resolve }");
+      }
+      const resolverId = requireId(contribution.id, "agent tab title resolver id");
+      if (agentTabTitleResolverIds.has(resolverId)) {
+        throw new Error(`Duplicate agent tab title resolver: ${resolverId}`);
+      }
+      if (typeof contribution.resolve !== "function") {
+        throw new Error(`Agent tab title resolver ${resolverId} needs a resolve function`);
+      }
+      agentTabTitleResolverIds.add(resolverId);
+      let active = true;
+      const release = register(
+        collector.agentTabTitleResolvers,
+        { id: resolverId, resolve: contribution.resolve },
+        () => {
+          active = false;
+          agentTabTitleResolverIds.delete(resolverId);
+        },
+      );
+      return {
+        invalidate() {
+          if (active && !stopped) notifyChange();
+        },
+        remove: release,
+      };
+    },
     addSettingsScreen(contribution) {
       const screenId = requireId(contribution.id, "settings screen id");
       if (settingsScreenIds.has(screenId))
@@ -516,6 +547,7 @@ export function runPluginClientBundle(
     sidebarItems: collector.sidebarItems,
     legacySidebarItems: collector.legacySidebarItems,
     workspacePanels: collector.workspacePanels as EvaluatedPlugin["workspacePanels"],
+    agentTabTitleResolvers: collector.agentTabTitleResolvers,
     commandCenterItems: collector.commandCenterItems,
     clientSlashCommands: collector.clientSlashCommands,
     attachmentSources: collector.attachmentSources,

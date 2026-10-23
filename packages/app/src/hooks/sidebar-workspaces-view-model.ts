@@ -12,6 +12,7 @@ import { aggregateSidebarStateBuckets } from "@/utils/sidebar-agent-state";
 import { shortenPath } from "@/utils/shorten-path";
 import type { WorkspaceAgentActivity } from "@/utils/workspace-agent-activity";
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
+import { normalizeSidebarWorkspaceBranch } from "@/components/sidebar/sidebar-workspace-title";
 
 const EMPTY_PROJECTS: SidebarProjectEntry[] = [];
 
@@ -136,14 +137,6 @@ function projectNameForWorkspace(workspace: WorkspaceDescriptor): string {
   );
 }
 
-function normalizeCurrentBranch(currentBranch: string | null | undefined): string | null {
-  if (!currentBranch) {
-    return null;
-  }
-  const trimmed = currentBranch.trim();
-  return trimmed.length === 0 || trimmed === "HEAD" ? null : trimmed;
-}
-
 export function createSidebarWorkspaceEntry(input: {
   serverId: string;
   workspace: WorkspaceDescriptor;
@@ -170,7 +163,7 @@ export function createSidebarWorkspaceEntry(input: {
     title: input.workspace.title ?? null,
     pinnedAt: input.workspace.pinnedAt,
     labels: input.workspace.labels ?? EMPTY_WORKSPACE_LABELS,
-    currentBranch: normalizeCurrentBranch(input.workspace.gitRuntime?.currentBranch),
+    currentBranch: normalizeSidebarWorkspaceBranch(input.workspace.gitRuntime?.currentBranch),
     statusBucket: effectiveStatus.status,
     statusEnteredAt: effectiveStatus.enteredAt,
     archivingAt: input.workspace.archivingAt,

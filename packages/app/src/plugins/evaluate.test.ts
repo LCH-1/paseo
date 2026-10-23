@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runPluginClientBundle, type PluginClientRuntime } from "./evaluate";
 
 const runtime = {
@@ -29,6 +29,60 @@ function bundle(body: string): string {
 }
 
 describe("evaluatePluginClientBundle", () => {
+  it("invalidates and removes title registrations added after setup", async () => {
+    const onChange = vi.fn();
+    const plugin = runPluginClientBundle(
+      "titles",
+      bundle(`
+      globalThis.__titleClient = plugin;
+    `),
+      runtime,
+      onChange,
+    );
+    const client = Reflect.get(globalThis, "__titleClient");
+    const handle = client.addAgentTabTitleResolver({ id: "sync", resolve: () => "Sidebar" });
+    expect(plugin.agentTabTitleResolvers.map((item) => item.id)).toEqual(["sync"]);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    handle.invalidate();
+    expect(onChange).toHaveBeenCalledTimes(2);
+    handle.remove();
+    handle.remove();
+    handle.invalidate();
+    expect(plugin.agentTabTitleResolvers).toEqual([]);
+    expect(onChange).toHaveBeenCalledTimes(3);
+    const replacement = client.addAgentTabTitleResolver({ id: "sync", resolve: () => null });
+    await plugin.cleanup();
+    expect(plugin.agentTabTitleResolvers).toEqual([]);
+    const callsAfterCleanup = onChange.mock.calls.length;
+    replacement.invalidate();
+    replacement.remove();
+    expect(onChange).toHaveBeenCalledTimes(callsAfterCleanup);
+    expect(() => client.addAgentTabTitleResolver({ id: "late", resolve: () => null })).toThrow(
+      "Plugin has stopped",
+    );
+    Reflect.deleteProperty(globalThis, "__titleClient");
+  });
+
+  it("rejects duplicate title resolver IDs and invalid resolver functions", () => {
+    expect(() =>
+      evaluatePluginClientBundle(
+        "duplicate-titles",
+        bundle(`
+      plugin.addAgentTabTitleResolver({ id: "sync", resolve: () => null });
+      plugin.addAgentTabTitleResolver({ id: "sync", resolve: () => null });
+    `),
+      ),
+    ).toThrow("Duplicate agent tab title resolver: sync");
+    expect(() =>
+      evaluatePluginClientBundle(
+        "invalid-titles",
+        bundle(`
+      plugin.addAgentTabTitleResolver({ id: "sync", resolve: "Sidebar" });
+    `),
+      ),
+    ).toThrow("Agent tab title resolver sync needs a resolve function");
+  });
+
   it("releases button registrations when client setup throws", () => {
     let active = 0;
     function addButton() {

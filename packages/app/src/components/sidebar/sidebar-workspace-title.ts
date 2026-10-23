@@ -3,12 +3,20 @@ import type { SidebarWorkspaceEntry } from "@/hooks/use-sidebar-workspaces-list"
 import type { WorkspaceTitleSource } from "@/hooks/use-settings";
 import { getStatusBucketLabel } from "@/hooks/sidebar-status-view-model";
 
+export function normalizeSidebarWorkspaceBranch(
+  currentBranch: string | null | undefined,
+): string | null {
+  if (!currentBranch) return null;
+  const trimmed = currentBranch.trim();
+  return trimmed.length === 0 || trimmed === "HEAD" ? null : trimmed;
+}
+
 export function resolveSidebarWorkspacePrimaryLabel(input: {
   workspace: Pick<SidebarWorkspaceEntry, "name" | "currentBranch">;
   workspaceTitleSource: WorkspaceTitleSource;
 }): string {
   if (input.workspaceTitleSource === "branch") {
-    return input.workspace.currentBranch ?? input.workspace.name;
+    return normalizeSidebarWorkspaceBranch(input.workspace.currentBranch) ?? input.workspace.name;
   }
   return input.workspace.name;
 }

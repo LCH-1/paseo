@@ -65,6 +65,8 @@ import { PaneSubtitle } from "@/panels/pane-subtitle";
 import { definePanel, type PanelDescriptor } from "@/panels/panel-registry";
 import { RenderProfile } from "@/utils/render-profiler";
 import { useHasPluginComposerPills } from "@/plugins";
+import { useAgentTabTitle } from "@/plugins/agent-tab-titles/use-title";
+import { applyAgentTabTitle } from "@/plugins/agent-tab-titles/resolve";
 import { buildDraftPanelDescriptor } from "@/panels/draft-panel-descriptor";
 import {
   type HostRuntimeConnectionStatus,
@@ -330,7 +332,7 @@ function storeFetchedAgentDetail(input: {
 
 function useAgentPanelDescriptor(
   target: { kind: "agent"; agentId: string },
-  context: { serverId: string },
+  context: { serverId: string; workspaceId: string },
 ): PanelDescriptor {
   const descriptorState = useSessionStore(
     useShallow((state) => {
@@ -349,24 +351,33 @@ function useAgentPanelDescriptor(
     }),
   );
   const provider = descriptorState.provider;
-  const label = resolveWorkspaceAgentTabLabel(descriptorState.title);
+  const defaultLabel = resolveWorkspaceAgentTabLabel(descriptorState.title);
+  const resolvedLabel = useAgentTabTitle({
+    serverId: context.serverId,
+    workspaceId: context.workspaceId,
+    agentId: target.agentId,
+    defaultLabel: defaultLabel ?? "",
+  });
   const icon = useProviderIcon(provider, context.serverId);
 
-  return {
-    label: label ?? "",
-    subtitle: `${formatProviderLabel(provider)} agent`,
-    tooltip: label ?? `${formatProviderLabel(provider)} agent`,
-    titleState: label ? "ready" : "loading",
-    icon,
-    statusBucket: descriptorState.status
-      ? deriveSidebarStateBucket({
-          status: descriptorState.isTurnActive ? "running" : descriptorState.status,
-          pendingPermissionCount: descriptorState.pendingPermissionCount,
-          requiresAttention: descriptorState.requiresAttention,
-          attentionReason: descriptorState.attentionReason,
-        })
-      : null,
-  };
+  return applyAgentTabTitle(
+    {
+      label: defaultLabel ?? "",
+      subtitle: `${formatProviderLabel(provider)} agent`,
+      tooltip: defaultLabel ?? `${formatProviderLabel(provider)} agent`,
+      titleState: defaultLabel ? "ready" : "loading",
+      icon,
+      statusBucket: descriptorState.status
+        ? deriveSidebarStateBucket({
+            status: descriptorState.isTurnActive ? "running" : descriptorState.status,
+            pendingPermissionCount: descriptorState.pendingPermissionCount,
+            requiresAttention: descriptorState.requiresAttention,
+            attentionReason: descriptorState.attentionReason,
+          })
+        : null,
+    },
+    resolvedLabel,
+  );
 }
 
 function AgentPanel() {

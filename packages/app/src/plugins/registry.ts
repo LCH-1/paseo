@@ -41,6 +41,7 @@ export class PluginRegistry {
     catalog: CatalogPlugin[],
     options: {
       replacePluginId?: string;
+      replaceAll?: boolean;
       client: DaemonClient;
       audio: Pick<AudioEngine, "play">;
     },
@@ -52,6 +53,7 @@ export class PluginRegistry {
     const preserved = catalog.flatMap((entry) => {
       const existing = previous.find(
         (plugin) =>
+          !options.replaceAll &&
           plugin.id !== options.replacePluginId &&
           plugin.id === entry.id &&
           plugin.clientBundle === entry.clientBundle &&
@@ -94,6 +96,7 @@ export class PluginRegistry {
           sidebarItems: { header: [], footer: [] },
           legacySidebarItems: [],
           workspacePanels: [],
+          agentTabTitleResolvers: [],
           commandCenterItems: [],
           clientSlashCommands: [],
           attachmentSources: [],

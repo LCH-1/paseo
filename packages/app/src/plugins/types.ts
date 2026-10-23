@@ -7,6 +7,7 @@ import type {
   PluginThemeContribution,
 } from "@getpaseo/plugin";
 import type {
+  PluginAgentTabTitleResolverContribution,
   PluginCommandCenterItemContribution,
   PluginClientSlashCommandContribution,
   PluginComposerPillContribution,
@@ -36,6 +37,7 @@ export interface EvaluatedPlugin {
   /** `addSidebarItem` registrations, so `/plugin/<id>/sidebar/<item>` routes keep resolving. */
   legacySidebarItems: PluginSidebarContribution[];
   workspacePanels: EvaluatedPluginWorkspacePanelContribution[];
+  agentTabTitleResolvers: PluginAgentTabTitleResolverContribution[];
   commandCenterItems: PluginCommandCenterItemContribution[];
   clientSlashCommands: PluginClientSlashCommandContribution[];
   attachmentSources: PluginAttachmentSourceContribution[];

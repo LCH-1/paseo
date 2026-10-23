@@ -122,6 +122,25 @@ export interface PluginClientOpenPanelOptions extends PluginOpenPanelOptions {
   agentId?: string;
 }
 
+export interface PluginAgentTabTitleContext {
+  readonly serverId: string;
+  readonly workspaceId: string;
+  readonly agentId: string;
+  readonly subagentId?: string;
+  readonly defaultLabel: string;
+  readonly sidebarLabel: string | null;
+}
+
+export interface PluginAgentTabTitleResolverContribution {
+  id: string;
+  resolve(context: PluginAgentTabTitleContext): string | null;
+}
+
+export interface PluginAgentTabTitleResolverRegistration {
+  invalidate(): void;
+  remove(): void;
+}
+
 // COMPAT(pluginSidebarAliases): added in v0.11.0, remove after 2027-03-29
 interface PluginClientContextAliases {
   /** @deprecated Use `addScreen`. */
@@ -138,6 +157,9 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
   addSidebarHeaderItem(contribution: PluginSidebarItemContribution): PluginCleanup;
   addSidebarFooterItem(contribution: PluginSidebarItemContribution): PluginCleanup;
   addWorkspacePanel(contribution: PluginWorkspacePanelContribution): PluginCleanup;
+  addAgentTabTitleResolver(
+    contribution: PluginAgentTabTitleResolverContribution,
+  ): PluginAgentTabTitleResolverRegistration;
   addCommandCenterItem(contribution: PluginCommandCenterItemContribution): PluginCleanup;
   addSlashCommand(contribution: PluginClientSlashCommandContribution): PluginCleanup;
   addHeaderButton(contribution: PluginHeaderButtonContribution): PluginButtonRegistration;

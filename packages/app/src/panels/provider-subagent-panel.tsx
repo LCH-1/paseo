@@ -33,6 +33,8 @@ import { deriveSidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { TIMELINE_FETCH_PAGE_SIZE } from "@/timeline/timeline-fetch-policy";
 import type { TurnPresentation } from "@/timeline/turn-liveness";
 import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
+import { useAgentTabTitle } from "@/plugins/agent-tab-titles/use-title";
+import { applyAgentTabTitle } from "@/plugins/agent-tab-titles/resolve";
 
 const EMPTY_PERMISSIONS = new Map<string, PendingPermission>();
 const EMPTY_STREAM_ITEMS: StreamItem[] = [];
@@ -82,7 +84,7 @@ function formatProviderLabel(provider: string): string {
 
 function useProviderSubagentDescriptor(
   target: { kind: "provider_subagent"; parentAgentId: string; subagentId: string },
-  context: { serverId: string },
+  context: { serverId: string; workspaceId: string },
 ): PanelDescriptor {
   const descriptor = useProviderSubagentStore((state) =>
     state.descriptors.get(
@@ -96,21 +98,33 @@ function useProviderSubagentDescriptor(
   // The task names the tab; the subagent type is supporting detail beside the provider.
   const subagentType = descriptor?.title?.trim();
   const label = descriptor?.description?.trim() || subagentType || "Subagent";
+  const resolvedLabel = useAgentTabTitle({
+    serverId: context.serverId,
+    workspaceId: context.workspaceId,
+    agentId: target.parentAgentId,
+    subagentId: target.subagentId,
+    defaultLabel: label,
+  });
   const providerLabel = `${formatProviderLabel(provider)} subagent`;
-  return {
-    label,
-    subtitle:
-      subagentType && subagentType !== label ? `${subagentType} · ${providerLabel}` : providerLabel,
-    tooltip: label,
-    titleState: descriptor ? "ready" : "loading",
-    icon: useProviderIcon(provider, context.serverId),
-    statusBucket: descriptor
-      ? deriveSidebarStateBucket({
-          status: providerSubagentLifecycleStatus(descriptor.status),
-          requiresAttention: descriptor.status === "failed",
-        })
-      : null,
-  };
+  return applyAgentTabTitle(
+    {
+      label,
+      subtitle:
+        subagentType && subagentType !== label
+          ? `${subagentType} · ${providerLabel}`
+          : providerLabel,
+      tooltip: label,
+      titleState: descriptor ? "ready" : "loading",
+      icon: useProviderIcon(provider, context.serverId),
+      statusBucket: descriptor
+        ? deriveSidebarStateBucket({
+            status: providerSubagentLifecycleStatus(descriptor.status),
+            requiresAttention: descriptor.status === "failed",
+          })
+        : null,
+    },
+    resolvedLabel,
+  );
 }
 
 function ProviderSubagentPanel() {
