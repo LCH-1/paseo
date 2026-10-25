@@ -1,6 +1,7 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { within } from "@testing-library/dom";
+import { userEvent } from "@vitest/browser/context";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18n as testI18n } from "@/i18n/i18next";
@@ -84,7 +85,7 @@ function mountCard(question: Record<string, unknown>) {
     if (!response || response.behavior !== "allow") throw new Error("card did not submit");
     return (response.updatedInput as { answers: Record<string, string> }).answers;
   };
-  return { check, type, otherInput, submit, submittedAnswers };
+  return { check, type, otherInput, submit, submittedAnswers, container, onRespond };
 }
 
 const multiSelectQuestion = {
@@ -104,6 +105,39 @@ const singleSelectQuestion = {
 };
 
 describe("QuestionFormCard other answers", () => {
+  it("selects and copies Korean instructions and a URL inside an unselectable panel", async () => {
+    const question = "로그인 안내: https://example.test/callback?code=123&state=abc";
+    const card = mountCard({ question, header: "Login", options: [] });
+    card.container.style.userSelect = "none";
+    card.container.style.width = "900px";
+    card.container.style.maxWidth = "100%";
+    const instruction = within(card.container).getByTestId("question-form-current-question");
+    const pasteTarget = document.createElement("textarea");
+    pasteTarget.setAttribute("aria-label", "Clipboard verification");
+    pasteTarget.style.color = "transparent";
+    pasteTarget.style.caretColor = "transparent";
+    card.container.appendChild(pasteTarget);
+    let trustedCopy = false;
+    let trustedPaste = false;
+    card.container.addEventListener("copy", (event) => {
+      trustedCopy = event.isTrusted;
+    });
+    pasteTarget.addEventListener("paste", (event) => {
+      trustedPaste = event.isTrusted;
+    });
+
+    await userEvent.tripleClick(instruction, { position: { x: 4, y: 11 } });
+    await expect.poll(() => window.getSelection()?.toString() === question).toBe(true);
+    await userEvent.copy();
+    expect(trustedCopy).toBe(true);
+    await userEvent.click(pasteTarget);
+    await userEvent.paste();
+
+    expect(trustedPaste).toBe(true);
+    await expect.poll(() => pasteTarget.value === question).toBe(true);
+    expect(card.onRespond).not.toHaveBeenCalled();
+  });
+
   it("keeps checked options when the other answer is typed afterwards (multi-select)", () => {
     const card = mountCard(multiSelectQuestion);
 

@@ -570,7 +570,7 @@ export function QuestionFormCard({
         onSelect={handleSelectQuestion}
       />
       <View style={styles.questionHeader}>
-        <Text testID="question-form-current-question" style={questionTextStyle}>
+        <Text selectable testID="question-form-current-question" style={questionTextStyle}>
           {activeQuestion?.question}
         </Text>
       </View>
