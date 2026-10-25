@@ -5,7 +5,17 @@ import type {
 import type { AgentSnapshotPayload, CreationSnapshot } from "@getpaseo/protocol/messages";
 import { encodeImages } from "@/utils/encode-images";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createNewWorkspaceDraftState,
+  useNewWorkspaceDraftState,
+} from "@/workspace-tabs/new-workspace-draft-state";
+import {
+  completeNewWorkspaceLaunch,
+  completeNewWorkspaceTab,
+  NewWorkspaceTabsBar,
+  updateNewWorkspaceTabServer,
+} from "@/workspace-tabs/new-workspace-tabs";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { router } from "expo-router";
@@ -119,6 +129,28 @@ import {
 import { captureWorkspaceDraftCleanup } from "./new-workspace/background-handoff";
 import { useNewWorkspaceScreenPresence } from "./new-workspace/screen-presence";
 
+interface RetainedHostSelection {
+  routeServerId: string;
+  serverId: string;
+}
+
+const retainedIsolation = createNewWorkspaceDraftState<"local" | "worktree" | null>();
+const retainedAutomaticHost = createNewWorkspaceDraftState<RetainedHostSelection>();
+const retainedManualHost = createNewWorkspaceDraftState<RetainedHostSelection | null>();
+const retainedCreationIdentity = createNewWorkspaceDraftState<{
+  draftId: string;
+  worktreeSlug: string;
+}>();
+const retainedCreationResult = createNewWorkspaceDraftState<
+  WorkspaceCreationResult | { workspace: null }
+>();
+const retainedError = createNewWorkspaceDraftState<string | null>();
+const retainedPendingAction = createNewWorkspaceDraftState<"chat" | "empty" | "terminal" | null>();
+const retainedLaunchTarget = createNewWorkspaceDraftState<LaunchTarget | null>();
+const retainedTerminalPrompt = createNewWorkspaceDraftState<string>();
+const retainedPickerSelection =
+  createNewWorkspaceDraftState<ReturnType<typeof reducePickerSelection>>();
+
 function useIsNewWorkspaceDraftHandoffActive(input: {
   draftId: string | undefined;
   selectedServerId: string;
@@ -201,7 +233,10 @@ function useWorkspaceIsolation(input: {
   // form preferences (provider, model, mode). A manual in-screen pick overrides
   // the remembered default until the screen remounts.
   const { preferences, updatePreferences } = useFormPreferences();
-  const [manualIsolation, setManualIsolation] = useState<"local" | "worktree" | null>(null);
+  const [manualIsolation, setManualIsolation] = useNewWorkspaceDraftState(
+    retainedIsolation,
+    () => null,
+  );
   const isolation = manualIsolation ?? preferences.isolation ?? "local";
   const canCreateWorktree = supportsMultiplicity && worktreeSupport !== "unsupported";
   const isWorktree = isolation === "worktree" && canCreateWorktree;
@@ -211,7 +246,7 @@ function useWorkspaceIsolation(input: {
       setManualIsolation(value);
       void updatePreferences({ isolation: value });
     },
-    [updatePreferences],
+    [updatePreferences, setManualIsolation],
   );
 
   return {
@@ -446,6 +481,7 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
   });
   const images = await encodeImages(wirePayload.images);
   let navigated = false;
+  let createdWorkspaceId: string | null = null;
   let outcome: SubmitOutcome = "background";
   const initialAgent: NonNullable<CreateWorkspaceRequestOptions["agent"]> = {
     config: {
@@ -462,7 +498,7 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
     attachments: wirePayload.attachments?.length ? wirePayload.attachments : undefined,
   };
   const execute = async (requestedAgent = initialAgent): Promise<AgentSnapshotPayload> => {
-    const { agent } = await ensureWorkspace({
+    const { workspace: createdWorkspace, agent } = await ensureWorkspace({
       cwd,
       prompt: text,
       attachments: workspaceNamingAttachments,
@@ -473,6 +509,7 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
         navigated = true;
         if (!input.isStillOnCreateScreen()) return;
         const workspace = normalizeWorkspaceDescriptor(snapshot.workspace);
+        createdWorkspaceId = workspace.id;
         getHostRuntimeStore().acceptWorkspaceSnapshots(serverId, [
           { ...workspace, status: "running" },
         ]);
@@ -503,6 +540,7 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
         });
       },
     });
+    createdWorkspaceId = createdWorkspace.id;
     if (!agent) throw new Error("Workspace creation returned no agent");
     return agent;
   };
@@ -518,7 +556,15 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
         attachments: request.attachments,
       }),
   };
-  await agentCreation.result;
+  const createdAgent = await agentCreation.result;
+  if (input.draftId && createdWorkspaceId) {
+    completeNewWorkspaceTab({
+      draftId: input.draftId,
+      serverId,
+      workspaceId: createdWorkspaceId,
+      target: { kind: "agent", agentId: createdAgent.id },
+    });
+  }
   if (outcome === "background") clearConsumedDraft();
   return outcome;
 }
@@ -640,6 +686,7 @@ function submitWorkspaceDraft(input: SubmitDraftInput): SubmitOutcome {
     agentCreation: input.agentCreation,
   });
   clearDraft("sent");
+  completeNewWorkspaceTab({ draftId, serverId, workspaceId, target: submission.target });
   navigateToWorkspace({
     serverId,
     workspaceId,
@@ -676,14 +723,17 @@ function useNewWorkspaceHostSelector(input: {
       input.workspaceMultiplicityByServerId,
     ],
   );
-  const [automaticSelection, setAutomaticSelection] = useState(() => ({
-    routeServerId,
-    serverId: defaultServerId,
-  }));
-  const [manualSelection, setManualSelection] = useState<{
-    routeServerId: string;
-    serverId: string;
-  } | null>(null);
+  const [automaticSelection, setAutomaticSelection] = useNewWorkspaceDraftState(
+    retainedAutomaticHost,
+    () => ({
+      routeServerId,
+      serverId: defaultServerId,
+    }),
+  );
+  const [manualSelection, setManualSelection] = useNewWorkspaceDraftState(
+    retainedManualHost,
+    () => null,
+  );
   const [hostPickerOpen, setHostPickerOpen] = useState(false);
 
   useEffect(() => {
@@ -717,6 +767,7 @@ function useNewWorkspaceHostSelector(input: {
     input.projects,
     input.workspaceMultiplicityByServerId,
     routeServerId,
+    setAutomaticSelection,
   ]);
 
   const automaticServerId =
@@ -735,7 +786,7 @@ function useNewWorkspaceHostSelector(input: {
       setManualSelection({ routeServerId, serverId: id });
       setHostPickerOpen(false);
     },
-    [routeServerId],
+    [routeServerId, setManualSelection],
   );
 
   const handleHostPickerOpenChange = useCallback((open: boolean) => {
@@ -882,18 +933,25 @@ export function NewWorkspaceScreen({
     projectId,
     displayName: displayNameProp,
   });
+  useEffect(() => {
+    if (draftId) updateNewWorkspaceTabServer(draftId, selectedServerId);
+  }, [draftId, selectedServerId]);
   // COMPAT(workspaceMultiplicity): added in v0.1.97, drop the gate when floor >= v0.1.97
   const supportsWorkspaceMultiplicity = useHostFeature(selectedServerId, "workspaceMultiplicity");
   const supportsForgeSearch = useHostFeature(selectedServerId, "forgeSearch");
-  const [creationIdentity] = useState(() => ({
+  const [creationIdentity] = useNewWorkspaceDraftState(retainedCreationIdentity, () => ({
     draftId: draftId ?? generateDraftId(),
     worktreeSlug: createNameId(),
   }));
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [creationResult, setCreationResult] = useState<
-    WorkspaceCreationResult | { workspace: null }
-  >({ workspace: null });
-  const [pendingAction, setPendingAction] = useState<"chat" | "empty" | "terminal" | null>(null);
+  const [errorMessage, setErrorMessage] = useNewWorkspaceDraftState(retainedError, () => null);
+  const [creationResult, setCreationResult] = useNewWorkspaceDraftState(
+    retainedCreationResult,
+    () => ({ workspace: null }),
+  );
+  const [pendingAction, setPendingAction] = useNewWorkspaceDraftState(
+    retainedPendingAction,
+    () => null,
+  );
   const [pickerOpen, setPickerOpen] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const openAddProjectPicker = useOpenAddProject();
@@ -923,12 +981,18 @@ export function NewWorkspaceScreen({
   // reads live from preferences so the async load can't race a frozen
   // initializer. Both go through `resolveLaunchTarget`, so a profile deleted
   // daemon-side falls back to chat rather than leaving a dead selection.
-  const [manualLaunchTarget, setManualLaunchTarget] = useState<LaunchTarget | null>(null);
+  const [manualLaunchTarget, setManualLaunchTarget] = useNewWorkspaceDraftState(
+    retainedLaunchTarget,
+    () => null,
+  );
   const launchTarget = useMemo(
     () => resolveLaunchTarget(manualLaunchTarget ?? formPreferences.launchTarget, terminalProfiles),
     [manualLaunchTarget, formPreferences.launchTarget, terminalProfiles],
   );
-  const [terminalPromptText, setTerminalPromptText] = useState("");
+  const [terminalPromptText, setTerminalPromptText] = useNewWorkspaceDraftState(
+    retainedTerminalPrompt,
+    () => "",
+  );
   const {
     isTerminalLaunch,
     selectedTerminalProfile,
@@ -1000,22 +1064,31 @@ export function NewWorkspaceScreen({
     }),
   });
   const composerState = chatDraft.composerState;
-  const [pickerSelection, dispatchPickerSelection] = useReducer(
-    reducePickerSelection,
-    initialPickerSelectionState,
+  const [pickerSelection, setPickerSelection] = useNewWorkspaceDraftState(
+    retainedPickerSelection,
+    () => initialPickerSelectionState,
+  );
+  const dispatchPickerSelection = useCallback(
+    (action: Parameters<typeof reducePickerSelection>[1]) => {
+      setPickerSelection((current) => reducePickerSelection(current, action));
+    },
+    [setPickerSelection],
   );
   const selectedItem = pickerSelection.selectedItem;
 
   const handleForgeChangeRequestDetected = useCallback(() => {
     dispatchPickerSelection({ type: "pr-detected" });
-  }, []);
+  }, [dispatchPickerSelection]);
 
-  const handleForgeChangeRequestAutoAttach = useCallback((item: ForgeSearchItem) => {
-    dispatchPickerSelection({
-      type: "pr-added",
-      item: { kind: "github-pr", item },
-    });
-  }, []);
+  const handleForgeChangeRequestAutoAttach = useCallback(
+    (item: ForgeSearchItem) => {
+      dispatchPickerSelection({
+        type: "pr-added",
+        item: { kind: "github-pr", item },
+      });
+    },
+    [dispatchPickerSelection],
+  );
 
   const withConnectedClient = useCallback(() => {
     const connectedClient = getHostRuntimeStore().getClient(selectedServerId);
@@ -1115,7 +1188,7 @@ export function NewWorkspaceScreen({
       chatDraft.setAttachments(nextAttachments);
       setPickerOpen(false);
     },
-    [chatDraft],
+    [chatDraft, dispatchPickerSelection],
   );
 
   const handleSelectOption = useCallback(
@@ -1138,7 +1211,7 @@ export function NewWorkspaceScreen({
       chatDraft.setAttachments(nextAttachments);
       dispatchPickerSelection({ type: "target-changed" });
     },
-    [chatDraft],
+    [chatDraft, dispatchPickerSelection],
   );
 
   const handleSelectProjectOption = useCallback(
@@ -1283,6 +1356,7 @@ export function NewWorkspaceScreen({
       supportsWorkspaceMultiplicity,
       t,
       withConnectedClient,
+      setCreationResult,
     ],
   );
 
@@ -1300,12 +1374,22 @@ export function NewWorkspaceScreen({
             ensureWorkspace: async (request) => (await ensureWorkspace(request)).workspace,
             serverId: selectedServerId,
             navigate: (targetServerId, workspaceId) => {
-              if (!isStillOnCreateScreen()) {
-                return;
-              }
-              outcome = "navigated";
-              leaveFullscreen();
-              navigateToWorkspace({ serverId: targetServerId, workspaceId });
+              completeNewWorkspaceLaunch(
+                {
+                  draftId: creationIdentity.draftId,
+                  serverId: targetServerId,
+                  workspaceId,
+                  target: null,
+                },
+                {
+                  isCurrent: isStillOnCreateScreen,
+                  navigate: () => {
+                    outcome = "navigated";
+                    leaveFullscreen();
+                    navigateToWorkspace({ serverId: targetServerId, workspaceId });
+                  },
+                },
+              );
             },
           });
           // Nothing navigated, so this screen may still be mounted under another route. Release
@@ -1362,6 +1446,8 @@ export function NewWorkspaceScreen({
       toast,
       updateFormPreferences,
       withConnectedClient,
+      setPendingAction,
+      setErrorMessage,
     ],
   );
 
@@ -1408,12 +1494,22 @@ export function NewWorkspaceScreen({
         // navigation costs nothing: it is standalone, and `reconcileTabs` auto-opens standalone
         // terminals when the workspace is next visited.
         navigate: (targetServerId, workspaceId, target) => {
-          if (!isStillOnCreateScreen()) {
-            return;
-          }
-          outcome = "navigated";
-          leaveFullscreen();
-          navigateToWorkspace({ serverId: targetServerId, workspaceId, target });
+          completeNewWorkspaceLaunch(
+            {
+              draftId: creationIdentity.draftId,
+              serverId: targetServerId,
+              workspaceId,
+              target,
+            },
+            {
+              isCurrent: isStillOnCreateScreen,
+              navigate: () => {
+                outcome = "navigated";
+                leaveFullscreen();
+                navigateToWorkspace({ serverId: targetServerId, workspaceId, target });
+              },
+            },
+          );
         },
       });
       if (outcome === "background") {
@@ -1439,6 +1535,9 @@ export function NewWorkspaceScreen({
     leaveFullscreen,
     updateFormPreferences,
     withConnectedClient,
+    creationIdentity.draftId,
+    setPendingAction,
+    setErrorMessage,
   ]);
 
   const agentControlsWithDisabled = useMemo(
@@ -1657,7 +1756,10 @@ function NewWorkspaceLayout({
   return (
     <>
       {fullscreen ? null : (
-        <MenuHeader borderless rightContent={isCompact ? importSessionButton : undefined} />
+        <>
+          <MenuHeader borderless rightContent={isCompact ? importSessionButton : undefined} />
+          {isCompact ? null : <NewWorkspaceTabsBar />}
+        </>
       )}
       <View style={styles.content}>
         <TitlebarDragRegion />

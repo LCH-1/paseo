@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import {
+  createNewWorkspaceDraftState,
+  useNewWorkspaceDraftState,
+} from "@/workspace-tabs/new-workspace-draft-state";
 import type { AgentProviderDefinition } from "@getpaseo/protocol/provider-manifest";
 import type {
   AgentMode,
@@ -145,6 +149,9 @@ async function persistProviderPreferences(input: {
   );
 }
 
+const retainedNewWorkspaceForm =
+  createNewWorkspaceDraftState<ReturnType<typeof resolveAgentForm>>();
+
 export function useAgentFormState(options: UseAgentFormStateOptions): UseAgentFormStateResult {
   const { serverId, initialValues, workingDir, isVisible = true, isCreateFlow = true } = options;
 
@@ -172,11 +179,21 @@ export function useAgentFormState(options: UseAgentFormStateOptions): UseAgentFo
     [updatePreferences],
   );
 
-  const [{ form: formState, userModified, resolution }, dispatch] = useReducer(resolveAgentForm, {
-    form: { provider: null, modeId: "", model: "", thinkingOptionId: "" },
-    userModified: INITIAL_USER_MODIFIED,
-    resolution: INITIAL_AGENT_FORM_RESOLUTION,
-  });
+  const [retainedFormState, setRetainedFormState] = useNewWorkspaceDraftState(
+    retainedNewWorkspaceForm,
+    () => ({
+      form: { provider: null, modeId: "", model: "", thinkingOptionId: "" },
+      userModified: INITIAL_USER_MODIFIED,
+      resolution: INITIAL_AGENT_FORM_RESOLUTION,
+    }),
+  );
+  const { form: formState, userModified, resolution } = retainedFormState;
+  const dispatch = useCallback(
+    (action: Parameters<typeof resolveAgentForm>[1]) => {
+      setRetainedFormState((current) => resolveAgentForm(current, action));
+    },
+    [setRetainedFormState],
+  );
 
   const {
     entries: snapshotEntries,
@@ -277,6 +294,7 @@ export function useAgentFormState(options: UseAgentFormStateOptions): UseAgentFo
     preferences,
     snapshotProviderModelsByProvider,
     snapshotResolvableProviderDefinitionMap,
+    dispatch,
   ]);
 
   const setProviderAndModelFromUser = useCallback(
@@ -308,12 +326,12 @@ export function useAgentFormState(options: UseAgentFormStateOptions): UseAgentFo
         }),
       );
     },
-    [allProviderModels, selectableProviderDefinitionMap, updateCurrentPreferences],
+    [allProviderModels, selectableProviderDefinitionMap, updateCurrentPreferences, dispatch],
   );
 
   const clearProviderSelectionFromUser = useCallback(() => {
     dispatch({ type: "CLEAR_PROVIDER_SELECTION_FROM_USER" });
-  }, []);
+  }, [dispatch]);
 
   const applyProfileFromUser = useCallback(
     (profile: MaterializedAgentProfile) => {
@@ -366,6 +384,7 @@ export function useAgentFormState(options: UseAgentFormStateOptions): UseAgentFo
       selectableProviderDefinitionMap,
       updateCurrentPreferences,
       userModified,
+      dispatch,
     ],
   );
 
@@ -385,7 +404,7 @@ export function useAgentFormState(options: UseAgentFormStateOptions): UseAgentFo
         );
       }
     },
-    [formState.provider, updateCurrentPreferences],
+    [formState.provider, updateCurrentPreferences, dispatch],
   );
 
   const setModelFromUser = useCallback(
@@ -414,7 +433,7 @@ export function useAgentFormState(options: UseAgentFormStateOptions): UseAgentFo
         );
       }
     },
-    [availableModels, formState.provider, updateCurrentPreferences],
+    [availableModels, formState.provider, updateCurrentPreferences, dispatch],
   );
 
   const setThinkingOptionFromUser = useCallback(
@@ -435,7 +454,7 @@ export function useAgentFormState(options: UseAgentFormStateOptions): UseAgentFo
         );
       }
     },
-    [formState, updateCurrentPreferences],
+    [formState, updateCurrentPreferences, dispatch],
   );
 
   const refreshProviderModels = useCallback(

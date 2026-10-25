@@ -38,6 +38,7 @@ export type WorkspaceTabLaunchDestination =
   | { kind: "replace"; tabId: string };
 
 export interface NewTabLauncher {
+  creationOnly?: boolean;
   showChanges: boolean;
   showPullRequest: boolean;
   showBrowser: boolean;
@@ -197,6 +198,9 @@ export function useWorkspaceTabLaunchCatalog(input: {
       const item = builtIns[id];
       return item.hidden || !panelSupportsHost(item.panelKind, host) ? [] : [item];
     });
+    if (launcher.creationOnly) {
+      return [{ id: "tabs", label: null, items: [builtIns.agent] }];
+    }
 
     const pluginItems: WorkspaceTabLaunchItem[] = [];
     for (const plugin of plugins) {

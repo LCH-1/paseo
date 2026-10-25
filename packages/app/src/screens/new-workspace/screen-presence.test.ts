@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+vi.mock("@/workspace-tabs/new-workspace-tabs", () => ({
+  newWorkspaceTabsBridge: { getSnapshot: () => ({ activeDraftId: null }) },
+}));
 import { isNewWorkspaceScreenActive } from "./screen-presence";
 
 describe("isNewWorkspaceScreenActive", () => {

@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
+import {
+  createNewWorkspaceDraftState,
+  useNewWorkspaceDraftState,
+} from "@/workspace-tabs/new-workspace-draft-state";
 import type { ComboboxOption as ComboboxOptionType } from "@/components/ui/combobox";
 import { isWorkspaceArchivePending } from "@/contexts/session-workspace-upserts";
 import {
@@ -19,6 +23,7 @@ import {
 } from "./project-selection";
 
 const PROJECT_OPTION_PREFIX = "project:";
+const retainedProjectSelection = createNewWorkspaceDraftState<ProjectSelection>();
 
 interface NewWorkspaceProjectPickerInput {
   selectedServerId: string;
@@ -149,13 +154,14 @@ export function useNewWorkspaceProjectPicker({
       shouldPreserveMissingProject,
     ],
   );
-  const [projectSelection, setProjectSelection] = useState<ProjectSelection>(() =>
-    createProjectSelection(selectionContext),
+  const [projectSelection, setProjectSelection] = useNewWorkspaceDraftState(
+    retainedProjectSelection,
+    () => createProjectSelection(selectionContext),
   );
 
   useEffect(() => {
     setProjectSelection((current) => reconcileProjectSelection(current, selectionContext));
-  }, [selectionContext]);
+  }, [selectionContext, setProjectSelection]);
 
   const activeSelection = reconcileProjectSelection(projectSelection, selectionContext);
   const selectedProject = resolveProjectSelection(activeSelection, selectionContext);
@@ -179,7 +185,7 @@ export function useNewWorkspaceProjectPicker({
         source: "manual",
       });
     },
-    [allowAllProjects, manualSelectionContextKey, projectByOptionId],
+    [allowAllProjects, manualSelectionContextKey, projectByOptionId, setProjectSelection],
   );
 
   return {

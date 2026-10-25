@@ -1,5 +1,7 @@
 import { usePathname } from "expo-router";
 import { useCallback, useEffect, useRef } from "react";
+import { useNewWorkspaceDraftId } from "@/workspace-tabs/new-workspace-draft-state";
+import { newWorkspaceTabsBridge } from "@/workspace-tabs/new-workspace-tabs";
 
 const NEW_WORKSPACE_PATHNAME = "/new";
 
@@ -18,6 +20,7 @@ export function isNewWorkspaceScreenActive(input: NewWorkspaceScreenPresence): b
 }
 
 export function useNewWorkspaceScreenPresence(): () => boolean {
+  const draftId = useNewWorkspaceDraftId();
   const pathname = usePathname();
   const pathnameRef = useRef(pathname);
   pathnameRef.current = pathname;
@@ -32,10 +35,11 @@ export function useNewWorkspaceScreenPresence(): () => boolean {
 
   return useCallback(
     () =>
+      (!draftId || newWorkspaceTabsBridge.getSnapshot().activeDraftId === draftId) &&
       isNewWorkspaceScreenActive({
         isMounted: isMountedRef.current,
         pathname: pathnameRef.current,
       }),
-    [],
+    [draftId],
   );
 }

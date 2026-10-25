@@ -528,6 +528,7 @@ function sameWidths(left: number[], right: number[]): boolean {
 }
 
 export interface WorkspaceDesktopTabsRowProps {
+  globalDraftContext?: boolean;
   host?: PaneHost;
   launchPurpose?: WorkspaceTabLaunchPurpose;
   paneId?: string;
@@ -1030,6 +1031,7 @@ export function WorkspaceDesktopTabsRow(props: WorkspaceDesktopTabsRowProps) {
 }
 
 function ResolvedWorkspaceDesktopTabsRow({
+  globalDraftContext = false,
   host = "main",
   launchPurpose = "primary",
   paneId,
@@ -1229,7 +1231,9 @@ function ResolvedWorkspaceDesktopTabsRow({
     );
     return trackSnapshot.tabs.map((snapshotTab, index) => {
       const current = currentTabs.get(snapshotTab.tab.key);
-      return current?.signature === trackSnapshot.labels[index]?.signature ? current.tab : snapshotTab;
+      return current?.signature === trackSnapshot.labels[index]?.signature
+        ? current.tab
+        : snapshotTab;
     });
   }, [tabLabels, tabs, trackSnapshot]);
 
@@ -1277,7 +1281,7 @@ function ResolvedWorkspaceDesktopTabsRow({
       paneId,
     }),
     actions: ["workspace.tab.menu.open"],
-    enabled: ownsKeyboardShortcuts,
+    enabled: ownsKeyboardShortcuts && !globalDraftContext,
     priority: 200,
     handle: handleNewTabKeyboardAction,
   });

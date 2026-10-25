@@ -13,6 +13,7 @@ import { COMPOSER_PILL_CLEARANCE } from "@/composer/pill-styles";
 import { AgentStreamView } from "@/agent-stream/view";
 import { composerWorkspaceAttachment } from "@/composer/attachments/workspace";
 import { useAgentInputDraft } from "@/composer/draft/input-draft";
+import { completeNewWorkspaceTab } from "@/workspace-tabs/new-workspace-tabs";
 import type { CreateAgentInitialValues } from "@/hooks/use-agent-form-state";
 import { useDraftAgentCreateFlow, type DraftCreateAttempt } from "@/composer/draft/create-flow";
 import { resolveTurnPresentation, TURN_LIVENESS_IDLE } from "@/timeline/turn-liveness";
@@ -491,6 +492,13 @@ export function WorkspaceDraftAgentTab({
       clearDraftInput("sent");
       clearWorkspaceAttachments({ scopeKey: draftAttachmentScopeKey });
       useWorkspaceDraftSubmissionStore.getState().clearDraftSetup({ draftId });
+      completeNewWorkspaceTab({
+        draftId,
+        serverId,
+        workspaceId,
+        target: { kind: "agent", agentId: result.id },
+        tabId,
+      });
       onCreated(result);
     },
   });

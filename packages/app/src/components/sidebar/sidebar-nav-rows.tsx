@@ -18,11 +18,8 @@ import { useSidebarNavItems } from "@/sidebar-nav/use-sidebar-nav-items";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useWorkspace } from "@/stores/session-store-hooks";
-import {
-  buildNewWorkspaceRoute,
-  buildSchedulesRoute,
-  buildSessionsRoute,
-} from "@/utils/host-routes";
+import { buildSchedulesRoute, buildSessionsRoute } from "@/utils/host-routes";
+import { newWorkspaceTabsBridge } from "@/workspace-tabs/new-workspace-tabs";
 
 interface SidebarNavRowProps {
   onBeforeNavigate?: () => void;
@@ -98,19 +95,17 @@ const SidebarNewWorkspaceRow = memo(function SidebarNewWorkspaceRow({
 
   const handlePress = useCallback(() => {
     onBeforeNavigate?.();
-    router.push(
-      activeWorkspaceServerId
-        ? buildNewWorkspaceRoute(
-            activeWorkspace && canUseActiveWorkspaceContext
-              ? {
-                  serverId: activeWorkspaceServerId,
-                  sourceDirectory: activeWorkspace.projectRootPath,
-                  projectId: activeWorkspace.projectId,
-                }
-              : { serverId: activeWorkspaceServerId },
-          )
-        : buildNewWorkspaceRoute(),
-    );
+    if (activeWorkspaceServerId && activeWorkspace && canUseActiveWorkspaceContext) {
+      newWorkspaceTabsBridge.open({
+        serverId: activeWorkspaceServerId,
+        sourceDirectory: activeWorkspace.projectRootPath,
+        projectId: activeWorkspace.projectId,
+      });
+    } else {
+      newWorkspaceTabsBridge.open(
+        activeWorkspaceServerId ? { serverId: activeWorkspaceServerId } : {},
+      );
+    }
   }, [activeWorkspace, activeWorkspaceServerId, canUseActiveWorkspaceContext, onBeforeNavigate]);
 
   return (

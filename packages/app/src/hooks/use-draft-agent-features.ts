@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createNewWorkspaceDraftState,
+  useNewWorkspaceDraftState,
+} from "@/workspace-tabs/new-workspace-draft-state";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type { AgentProvider, AgentSessionConfig } from "@getpaseo/protocol/agent-types";
@@ -15,6 +19,8 @@ type DraftFeatureConfig = Pick<
   "provider" | "cwd" | "modeId" | "model" | "thinkingOptionId"
 >;
 
+const retainedNewWorkspaceFeatures = createNewWorkspaceDraftState<Record<string, unknown>>();
+
 export function useDraftAgentFeatures(input: {
   serverId: string | null | undefined;
   provider: AgentProvider | null;
@@ -27,7 +33,8 @@ export function useDraftAgentFeatures(input: {
   const { t } = useTranslation();
   const { serverId, provider, cwd, modeId, modelId, thinkingOptionId, initialFeatureValues } =
     input;
-  const [localFeatureValues, setLocalFeatureValues] = useState<Record<string, unknown>>(
+  const [localFeatureValues, setLocalFeatureValues] = useNewWorkspaceDraftState(
+    retainedNewWorkspaceFeatures,
     () => initialFeatureValues ?? {},
   );
   const client = useHostRuntimeClient(serverId ?? "");
@@ -103,7 +110,7 @@ export function useDraftAgentFeatures(input: {
     if (previousProvider !== normalizedProvider) {
       setLocalFeatureValues({});
     }
-  }, [normalizedProvider]);
+  }, [normalizedProvider, setLocalFeatureValues]);
 
   useEffect(() => {
     if (availableFeaturesRaw === undefined) {
@@ -113,7 +120,7 @@ export function useDraftAgentFeatures(input: {
     if (next !== localFeatureValues) {
       setLocalFeatureValues(next);
     }
-  }, [availableFeatures, availableFeaturesRaw, localFeatureValues]);
+  }, [availableFeatures, availableFeaturesRaw, localFeatureValues, setLocalFeatureValues]);
 
   const effectiveFeatureValues = Object.keys(featureValues).length > 0 ? featureValues : undefined;
   const setFeatureValue = useCallback(
@@ -142,12 +149,15 @@ export function useDraftAgentFeatures(input: {
         console.warn("[useDraftAgentFeatures] persist feature preference failed", error);
       });
     },
-    [provider, updatePreferences],
+    [provider, updatePreferences, setLocalFeatureValues],
   );
 
-  const applyProfileFeatureValues = useCallback((values: Record<string, unknown>) => {
-    setLocalFeatureValues(values);
-  }, []);
+  const applyProfileFeatureValues = useCallback(
+    (values: Record<string, unknown>) => {
+      setLocalFeatureValues(values);
+    },
+    [setLocalFeatureValues],
+  );
 
   return {
     features,
