@@ -18,8 +18,7 @@ import {
 } from "@/utils/status-indicator-geometry";
 import type { Theme } from "@/styles/theme";
 import { usePanelInstanceAttributes } from "@/panels/panel-instance-attributes";
-import { useSessionStore } from "@/stores/session-store";
-import { selectAgentTabCompletedAt } from "./agent-tab-completion";
+import { useAgentTabCompletedAt } from "./agent-tab-completion";
 
 export interface WorkspaceTabPresentation {
   key: string;
@@ -87,10 +86,9 @@ function WorkspaceTabPresentationResolverInner({
     tabId: tab.tabId,
   });
   const attributes = usePanelInstanceAttributes({ serverId, workspaceId, tabId: tab.tabId });
-  const completedAt = useSessionStore((state) =>
-    tab.target.kind === "agent"
-      ? selectAgentTabCompletedAt(state.sessions[serverId], tab.target.agentId)
-      : null,
+  const completedAt = useAgentTabCompletedAt(
+    serverId,
+    tab.target.kind === "agent" ? tab.target.agentId : null,
   );
 
   const presentation = useMemo(

@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { selectAgentTabCompletedAt } from "./agent-tab-completion";
+import { describe, expect, it, vi } from "vitest";
+import { selectAgentTabCompletedAt, fetchAgentTabCompletedAt } from "./agent-tab-completion";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { projectAgentSnapshot } from "@/utils/agent-snapshots";
 import type { Agent } from "@/stores/session-store";
 import type { StreamItem } from "@/types/stream";
 import { describeCompletionTimeAgo } from "@/utils/time";
@@ -53,6 +55,60 @@ function fixture(): NonNullable<Parameters<typeof selectAgentTabCompletedAt>[0]>
   };
 }
 describe("agent tab completion", () => {
+  it("hydrates a restored tab once from a bounded tail and keeps the time after reading", async () => {
+    const session = fixture();
+    session.agentStreamTail.clear();
+    const page: Awaited<ReturnType<DaemonClient["fetchAgentTimeline"]>> = {
+      requestId: "q",
+      agentId: "a",
+      agent: projectAgentSnapshot(session.agents.get("a")!),
+      direction: "tail",
+      projection: "canonical",
+      epoch: "e",
+      reset: false,
+      staleCursor: false,
+      gap: false,
+      window: { minSeq: 1, maxSeq: 2, nextSeq: 3 },
+      startCursor: null,
+      endCursor: null,
+      hasOlder: false,
+      hasNewer: false,
+      error: null,
+      entries: [
+        {
+          provider: "codex",
+          item: { type: "assistant_message", text: "done" },
+          timestamp: end.toISOString(),
+          seqStart: 2,
+          seqEnd: 2,
+          sourceSeqRanges: [],
+          collapsed: [],
+        },
+      ],
+    };
+    const fetchAgentTimeline = vi.fn<DaemonClient["fetchAgentTimeline"]>().mockResolvedValue(page);
+    const client = { fetchAgentTimeline };
+    const [first, second] = await Promise.all([
+      fetchAgentTabCompletedAt(client, "a", start.getTime(), 1),
+      fetchAgentTabCompletedAt(client, "a", start.getTime(), 1),
+    ]);
+    expect(fetchAgentTimeline).toHaveBeenCalledTimes(1);
+    expect(fetchAgentTimeline).toHaveBeenCalledWith("a", {
+      direction: "tail",
+      limit: 10,
+      projection: "canonical",
+      mergeWindow: true,
+    });
+    expect(first).toBe(second);
+    expect(selectAgentTabCompletedAt(session, "a", first)).toBe(end.getTime());
+    session.agents.get("a")!.lastUserMessageAt = new Date(end.getTime() + 1);
+    expect(selectAgentTabCompletedAt(session, "a", first)).toBeNull();
+    const changed = await fetchAgentTabCompletedAt(client, "a", end.getTime() + 1, 1);
+    expect(changed.completedAt).toBeNull();
+    expect(fetchAgentTimeline).toHaveBeenCalledTimes(2);
+    await fetchAgentTabCompletedAt(client, "a", start.getTime(), 2);
+    expect(fetchAgentTimeline).toHaveBeenCalledTimes(3);
+  });
   it("formats seconds, minutes, hours, days and future clock skew", () => {
     for (const [age, label] of [
       [-5000, "0s"],
