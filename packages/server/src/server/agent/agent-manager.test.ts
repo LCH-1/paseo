@@ -25,6 +25,7 @@ import { projectTimelineRows } from "./timeline-projection.js";
 import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import { startAgentRun } from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
+import { TURN_RETRY_CONTINUATION } from "./transient-turn-retry.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
 import type { StoredAgentRecord } from "./agent-storage.js";
 import type {
@@ -9182,6 +9183,221 @@ test("archiveAgent cascade surfaces partial child archive failures", async () =>
   await expect(manager.archiveAgent(parent.id)).rejects.toThrow(
     `Injected cascade archive failure for ${child.id}`,
   );
+});
+
+class CapacityFailureSession extends TestAgentSession {
+  readonly prompts: AgentPromptInput[] = [];
+  readonly options: Array<AgentRunOptions | undefined> = [];
+  failuresRemaining = 1;
+  rejectStarts = false;
+
+  override async startTurn(
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+  ): Promise<{ turnId: string }> {
+    this.prompts.push(prompt);
+    this.options.push(options);
+    if (this.rejectStarts)
+      throw new Error("Selected model is at capacity. Please try a different model.");
+    const turnId = `capacity-turn-${this.prompts.length}`;
+    setTimeout(() => {
+      this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+      if (this.failuresRemaining > 0) {
+        this.failuresRemaining -= 1;
+        this.pushEvent({
+          type: "turn_failed",
+          provider: this.provider,
+          turnId,
+          error: "Selected model is at capacity. Please try a different model.",
+        });
+      } else {
+        this.pushEvent({ type: "turn_completed", provider: this.provider, turnId });
+      }
+    }, 0);
+    return { turnId };
+  }
+}
+
+async function withCapacityFailureAgent(
+  run: (fixture: {
+    manager: AgentManager;
+    agentId: string;
+    session: CapacityFailureSession;
+  }) => Promise<void>,
+): Promise<void> {
+  vi.useFakeTimers();
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-retry-"));
+  const config = { provider: "codex", cwd: workdir, model: "gpt-5.4" } as const;
+  const session = new CapacityFailureSession(config);
+  class CapacityFailureClient extends TestAgentClient {
+    override async createSession(): Promise<AgentSession> {
+      return session;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new CapacityFailureClient() },
+    logger,
+    registry: new AgentStorage(join(workdir, "agents"), logger),
+  });
+  try {
+    const agent = await manager.createAgent(config, undefined, { workspaceId: undefined });
+    await run({ manager, agentId: agent.id, session });
+  } finally {
+    manager.prepareForShutdown();
+    await vi.advanceTimersByTimeAsync(0);
+    await manager.flush();
+    vi.useRealTimers();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+}
+
+test("automatically continues a capacity failure in the same session after 30 seconds", async () => {
+  await withCapacityFailureAgent(async ({ manager, agentId, session }) => {
+    const outputSchema = { type: "object", properties: { result: { type: "string" } } };
+    const run = drainAsyncGenerator(
+      manager.streamAgent(agentId, "original work", {
+        clientMessageId: "original",
+        outputSchema,
+        maxThinkingTokens: 2000,
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    await run;
+    expect(manager.getAgent(agentId)?.lifecycle).toBe("error");
+    expect(manager.getTimeline(agentId)).toContainEqual({
+      type: "assistant_message",
+      text: "[System Error] Selected model is at capacity. Please try a different model.\n\n[Auto Retry] Retrying in 30s (1/3).",
+    });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(session.prompts).toEqual(["original work"]);
+    await vi.advanceTimersByTimeAsync(2);
+    await manager.flush();
+    expect(session.prompts).toEqual(["original work", TURN_RETRY_CONTINUATION]);
+    expect(session.options[1]).toEqual({ outputSchema, maxThinkingTokens: 2000 });
+    expect(manager.getAgent(agentId)?.session).toBe(session);
+    expect(manager.getAgent(agentId)?.config.model).toBe("gpt-5.4");
+    expect(manager.getAgent(agentId)?.lifecycle).toBe("idle");
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(session.prompts).toHaveLength(2);
+  });
+});
+
+test("backs off and stops after three automatic capacity retries", async () => {
+  await withCapacityFailureAgent(async ({ manager, agentId, session }) => {
+    session.failuresRemaining = 10;
+    const run = drainAsyncGenerator(manager.streamAgent(agentId, "original work"));
+    await vi.advanceTimersByTimeAsync(0);
+    await run;
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(session.prompts).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(session.prompts).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(session.prompts).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(session.prompts).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(2);
+    await manager.flush();
+    expect(session.prompts).toHaveLength(4);
+    expect(manager.getTimeline(agentId).at(-1)).toMatchObject({
+      type: "assistant_message",
+      text: expect.stringContaining("[Auto Retry] Stopped after 3 automatic attempts."),
+    });
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(session.prompts).toHaveLength(4);
+  });
+});
+
+test.each(["stop", "close", "archive", "reload", "shutdown", "new prompt"] as const)(
+  "cancels a pending capacity retry on %s",
+  async (action) => {
+    await withCapacityFailureAgent(async ({ manager, agentId, session }) => {
+      const run = drainAsyncGenerator(manager.streamAgent(agentId, "original work"));
+      await vi.advanceTimersByTimeAsync(0);
+      await run;
+      switch (action) {
+        case "stop":
+          await manager.cancelAgentRun(agentId);
+          break;
+        case "close":
+          await manager.closeAgent(agentId);
+          break;
+        case "archive":
+          await manager.archiveAgent(agentId);
+          break;
+        case "reload":
+          await manager.reloadAgentSession(agentId);
+          break;
+        case "shutdown":
+          manager.prepareForShutdown();
+          break;
+        case "new prompt": {
+          const next = drainAsyncGenerator(manager.streamAgent(agentId, "new work"));
+          await vi.advanceTimersByTimeAsync(0);
+          await next;
+          break;
+        }
+      }
+      const promptsAfterAction = [...session.prompts];
+      await vi.advanceTimersByTimeAsync(300_000);
+      await manager.flush();
+      expect(session.prompts).toEqual(promptsAfterAction);
+    });
+  },
+);
+
+test.each<{ prompt: AgentPromptInput }>([
+  { prompt: "original work" },
+  {
+    prompt: [
+      { type: "text", text: "inspect the attachment" },
+      { type: "image", data: "dGVzdA==", mimeType: "image/png" },
+    ],
+  },
+])(
+  "retries original input and attachments when capacity rejects before acceptance: %#",
+  async ({ prompt }) => {
+    await withCapacityFailureAgent(async ({ manager, agentId, session }) => {
+      session.rejectStarts = true;
+      const options = { clientMessageId: "rejected-original" };
+      await expect(
+        drainAsyncGenerator(manager.streamAgent(agentId, prompt, options)),
+      ).rejects.toThrow("Selected model is at capacity");
+      session.rejectStarts = false;
+      session.failuresRemaining = 0;
+      await vi.advanceTimersByTimeAsync(30_001);
+      await manager.flush();
+      expect(session.prompts).toEqual([prompt, prompt]);
+      expect(session.options).toEqual([options, options]);
+      expect(
+        manager.getTimeline(agentId).filter((item) => item.type === "user_message"),
+      ).toHaveLength(1);
+      expect(manager.getAgent(agentId)?.lifecycle).toBe("idle");
+    });
+  },
+);
+
+test("starts a fresh retry budget for a new manual request", async () => {
+  await withCapacityFailureAgent(async ({ manager, agentId, session }) => {
+    session.failuresRemaining = 10;
+    const first = drainAsyncGenerator(manager.streamAgent(agentId, "original work"));
+    await vi.advanceTimersByTimeAsync(0);
+    await first;
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(session.prompts).toHaveLength(2);
+    const manual = drainAsyncGenerator(manager.streamAgent(agentId, "new work"));
+    await vi.advanceTimersByTimeAsync(0);
+    await manual;
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(session.prompts).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(session.prompts).toEqual([
+      "original work",
+      TURN_RETRY_CONTINUATION,
+      "new work",
+      TURN_RETRY_CONTINUATION,
+    ]);
+  });
 });
 
 test("turn_failed emits a system error assistant timeline message and keeps error lifecycle", async () => {

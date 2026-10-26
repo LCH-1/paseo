@@ -81,6 +81,11 @@ import {
 import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { parseAgentMessage, projectAgentMessage } from "./agent-messages/index.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
+import {
+  getTransientTurnRetryDelay,
+  TURN_RETRY_CONTINUATION,
+  TURN_RETRY_LIMIT,
+} from "./transient-turn-retry.js";
 import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
@@ -293,6 +298,14 @@ export interface ProviderAvailability {
 interface AgentManagerRescueTimeouts {
   reloadSessionCloseMs?: number;
   interruptSessionMs?: number;
+}
+
+interface PendingTurnRetry {
+  session: AgentSession;
+  prompt: AgentPromptInput;
+  options: AgentRunOptions | undefined;
+  attempts: number;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 interface ProviderEnabledFlag {
@@ -748,6 +761,7 @@ export class AgentManager {
   private readonly steerEventBarriers = new Map<string, SteerEventBarrier>();
   private readonly foregroundMutationTails = new Map<string, Promise<void>>();
   private readonly runs = new AgentRunState();
+  private readonly turnRetries = new Map<string, PendingTurnRetry>();
   private readonly subscribers = new Set<SubscriptionRecord>();
   private readonly idFactory: () => string;
   private readonly registry?: AgentStorage;
@@ -871,6 +885,9 @@ export class AgentManager {
 
   prepareForShutdown(): void {
     this.acceptingAgentRegistrations = false;
+    for (const agentId of this.turnRetries.keys()) {
+      this.cancelPendingTurnRetry(agentId);
+    }
   }
 
   setPaseoToolsEnabled(enabled: boolean): void {
@@ -1537,6 +1554,7 @@ export class AgentManager {
     overrides?: Partial<AgentSessionConfig>,
     options?: { rehydrateFromDisk?: boolean },
   ): Promise<ManagedAgent> {
+    this.cancelPendingTurnRetry(agentId);
     return this.trackAgentRegistrationOperation(
       this.runLifecycleMutation(agentId, () =>
         this.reloadAgentSessionInternal(agentId, overrides, options),
@@ -1766,6 +1784,7 @@ export class AgentManager {
   }
 
   private async closeAgentRuntime(agentId: string): Promise<void> {
+    this.cancelPendingTurnRetry(agentId);
     const agent = this.requireAgent(agentId);
     this.logger.trace(
       {
@@ -2468,6 +2487,7 @@ export class AgentManager {
     if (!handler) {
       return false;
     }
+    this.cancelPendingTurnRetry(agentId);
     if (options?.clientMessageId) {
       this.recordSubmittedPrompt(agent, prompt, options.clientMessageId, "accepted");
       this.emitState(agent);
@@ -2550,6 +2570,14 @@ export class AgentManager {
       if (pendingRun.settled) {
         throw new Error(`Agent ${agentId} run was canceled before its turn started`);
       }
+      const retry = this.turnRetries.get(agentId);
+      if (retry) {
+        retry.prompt = TURN_RETRY_CONTINUATION;
+        retry.options = {
+          outputSchema: options?.outputSchema,
+          maxThinkingTokens: options?.maxThinkingTokens,
+        };
+      }
       return result.turnId;
     } catch (error) {
       if (pendingRun.settled) {
@@ -2587,6 +2615,15 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): AsyncGenerator<AgentStreamEvent> {
+    return this.streamAgentWithRetry(agentId, prompt, options);
+  }
+
+  private streamAgentWithRetry(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+    retry?: PendingTurnRetry,
+  ): AsyncGenerator<AgentStreamEvent> {
     const existingAgent = this.requireSessionAgent(agentId);
     this.logger.trace(
       {
@@ -2618,6 +2655,16 @@ export class AgentManager {
     }
 
     const agent = existingAgent;
+    if (!retry) this.cancelPendingTurnRetry(agentId);
+    if (!agent.internal && !this.turnRetries.has(agentId)) {
+      this.turnRetries.set(agentId, {
+        session: agent.session,
+        prompt,
+        options,
+        attempts: 0,
+        timer: null,
+      });
+    }
     const isReplacement = agent.pendingReplacement;
     agent.lastError = undefined;
 
@@ -2963,6 +3010,8 @@ export class AgentManager {
     clientMessageId: string | undefined,
     expectedTurnId: string,
   ): Promise<void> {
+    const retry = this.turnRetries.get(agent.id);
+    if (retry) retry.attempts = 0;
     if (!clientMessageId) {
       return;
     }
@@ -3126,6 +3175,7 @@ export class AgentManager {
   }
 
   async cancelAgentRun(agentId: string): Promise<AgentRunCancellationResult> {
+    this.cancelPendingTurnRetry(agentId);
     return this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId));
   }
 
@@ -4593,6 +4643,7 @@ export class AgentManager {
       "agent.manager.turn.completed",
     );
     if (terminalDisposition === "stale") return;
+    this.cancelPendingTurnRetry(agent.id);
     if (event.usage) {
       agent.lastUsage = { ...agent.lastUsage, ...event.usage };
     }
@@ -4641,10 +4692,11 @@ export class AgentManager {
       agent.lifecycle = "error";
     }
     agent.lastError = event.error;
+    const retryNotice = options?.fromHistory ? "" : this.scheduleTurnRetry(agent, event);
     await this.appendSystemErrorTimelineMessage(
       agent,
       event.provider,
-      this.formatTurnFailedMessage(event),
+      this.formatTurnFailedMessage(event) + retryNotice,
       options,
     );
     this.resolvePendingPermissionsForAgent(agent, event.provider, options, "Turn failed");
@@ -4679,6 +4731,7 @@ export class AgentManager {
       "agent.manager.turn.canceled",
     );
     if (terminalDisposition === "stale") return;
+    this.cancelPendingTurnRetry(agent.id);
     if (!isForegroundEvent && !agent.activeForegroundTurnId && !agent.pendingReplacement) {
       agent.lifecycle = "idle";
     }
@@ -4873,6 +4926,62 @@ export class AgentManager {
       if (enriched) this.enqueueDurableTimelineUpdate(agent.id, enriched);
     }
     return existing;
+  }
+
+  private cancelPendingTurnRetry(agentId: string): void {
+    const retry = this.turnRetries.get(agentId);
+    if (retry?.timer) clearTimeout(retry.timer);
+    this.turnRetries.delete(agentId);
+  }
+
+  private scheduleTurnRetry(
+    agent: ActiveManagedAgent,
+    event: Extract<AgentStreamEvent, { type: "turn_failed" }>,
+  ): string {
+    const retry = this.turnRetries.get(agent.id);
+    if (!retry || !this.acceptingAgentRegistrations || retry.session !== agent.session) return "";
+    if (retry.timer) return "";
+    const delayMs = getTransientTurnRetryDelay(event, retry.attempts);
+    if (delayMs === null) {
+      this.cancelPendingTurnRetry(agent.id);
+      return retry.attempts === TURN_RETRY_LIMIT
+        ? `\n\n[Auto Retry] Stopped after ${TURN_RETRY_LIMIT} automatic attempts.`
+        : "";
+    }
+    retry.attempts += 1;
+    retry.timer = setTimeout(() => {
+      retry.timer = null;
+      this.trackBackgroundTask(this.retryFailedTurn(agent.id, retry));
+    }, delayMs);
+    retry.timer.unref();
+    return `\n\n[Auto Retry] Retrying in ${delayMs / 1000}s (${retry.attempts}/${TURN_RETRY_LIMIT}).`;
+  }
+
+  private async retryFailedTurn(agentId: string, retry: PendingTurnRetry): Promise<void> {
+    if (this.turnRetries.get(agentId) !== retry) return;
+    const agent = this.agents.get(agentId);
+    const canRetry =
+      this.acceptingAgentRegistrations &&
+      agent?.session === retry.session &&
+      agent.lifecycle === "error" &&
+      !agent.activeForegroundTurnId &&
+      !agent.activeTurnId &&
+      !this.runs.hasRun(agentId);
+    if (!canRetry) {
+      this.cancelPendingTurnRetry(agentId);
+      return;
+    }
+    try {
+      const stream = this.streamAgentWithRetry(agentId, retry.prompt, retry.options, retry);
+      for await (const _event of stream) {
+        // The session subscription publishes retry events through the normal timeline.
+      }
+    } catch (error) {
+      this.logger.warn(
+        { err: error, agentId, attempt: retry.attempts },
+        "Automatic turn retry failed",
+      );
+    }
   }
 
   private async appendSystemErrorTimelineMessage(
