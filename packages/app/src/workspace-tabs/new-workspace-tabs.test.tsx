@@ -350,3 +350,23 @@ it("retains each draft's native form state across unmount and background state u
   );
   expect(closed.result.current[0].project).toBe("fresh");
 });
+it("restores a saved group draft with its native form state without navigating", () => {
+  const entry = { draftId: "draft-a", serverId: "host-a", href: "/new?draftId=draft-a" };
+  const state = createNewWorkspaceDraftState<{ name: string }>();
+  bridge.restore(entry);
+  const first = renderHook(() => useNewWorkspaceDraftState(state, () => ({ name: "초기값" })), {
+    wrapper: DraftA,
+  });
+  act(() => first.result.current[1]({ name: "작성 중인 폼" }));
+  first.unmount();
+  bridge.close("draft-a", { preserveDraft: true });
+  bridge.restore(entry);
+  bridge.restore(entry);
+  const restored = renderHook(
+    () => useNewWorkspaceDraftState(state, () => ({ name: "새 기본값" })),
+    { wrapper: DraftA },
+  );
+  expect(restored.result.current[0]).toEqual({ name: "작성 중인 폼" });
+  expect(bridge.getSnapshot().entries).toEqual([entry]);
+  expect(router.navigate).not.toHaveBeenCalled();
+});

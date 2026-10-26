@@ -1,5 +1,5 @@
 import { getTabGroupWindow } from "./tab-groups-window";
-import { groupForTab } from "./tab-groups";
+import { removeFromTabGroups, groupForTab } from "./tab-groups";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
@@ -23,4 +23,9 @@ export function isTabGroupKeyVisible(key: string): boolean {
     group = groupForTab(useTabGroups.getState().state, key);
   if (window.excludedKeys?.includes(key)) return false;
   return !group?.closed && (!group?.windowKey || group.windowKey === window.key);
+}
+
+export function forgetTabGroupKey(key: string): void {
+  const state = useTabGroups.getState();
+  if (groupForTab(state.state, key)) state.update((current) => removeFromTabGroups(current, [key]));
 }

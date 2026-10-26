@@ -1,3 +1,5 @@
+import { router } from "expo-router";
+import { newWorkspaceTabsBridge } from "./new-workspace-tabs";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { getTabGroupWindow, prepareTabGroupWindow } from "./tab-groups-window";
 import { getDesktopHost } from "@/desktop/host";
@@ -145,7 +147,12 @@ export function useGroupedWorkspaceTabs(
       .filter((row) => group.tabs.some((tab) => tab.key === row.tab.key))
       .sort((a, b) => Number(a.isActive) - Number(b.isActive));
     try {
-      for (const row of members) await props.onCloseTab(row.tab.tabId);
+      if (props.onCloseGroupedTabs)
+        await props.onCloseGroupedTabs(
+          members.map((row) => row.tab.tabId),
+          !remove,
+        );
+      else for (const row of members) await props.onCloseTab(row.tab.tabId);
       if (remove) ungroup(id);
       else patch(id, { closed: true });
       setError(null);
@@ -157,6 +164,10 @@ export function useGroupedWorkspaceTabs(
     const group = state.groups.find((candidate) => candidate.id === id);
     if (!group) return;
     for (const tab of group.tabs) {
+      if (tab.groupDraft) {
+        newWorkspaceTabsBridge.restore(tab.groupDraft);
+        continue;
+      }
       const source = tab.groupSource;
       if (!source) continue;
       const tabId = useWorkspaceLayoutStore.getState().openTab({
@@ -170,7 +181,8 @@ export function useGroupedWorkspaceTabs(
     }
     patch(id, { closed: false, collapsed: false, windowKey: groupWindow.key });
     const first = group.tabs[0];
-    if (first?.groupSource)
+    if (first?.groupDraft) router.navigate(first.groupDraft.href as never);
+    else if (first?.groupSource)
       navigateToWorkspace({ ...first.groupSource, target: first.target, pin: true });
   };
   const newTab = (id: string) => {
@@ -211,9 +223,13 @@ export function useGroupedWorkspaceTabs(
     if (movedWindow.current || !groupWindow.groupId) return;
     const group = state.groups.find((candidate) => candidate.id === groupWindow.groupId);
     const first = group?.tabs[0];
-    if (!first?.groupSource) return;
+    if (!first || !group) return;
+    for (const tab of group.tabs)
+      if (tab.groupDraft) newWorkspaceTabsBridge.restore(tab.groupDraft);
     movedWindow.current = true;
-    navigateToWorkspace({ ...first.groupSource, target: first.target, pin: true });
+    if (first.groupDraft) router.navigate(first.groupDraft.href as never);
+    else if (first.groupSource)
+      navigateToWorkspace({ ...first.groupSource, target: first.target, pin: true });
   }, [state, groupWindow]);
   const moveToWindow = async (id: string) => {
     const api = getDesktopHost()?.window?.openNew;

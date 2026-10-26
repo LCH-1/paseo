@@ -1003,6 +1003,10 @@ function useLastMainPane(input: {
   return lastMainPaneRef;
 }
 
+function useWorkspaceCompactLayout() {
+  return useIsCompactFormFactor() && getDesktopHost() === null;
+}
+
 function WorkspaceScreenContent({
   serverId,
   workspaceId,
@@ -1012,7 +1016,7 @@ function WorkspaceScreenContent({
   const { t } = useTranslation();
   const _insets = useSafeAreaInsets();
   const toast = useToast();
-  const isMobile = useIsCompactFormFactor();
+  const isMobile = useWorkspaceCompactLayout();
   const hasMacTrafficLights = useHasWindowChromeObstruction("top-left");
   const explorerToggleOwner = resolveWorkspaceExplorerToggleOwner({
     isMobile,

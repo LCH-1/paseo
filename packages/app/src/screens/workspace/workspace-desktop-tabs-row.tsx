@@ -40,7 +40,7 @@ import type {
   DraggableListDragHandleProps,
   DraggableRenderItemInfo,
 } from "@/components/draggable-list.types";
-import { isNative, isWeb } from "@/constants/platform";
+import { getIsElectron, isNative, isWeb } from "@/constants/platform";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -558,6 +558,7 @@ export interface WorkspaceDesktopTabsRowProps {
   onCloseTabsToRight: (tabId: string) => Promise<void> | void;
   onCloseOtherTabs: (tabId: string) => Promise<void> | void;
   onCreateNewTab: (input: { paneId?: string }) => void;
+  onCloseGroupedTabs?: (tabIds: string[], preserveDraft?: boolean) => Promise<void> | void;
   onKeepTab?: (tab: WorkspaceTabDescriptor) => void;
   onReorderTabs: (nextTabs: WorkspaceTabDescriptor[]) => void;
   externalDndContext?: boolean;
@@ -787,6 +788,7 @@ function TabChip({
 }) {
   const groups = useTabGroupRow();
   const tabGroup = groups?.groupFor(tab.key);
+  const menuMode = useMemo(() => (getIsElectron() ? ("popover" as const) : ("sheet" as const)), []);
   const { closeButtonTestId, contextMenuTestId, menuEntries } = resolvedTab;
   const { t } = useTranslation();
   const middleClickRef = useMiddleClickClose(
@@ -907,7 +909,7 @@ function TabChip({
       onPointerEnter={handleTabPointerEnter}
       onPointerLeave={handleTabPointerLeave}
     >
-      <ContextMenu key={tab.key}>
+      <ContextMenu key={tab.key} compactMode={menuMode}>
         <Tooltip delayDuration={400} enabledOnDesktop enabledOnMobile={false}>
           <TooltipTrigger asChild triggerRefProp="triggerRef">
             <ContextMenuTrigger

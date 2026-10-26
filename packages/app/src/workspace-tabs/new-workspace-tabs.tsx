@@ -86,10 +86,13 @@ export const newWorkspaceTabsBridge = {
     const entry = snapshot.entries.find((item) => item.draftId === draftId);
     if (entry) router.navigate(entry.href as never);
   },
-  close(draftId: string): void {
+  restore(entry: NewWorkspaceTabEntry): void {
+    registerDraft(entry);
+  },
+  close(draftId: string, options?: { preserveDraft?: boolean }): void {
     const entry = snapshot.entries.find((item) => item.draftId === draftId);
-    const entries = snapshot.entries.filter((entry) => entry.draftId !== draftId);
-    if (entry?.kind !== "history") clearNewWorkspaceDraftState(draftId);
+    const entries = snapshot.entries.filter((item) => item.draftId !== draftId);
+    if (entry?.kind !== "history" && !options?.preserveDraft) clearNewWorkspaceDraftState(draftId);
     knownDrafts.delete(draftId);
     if (entries.length === snapshot.entries.length) return;
     publish({

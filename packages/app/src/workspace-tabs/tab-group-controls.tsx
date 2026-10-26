@@ -1,3 +1,4 @@
+import { getIsElectron } from "@/constants/platform";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { View, Text } from "react-native";
 import { EditingTextInput } from "@/components/ui/text-input";
@@ -75,7 +76,11 @@ export function TabGroupHeader({
   const label = useMemo(() => [styles.label, { backgroundColor: color }], [color]);
   const state = useMemo(() => ({ expanded: !group.collapsed }), [group.collapsed]);
   return (
-    <ContextMenu open={open} onOpenChange={actions.openChange}>
+    <ContextMenu
+      compactMode={getIsElectron() ? "popover" : "sheet"}
+      open={open}
+      onOpenChange={actions.openChange}
+    >
       <ContextMenuTrigger
         {...(dragHandleProps?.attributes as object)}
         {...(dragHandleProps?.listeners as object)}
