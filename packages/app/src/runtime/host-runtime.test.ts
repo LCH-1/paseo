@@ -1919,6 +1919,35 @@ describe("HostRuntimeStore", () => {
     store.syncHosts([]);
   });
 
+  it("reorders hosts without replacing profiles or reconnecting and persists their order", async () => {
+    const hosts = ["a", "hidden", "b"].map((serverId) => makeHost({ serverId }));
+    const storage = createMemoryHostRuntimeStorage();
+    await storage.setItem("@paseo:daemon-registry", JSON.stringify(hosts));
+    await storage.setItem("@paseo:e2e", "1");
+    const store = createAppearanceStore(storage);
+    const loaded = onceHostListMatches(store, () => store.isHostRegistryLoaded());
+    void store.boot();
+    await loaded;
+    const original = store.getHosts();
+    let changes = 0;
+    const unsubscribe = store.subscribeHostList(() => {
+      changes++;
+    });
+    store.reorderHosts(["b", "a"]);
+    expect(store.getHosts()).toEqual([original[2], original[1], original[0]]);
+    expect(store.getHosts()[0]).toBe(original[2]);
+    expect(changes).toBe(1);
+    expect(JSON.parse((await storage.getItem("@paseo:daemon-registry"))!)).toEqual([
+      original[2],
+      original[1],
+      original[0],
+    ]);
+    store.reorderHosts(["b", "a"]);
+    expect(changes).toBe(1);
+    unsubscribe();
+    store.syncHosts([]);
+  });
+
   it("records a chosen host color and writes it through to storage", async () => {
     const host = makeHost({ serverId: "srv_appearance", updatedAt: new Date(0).toISOString() });
     const storage = createMemoryHostRuntimeStorage();

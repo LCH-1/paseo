@@ -15,6 +15,7 @@ import {
   upsertHostConnectionInProfiles,
   registryHasConnection,
   relayConnectionFromOffer,
+  reorderHostProfiles,
   StoredHostRegistrySchema,
   type HostConnection,
   type HostProfile,
@@ -1528,6 +1529,16 @@ export class HostRuntimeStore {
 
   getHosts(): HostProfile[] {
     return this.hosts;
+  }
+
+  reorderHosts(serverIds: readonly string[]): void {
+    const next = reorderHostProfiles(this.hosts, serverIds);
+    if (next === this.hosts) return;
+    this.hosts = next;
+    this.emitHostList();
+    void this.persistHosts(next).catch((error) =>
+      console.error("[HostRuntime] Failed to persist host order", error),
+    );
   }
 
   getHostRegistryStatus(): HostRegistryStatus {

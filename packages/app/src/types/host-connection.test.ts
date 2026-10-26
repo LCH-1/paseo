@@ -4,6 +4,7 @@ import {
   createRemoteSshHostConnection,
   normalizeStoredHostProfile,
   orderHostsLocalFirst,
+  reorderHostProfiles,
   resolveActiveHostServerId,
   upsertHostConnectionInProfiles,
   type HostConnection,
@@ -46,6 +47,31 @@ describe("orderHostsLocalFirst", () => {
     const hosts = [makeHost("srv_remote"), makeHost("srv_another_remote")];
 
     expect(orderHostsLocalFirst(hosts, null)).toBe(hosts);
+  });
+});
+
+describe("reorderHostProfiles", () => {
+  it("moves only the visible hosts and preserves hidden hosts and connection objects", () => {
+    const hosts = [makeHost("a"), makeHost("hidden"), makeHost("b"), makeHost("c")];
+    const next = reorderHostProfiles(hosts, ["c", "a", "b"]);
+    expect(next).toEqual([hosts[3], hosts[1], hosts[0], hosts[2]]);
+    for (const host of next) expect(hosts).toContain(host);
+    expect(hosts.map((host) => host.serverId)).toEqual(["a", "hidden", "b", "c"]);
+  });
+
+  it("ignores stale and repeated IDs without removing newly registered hosts", () => {
+    const hosts = [makeHost("a"), makeHost("new"), makeHost("b")];
+    expect(reorderHostProfiles(hosts, ["removed", "b", "b", "a"])).toEqual([
+      hosts[2],
+      hosts[1],
+      hosts[0],
+    ]);
+  });
+
+  it("keeps a stable list for unchanged and cancelled orders", () => {
+    const hosts = [makeHost("a"), makeHost("b")];
+    expect(reorderHostProfiles(hosts, ["a", "b"])).toBe(hosts);
+    expect(reorderHostProfiles(hosts, [])).toBe(hosts);
   });
 });
 

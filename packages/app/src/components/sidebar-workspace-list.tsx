@@ -165,6 +165,7 @@ import {
 const workspaceKeyExtractor = (workspace: SidebarWorkspacePlacement) => workspace.workspaceKey;
 
 const projectViewKeyExtractor = (project: SidebarProjectEntry) => project.viewKey;
+const hostGroupKeyExtractor = (group: SidebarHostProjectGroup) => group.serverId;
 
 const WORKSPACE_STATUS_DOT_WIDTH = 14;
 const ThemedExternalLink = withUnistyles(ExternalLink);
@@ -1905,7 +1906,16 @@ function SidebarHostProjectSection({
   group,
   label,
   children,
-}: PropsWithChildren<{ group: SidebarHostProjectGroup; label: string }>) {
+  drag,
+  isDragging,
+  dragHandleProps,
+}: PropsWithChildren<{
+  group: SidebarHostProjectGroup;
+  label: string;
+  drag: () => void;
+  isDragging: boolean;
+  dragHandleProps?: DraggableListDragHandleProps;
+}>) {
   const groupKey = sidebarHostGroupKey(group.serverId);
   const collapsed = useSidebarCollapsedSectionsStore((state) =>
     state.collapsedWorkspaceGroupKeys.has(groupKey),
@@ -1922,6 +1932,9 @@ function SidebarHostProjectSection({
         collapsed={collapsed}
         onToggle={handleToggle}
         fullRowToggle
+        drag={drag}
+        isDragging={isDragging}
+        dragHandleProps={dragHandleProps}
         testID={`sidebar-host-header-${group.serverId}`}
       >
         <View pointerEvents="auto">
@@ -2467,37 +2480,72 @@ function ProjectModeList({
     ],
   );
 
-  function renderProjectList(items: SidebarProjectEntry[], testID: string) {
-    return (
-      <DraggableList
-        testID={testID}
-        data={items}
-        keyExtractor={projectViewKeyExtractor}
-        renderItem={renderProject}
-        onDragEnd={handleProjectDragEnd}
-        extraData={activeWorkspaceSelectionKey(activeWorkspaceSelection)}
-        scrollEnabled={false}
-        useDragHandle
-        nestable={platformIsNative}
-        simultaneousGestureRef={parentGestureRef}
-        gestureHostPresented={dragGestureHostActive}
-        containerStyle={styles.projectListContainer}
-      />
-    );
-  }
+  const renderProjectList = useCallback(
+    (items: SidebarProjectEntry[], testID: string) => {
+      return (
+        <DraggableList
+          testID={testID}
+          data={items}
+          keyExtractor={projectViewKeyExtractor}
+          renderItem={renderProject}
+          onDragEnd={handleProjectDragEnd}
+          extraData={activeWorkspaceSelectionKey(activeWorkspaceSelection)}
+          scrollEnabled={false}
+          useDragHandle
+          nestable={platformIsNative}
+          simultaneousGestureRef={parentGestureRef}
+          gestureHostPresented={dragGestureHostActive}
+          containerStyle={styles.projectListContainer}
+        />
+      );
+    },
+    [
+      renderProject,
+      handleProjectDragEnd,
+      activeWorkspaceSelection,
+      parentGestureRef,
+      dragGestureHostActive,
+    ],
+  );
+
+  const handleHostDragEnd = useCallback((groups: SidebarHostProjectGroup[]) => {
+    getHostRuntimeStore().reorderHosts(groups.map((group) => group.serverId));
+  }, []);
+  const renderHost = useCallback(
+    ({
+      item: group,
+      drag,
+      isActive,
+      dragHandleProps,
+    }: DraggableRenderItemInfo<SidebarHostProjectGroup>) => (
+      <SidebarHostProjectSection
+        group={group}
+        label={hostLabels.get(group.serverId) ?? group.serverId}
+        drag={drag}
+        isDragging={isActive}
+        dragHandleProps={dragHandleProps}
+      >
+        {renderProjectList(group.projects, `sidebar-host-projects-${group.serverId}`)}
+      </SidebarHostProjectSection>
+    ),
+    [hostLabels, renderProjectList],
+  );
 
   let projectBody =
     groupMode === "host" ? (
       <View testID="sidebar-host-project-list">
-        {hostGroups.map((group) => (
-          <SidebarHostProjectSection
-            key={group.serverId}
-            group={group}
-            label={hostLabels.get(group.serverId) ?? group.serverId}
-          >
-            {renderProjectList(group.projects, `sidebar-host-projects-${group.serverId}`)}
-          </SidebarHostProjectSection>
-        ))}
+        <DraggableList
+          data={hostGroups}
+          keyExtractor={hostGroupKeyExtractor}
+          renderItem={renderHost}
+          onDragEnd={handleHostDragEnd}
+          scrollEnabled={false}
+          useDragHandle
+          nestable={platformIsNative}
+          simultaneousGestureRef={parentGestureRef}
+          gestureHostPresented={dragGestureHostActive}
+          containerStyle={styles.projectListContainer}
+        />
       </View>
     ) : (
       renderProjectList(unpinnedProjects, "sidebar-project-list")

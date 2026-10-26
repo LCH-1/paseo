@@ -100,6 +100,21 @@ export function orderHostsLocalFirst<T extends { serverId: string }>(
   return ordered;
 }
 
+export function reorderHostProfiles<T extends { serverId: string }>(
+  hosts: T[],
+  serverIds: readonly string[],
+): T[] {
+  const byId = new Map(hosts.map((host) => [host.serverId, host]));
+  const moved = [...new Set(serverIds)].flatMap((id) => {
+    const host = byId.get(id);
+    return host ? [host] : [];
+  });
+  const visible = new Set(moved.map((host) => host.serverId));
+  let index = 0;
+  const next = hosts.map((host) => (visible.has(host.serverId) ? moved[index++]! : host));
+  return next.every((host, position) => host === hosts[position]) ? hosts : next;
+}
+
 /**
  * Resolves which host a settings host section should target: the picker
  * selection, else the local daemon, else the first connected host.
