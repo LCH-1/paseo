@@ -1226,6 +1226,10 @@ export const en = {
       hosts: "Hosts",
       settings: "Settings",
       closeSidebar: "Close sidebar",
+      collapseAllHosts: "Collapse all hosts",
+      expandAllHosts: "Expand all hosts",
+      collapseHostProjects: "Collapse all projects on this host",
+      expandHostProjects: "Expand all projects on this host",
     },
     footer: {
       usage: "Usage",

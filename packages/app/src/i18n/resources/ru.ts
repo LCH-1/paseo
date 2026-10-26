@@ -1236,6 +1236,10 @@ export const ru: TranslationResources = {
       hosts: "Хосты",
       settings: "Настройки",
       closeSidebar: "Закрыть боковую панель",
+      collapseAllHosts: "Свернуть все хосты",
+      expandAllHosts: "Развернуть все хосты",
+      collapseHostProjects: "Свернуть все проекты на этом хосте",
+      expandHostProjects: "Развернуть все проекты на этом хосте",
     },
     footer: {
       usage: "Использование",

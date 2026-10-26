@@ -1244,6 +1244,10 @@ export const ptBR: TranslationResources = {
       hosts: "Hosts",
       settings: "Configurações",
       closeSidebar: "Fechar barra lateral",
+      collapseAllHosts: "Recolher todos os hosts",
+      expandAllHosts: "Expandir todos os hosts",
+      collapseHostProjects: "Recolher todos os projetos deste host",
+      expandHostProjects: "Expandir todos os projetos deste host",
     },
     footer: {
       usage: "Uso",

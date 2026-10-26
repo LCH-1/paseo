@@ -1210,6 +1210,10 @@ export const zhCN: TranslationResources = {
       hosts: "Hosts",
       settings: "设置",
       closeSidebar: "关闭侧边栏",
+      collapseAllHosts: "折叠所有主机",
+      expandAllHosts: "展开所有主机",
+      collapseHostProjects: "折叠此主机的所有项目",
+      expandHostProjects: "展开此主机的所有项目",
     },
     footer: {
       usage: "使用情况",

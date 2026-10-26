@@ -154,6 +154,7 @@ import { useHostBadges } from "@/hosts/use-host-badges";
 import { useSidebarRowItems } from "@/components/sidebar/display-preferences/model";
 import { PullRequestStateIcon } from "@/git/pull-request-state-icon";
 import { HostStatusDot } from "@/components/host-status-dot";
+import { SidebarCollapseHostProjectsButton } from "@/components/sidebar/sidebar-collapse-actions";
 import {
   sidebarHostGroupKey,
   sidebarHostProjectKey,
@@ -1921,6 +1922,7 @@ function SidebarHostProjectSection({
         onToggle={handleToggle}
         testID={`sidebar-host-header-${group.serverId}`}
       >
+        <SidebarCollapseHostProjectsButton group={group} />
         <HostStatusDot serverId={group.serverId} />
       </SidebarSectionHeader>
       {collapsed ? null : <View style={styles.hostProjects}>{children}</View>}

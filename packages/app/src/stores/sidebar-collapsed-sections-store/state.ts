@@ -66,6 +66,26 @@ export function setProjectCollapsed(
   return { ...state, collapsedProjectKeys: next };
 }
 
+export function setProjectsCollapsed(
+  state: CollapsedProjectsState,
+  projectKeys: readonly string[],
+  collapsed: boolean,
+): CollapsedProjectsState {
+  const next = setCollapsedKeys(state.collapsedProjectKeys, projectKeys, collapsed);
+  if (next === state.collapsedProjectKeys) return state;
+  return { ...state, collapsedProjectKeys: next };
+}
+
+export function setWorkspaceGroupsCollapsed(
+  state: CollapsedProjectsState,
+  workspaceGroupKeys: readonly string[],
+  collapsed: boolean,
+): CollapsedProjectsState {
+  const next = setCollapsedKeys(state.collapsedWorkspaceGroupKeys, workspaceGroupKeys, collapsed);
+  if (next === state.collapsedWorkspaceGroupKeys) return state;
+  return { ...state, collapsedWorkspaceGroupKeys: next };
+}
+
 export function serializeCollapsedProjects(state: CollapsedProjectsState): {
   collapsedProjectKeys: string[];
   collapsedWorkspaceGroupKeys: string[];
@@ -113,6 +133,24 @@ export function mergePersistedCollapsedProjects<S extends CollapsedProjectsState
 
 function deserializeCollapsedKeys(value: string[]): Set<string> {
   return new Set(value);
+}
+
+function setCollapsedKeys(
+  current: Set<string>,
+  keys: readonly string[],
+  collapsed: boolean,
+): Set<string> {
+  const hasChanges = keys.some((key) => current.has(key) !== collapsed);
+  if (!hasChanges) return current;
+  const next = new Set(current);
+  for (const key of keys) {
+    if (collapsed) {
+      next.add(key);
+    } else {
+      next.delete(key);
+    }
+  }
+  return next;
 }
 
 function areSetsEqual(left: Set<string>, right: Set<string>): boolean {

@@ -1232,6 +1232,10 @@ export const ja: TranslationResources = {
       hosts: "ホスト",
       settings: "設定",
       closeSidebar: "サイドバーを閉じる",
+      collapseAllHosts: "すべてのホストを折りたたむ",
+      expandAllHosts: "すべてのホストを展開",
+      collapseHostProjects: "このホストのプロジェクトをすべて折りたたむ",
+      expandHostProjects: "このホストのプロジェクトをすべて展開",
     },
     footer: {
       usage: "使用状況",

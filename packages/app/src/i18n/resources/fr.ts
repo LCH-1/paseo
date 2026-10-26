@@ -1247,6 +1247,10 @@ export const fr: TranslationResources = {
       hosts: "Hôtes",
       settings: "Paramètres",
       closeSidebar: "Fermer la barre latérale",
+      collapseAllHosts: "Réduire tous les hôtes",
+      expandAllHosts: "Développer tous les hôtes",
+      collapseHostProjects: "Réduire tous les projets de cet hôte",
+      expandHostProjects: "Développer tous les projets de cet hôte",
     },
     footer: {
       usage: "Utilisation",

@@ -1,4 +1,5 @@
 import type { SidebarHostProjectGroup } from "@/components/sidebar/host-project-groups";
+import { SidebarCollapseAllHostsButton } from "@/components/sidebar/sidebar-collapse-actions";
 import { router } from "expo-router";
 import {
   CircleGauge,
@@ -842,6 +843,7 @@ function DesktopSidebar({
 function WorkspacesSectionHeader() {
   return (
     <SidebarSectionHeader title="Workspaces">
+      <SidebarCollapseAllHostsButton />
       <Tooltip delayDuration={300}>
         <TooltipTrigger asChild>
           <View>

@@ -1254,6 +1254,10 @@ export const es: TranslationResources = {
       hosts: "Hosts",
       settings: "Ajustes",
       closeSidebar: "Cerrar barra lateral",
+      collapseAllHosts: "Contraer todos los hosts",
+      expandAllHosts: "Expandir todos los hosts",
+      collapseHostProjects: "Contraer todos los proyectos de este host",
+      expandHostProjects: "Expandir todos los proyectos de este host",
     },
     footer: {
       usage: "Uso",

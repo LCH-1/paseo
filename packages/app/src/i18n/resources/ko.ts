@@ -1225,6 +1225,10 @@ export const ko: TranslationResources = {
       hosts: "호스트",
       settings: "설정",
       closeSidebar: "사이드바 닫기",
+      collapseAllHosts: "모든 호스트 접기",
+      expandAllHosts: "모든 호스트 펼치기",
+      collapseHostProjects: "이 호스트의 프로젝트 모두 접기",
+      expandHostProjects: "이 호스트의 프로젝트 모두 펼치기",
     },
     footer: {
       usage: "사용량",

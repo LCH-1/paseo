@@ -1218,6 +1218,10 @@ export const ar: TranslationResources = {
       hosts: "المضيفون",
       settings: "إعدادات",
       closeSidebar: "إغلاق الشريط الجانبي",
+      collapseAllHosts: "طي جميع المضيفين",
+      expandAllHosts: "توسيع جميع المضيفين",
+      collapseHostProjects: "طي جميع المشاريع على هذا المضيف",
+      expandHostProjects: "توسيع جميع المشاريع على هذا المضيف",
     },
     footer: {
       usage: "الاستخدام",
