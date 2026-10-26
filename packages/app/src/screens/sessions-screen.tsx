@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useEffect, type ReactElement } from "react";
+import { useMemo, useState, useCallback, useEffect } from "react";
 import { View, Text } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import { router } from "expo-router";
@@ -13,7 +13,7 @@ import { SessionHistoryTable } from "@/screens/session-history/session-history-t
 import { SearchField } from "@/components/ui/search-field";
 import { HostFilter } from "@/components/hosts/host-filter";
 import { ALL_HOSTS_OPTION_ID } from "@/components/hosts/host-picker";
-import { type AgentHistoryHostError, useAgentHistory } from "@/hooks/use-agent-history";
+import { useAgentHistory } from "@/hooks/use-agent-history";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { useImportSession } from "@/hooks/use-import-session";
 import { useHosts } from "@/runtime/host-runtime";
@@ -24,31 +24,6 @@ import { NewWorkspaceTabsBar, useHistoryTabPresence } from "@/workspace-tabs/new
 const SEARCH_DEBOUNCE_MS = 200;
 
 const sessionsHostOptionTestID = (serverId: string) => `sessions-host-filter-item-${serverId}`;
-
-/**
- * A host that failed while others answered. Without this the list silently
- * under-reports, and under a query "No sessions match" becomes a claim the app
- * has no basis for.
- */
-function SessionHostErrorsBanner({
-  errors,
-  t,
-}: {
-  errors: AgentHistoryHostError[];
-  t: TFunction;
-}): ReactElement {
-  return (
-    <View style={styles.errorsBannerWrap}>
-      <View style={styles.errorsBanner} testID="sessions-host-errors">
-        {errors.map((error) => (
-          <Text key={error.serverId} style={styles.errorsBannerText}>
-            {t("sessions.hostLoadFailed", { host: error.serverName })}
-          </Text>
-        ))}
-      </View>
-    </View>
-  );
-}
 
 /** An empty list means something different once a query is narrowing it. */
 function resolveEmptyText(input: {
@@ -89,7 +64,6 @@ function SessionsScreenContent() {
     isError,
     isSearchSupported,
     isSearchTruncated,
-    hostErrors,
     loadMore,
     refreshAll,
   } = useAgentHistory({
@@ -182,7 +156,6 @@ function SessionsScreenContent() {
           ) : null}
         </View>
       ) : null}
-      {hostErrors.length > 0 ? <SessionHostErrorsBanner errors={hostErrors} t={t} /> : null}
       {isInitialLoad ? (
         <View style={styles.loadingContainer}>
           <LoadingSpinner size="large" color={theme.colors.foregroundMuted} />
@@ -265,23 +238,5 @@ const styles = StyleSheet.create((theme) => ({
   footerHint: {
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.base,
-  },
-  errorsBannerWrap: {
-    paddingHorizontal: {
-      xs: theme.spacing[3],
-      md: theme.spacing[6],
-    },
-    paddingTop: theme.spacing[3],
-  },
-  errorsBanner: {
-    borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.border,
-    borderRadius: theme.borderRadius.lg,
-    padding: theme.spacing[3],
-    gap: theme.spacing[1],
-  },
-  errorsBannerText: {
-    color: theme.colors.palette.red[300],
-    fontSize: theme.fontSize.sm,
   },
 }));

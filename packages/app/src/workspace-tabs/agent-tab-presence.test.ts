@@ -22,3 +22,23 @@ it("releases old sources without letting their later cleanup remove the replacem
   expect(notify).toHaveBeenCalledTimes(3);
   unsubscribe();
 });
+
+it("retains background tabs only through the current source and releases cleanly", () => {
+  const retain = vi.fn();
+  const tab = {
+    serverId: "host-a",
+    workspaceId: "workspace-a",
+    agentId: "agent-a",
+    tabId: "tab-a",
+  };
+  const release = agentTabPresenceBridge.register({
+    read: () => ({ isOpen: false, lastClosedAt: null }),
+    subscribe: () => () => {},
+    retain,
+  });
+  agentTabPresenceBridge.retain(tab);
+  expect(retain.mock.calls).toEqual([[tab]]);
+  release();
+  agentTabPresenceBridge.retain(tab);
+  expect(retain).toHaveBeenCalledTimes(1);
+});

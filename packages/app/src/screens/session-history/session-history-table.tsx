@@ -1,13 +1,16 @@
-import { useState, useSyncExternalStore, type ReactElement } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactElement } from "react";
 import { FlatList, Modal, Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { Button } from "@/components/ui/button";
+import { isWeb } from "@/constants/platform";
 import type { AggregatedAgent } from "@/hooks/use-aggregated-agents";
 import { useArchiveAgent } from "@/hooks/use-archive-agent";
 import { useCompletionTimeAgo } from "@/hooks/use-time-ago";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
+import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import { agentTabPresenceBridge } from "@/workspace-tabs/agent-tab-presence";
 import { useHistoryConversations } from "./use-history-conversations";
+import { attachHistoryRowInteractions } from "./history-row-interactions";
 
 const columns = [
   "host",
@@ -61,6 +64,7 @@ export function SessionHistoryTable({
   isLoadingPages: boolean;
 }) {
   const { rows, isLoading } = useHistoryConversations(agents);
+  const tableRef = useRef<View>(null);
   const [actionAgent, setActionAgent] = useState<AggregatedAgent | null>(null);
   const { archiveAgent } = useArchiveAgent();
   useSyncExternalStore(
@@ -68,8 +72,22 @@ export function SessionHistoryTable({
     agentTabPresenceBridge.getSnapshot,
     agentTabPresenceBridge.getSnapshot,
   );
+  useEffect(() => {
+    if (!isWeb) return;
+    const node = tableRef.current as unknown as HTMLElement | null;
+    if (!node) return;
+    return attachHistoryRowInteractions(node, ({ serverId, workspaceId, agentId }) => {
+      const tabId = useWorkspaceLayoutStore.getState().openTab({
+        workspaceKey: `${serverId}:${workspaceId}`,
+        target: { kind: "agent", agentId },
+        intent: "background",
+        pin: true,
+      });
+      if (tabId) agentTabPresenceBridge.retain({ serverId, workspaceId, agentId, tabId });
+    });
+  }, []);
   return (
-    <View style={styles.container} testID="session-history-table">
+    <View ref={tableRef} style={styles.container} testID="session-history-table">
       <View style={styles.toolbar}>
         <Text style={styles.hint}>
           {isLoading || isLoadingPages
@@ -111,6 +129,11 @@ export function SessionHistoryTable({
               return (
                 <Pressable
                   testID={`history-row-${agent.serverId}-${agent.id}`}
+                  dataSet={{
+                    historyServerId: agent.serverId,
+                    historyWorkspaceId: agent.workspaceId,
+                    historyAgentId: agent.id,
+                  }}
                   style={({ pressed }) => [styles.row, pressed && styles.pressed]}
                   accessibilityRole="button"
                   accessibilityLabel={`${workspaceName}, ${agent.title ?? ""}`}
