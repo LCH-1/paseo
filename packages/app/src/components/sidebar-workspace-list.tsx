@@ -100,6 +100,7 @@ import { useLongPressDragInteraction } from "@/components/sidebar/use-long-press
 import { SidebarSectionHeader } from "@/components/sidebar/sidebar-section-header";
 import { SidebarGroupToggleRow } from "@/components/sidebar/sidebar-group-toggle-row";
 import { useLimitedSidebarGroup } from "@/components/sidebar/use-limited-sidebar-group";
+import { useSidebarWorkspaceReveal } from "@/components/sidebar/use-sidebar-workspace-reveal";
 import {
   SidebarWorkspaceRowFrame,
   SidebarWorkspaceRowContent,
@@ -1958,6 +1959,12 @@ export function SidebarWorkspaceList({
   parentGestureRef,
   dragGestureHostActive,
 }: SidebarWorkspaceListProps) {
+  useSidebarWorkspaceReveal({
+    projects,
+    pinnedGroups,
+    workspaceGroups,
+    groupMode,
+  });
   const pathname = usePathname();
   const hosts = useHosts();
   const rowItems = useSidebarRowItems();

@@ -18,6 +18,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import { stripHostWorkspaceRouteEchoSearchFromBrowserUrlAfterCommit } from "@/utils/host-route-browser";
 import { navigateToHostWorkspaceRoute } from "@/navigation/workspace-route-navigation";
+import { useSidebarRevealStore } from "@/stores/sidebar-reveal-store";
 
 export type { ActiveWorkspaceSelection } from "@/stores/last-workspace-selection";
 export type { NavigateToWorkspaceInput } from "./navigation";
@@ -60,7 +61,9 @@ export function getIsLastWorkspaceSelectionHydrated(): boolean {
 }
 
 export function navigateToWorkspace(input: NavigateToWorkspaceInput): string {
-  return navigateToWorkspacePure(input, navigateDeps());
+  const route = navigateToWorkspacePure(input, navigateDeps());
+  useSidebarRevealStore.getState().reveal(input);
+  return route;
 }
 
 export function navigateToLastWorkspace(): boolean {
