@@ -94,18 +94,22 @@ function FullRowCollapsibleHeader({
 
   return (
     <View style={[styles.header, styles.fullRowHeader, isDragging && styles.headerDragging]}>
-      <Pressable
+      <View
         {...dragAttributes}
         {...dragHandleProps?.listeners}
         ref={dragHandleProps?.setActivatorNodeRef as unknown as Ref<View>}
-        accessibilityRole="button"
-        accessibilityLabel={title}
-        accessibilityState={accessibilityState}
-        onPress={isDragging ? undefined : onToggle}
-        onLongPress={drag}
-        style={fullRowToggleStyle}
-        testID={testID}
-      />
+        style={styles.fullRowToggle}
+      >
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={title}
+          accessibilityState={accessibilityState}
+          onPress={isDragging ? undefined : onToggle}
+          onLongPress={drag}
+          style={fullRowToggleStyle}
+          testID={testID}
+        />
+      </View>
       <View pointerEvents="none" style={styles.fullRowTitle}>
         <Text style={[styles.title, styles.fullRowTitleText]} numberOfLines={1}>
           {title}
