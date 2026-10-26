@@ -2,6 +2,23 @@ import React, { type ComponentProps } from "react";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import type { WorkspaceTabPresentation } from "./workspace-tab-presentation";
+import { useCompletionTimeAgo } from "@/hooks/use-time-ago";
+
+function AgentTabCompletionAge({ completedAt }: { completedAt: number }) {
+  const date = new Date(completedAt);
+  const label = useCompletionTimeAgo(date);
+  return (
+    <Text
+      testID="agent-tab-completion-age"
+      style={styles.completionAge}
+      selectable={false}
+      accessibilityLabel={`작업 완료 ${date.toLocaleString()}, ${label} 경과`}
+      dataSet={{ completedAt: date.toISOString() }}
+    >
+      {label}
+    </Text>
+  );
+}
 
 export function resolveWorkspaceTabTitleLines(
   presentation: Pick<WorkspaceTabPresentation, "kind" | "titleState" | "titleLines">,
@@ -17,7 +34,13 @@ export function workspaceTabTitleSignature(
   titleLines: WorkspaceTabPresentation["titleLines"],
   isPreview = false,
 ): string {
-  return JSON.stringify([label, titleLines?.primaryLabel, titleLines?.secondaryLabel, isPreview]);
+  return JSON.stringify([
+    label,
+    titleLines?.primaryLabel,
+    titleLines?.secondaryLabel,
+    isPreview,
+    titleLines?.completedAt != null,
+  ]);
 }
 
 export function WorkspaceTabTitle({
@@ -52,15 +75,30 @@ export function WorkspaceTabTitle({
 
   return (
     <View style={measurement ? styles.measurementLines : styles.lines} onLayout={onLayout}>
-      <Text
-        testID={measurement ? undefined : "agent-tab-title-line-primary"}
-        style={[labelStyle, styles.primary, fontStyle, measurement && styles.measurement]}
-        selectable={false}
-        numberOfLines={1}
-        ellipsizeMode="tail"
-      >
-        {titleLines.primaryLabel}
-      </Text>
+      <View style={styles.primaryRow}>
+        <Text
+          testID={measurement ? undefined : "agent-tab-title-line-primary"}
+          style={[
+            labelStyle,
+            styles.primary,
+            styles.projectLabel,
+            fontStyle,
+            measurement && styles.measurement,
+          ]}
+          selectable={false}
+          numberOfLines={1}
+          ellipsizeMode="tail"
+        >
+          {titleLines.primaryLabel}
+        </Text>
+        {titleLines.completedAt != null ? (
+          measurement ? (
+            <Text style={styles.completionAge}>00m</Text>
+          ) : (
+            <AgentTabCompletionAge completedAt={titleLines.completedAt} />
+          )
+        ) : null}
+      </View>
       <Text
         testID={measurement ? undefined : "agent-tab-title-line-secondary"}
         style={[labelStyle, styles.secondary, fontStyle, measurement && styles.measurement]}
@@ -90,6 +128,24 @@ const styles = StyleSheet.create((theme) => ({
   primary: {
     fontSize: 10,
     lineHeight: 11,
+    color: theme.colors.foregroundMuted,
+  },
+  primaryRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  projectLabel: {
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  completionAge: {
+    flexShrink: 0,
+    width: 30,
+    fontSize: 10,
+    lineHeight: 11,
+    fontVariant: ["tabular-nums"],
+    textAlign: "right",
     color: theme.colors.foregroundMuted,
   },
   secondary: {

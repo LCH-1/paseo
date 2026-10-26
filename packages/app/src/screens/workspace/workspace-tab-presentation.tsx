@@ -18,12 +18,15 @@ import {
 } from "@/utils/status-indicator-geometry";
 import type { Theme } from "@/styles/theme";
 import { usePanelInstanceAttributes } from "@/panels/panel-instance-attributes";
+import { useSessionStore } from "@/stores/session-store";
+import { selectAgentTabCompletedAt } from "./agent-tab-completion";
 
 export interface WorkspaceTabPresentation {
   key: string;
   kind: WorkspaceTabDescriptor["kind"];
   label: string;
-  titleLines?: { primaryLabel: string; secondaryLabel: string };
+  titleLines?: { primaryLabel: string; secondaryLabel: string; completedAt?: number | null };
+  completedAt?: number | null;
   isPreview?: boolean;
   subtitle: string;
   tooltip: string;
@@ -84,13 +87,19 @@ function WorkspaceTabPresentationResolverInner({
     tabId: tab.tabId,
   });
   const attributes = usePanelInstanceAttributes({ serverId, workspaceId, tabId: tab.tabId });
+  const completedAt = useSessionStore((state) =>
+    tab.target.kind === "agent"
+      ? selectAgentTabCompletedAt(state.sessions[serverId], tab.target.agentId)
+      : null,
+  );
 
   const presentation = useMemo(
     () => ({
       key: tab.key,
       kind: tab.kind,
       label: descriptor.label,
-      titleLines: descriptor.titleLines,
+      titleLines: descriptor.titleLines ? { ...descriptor.titleLines, completedAt } : undefined,
+      completedAt,
       subtitle: descriptor.subtitle,
       tooltip: descriptor.tooltip,
       modified: attributes.modified,
@@ -103,6 +112,7 @@ function WorkspaceTabPresentationResolverInner({
       descriptor.icon,
       descriptor.label,
       descriptor.titleLines,
+      completedAt,
       descriptor.tooltip,
       descriptor.statusBucket,
       descriptor.subtitle,

@@ -2,7 +2,7 @@
  * How often a relative label can change, which is all a caller needs to know to keep it honest.
  * `static` means it never will again.
  */
-export type RelativeTimeResolution = "minute" | "hour" | "day" | "static";
+export type RelativeTimeResolution = "second" | "minute" | "hour" | "day" | "static";
 
 export interface RelativeTimeLabel {
   label: string;
@@ -85,6 +85,14 @@ export function describeCompactTimeAgo(date: Date, now: Date = new Date()): Rela
 
 export function formatCompactTimeAgo(date: Date, now: Date = new Date()): string {
   return describeCompactTimeAgo(date, now).label;
+}
+
+export function describeCompletionTimeAgo(date: Date, now: Date = new Date()): RelativeTimeLabel {
+  const elapsed = Math.max(0, now.getTime() - date.getTime());
+  if (elapsed < MINUTE_MS) return { label: `${Math.floor(elapsed / 1000)}s`, resolution: "second" };
+  if (elapsed < HOUR_MS) return { label: `${Math.floor(elapsed / MINUTE_MS)}m`, resolution: "minute" };
+  if (elapsed < DAY_MS) return { label: `${Math.floor(elapsed / HOUR_MS)}h`, resolution: "hour" };
+  return { label: `${Math.floor(elapsed / DAY_MS)}d`, resolution: "day" };
 }
 
 /**
