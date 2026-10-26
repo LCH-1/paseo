@@ -136,16 +136,16 @@ function SelectionCard({ settings }: SettingsProps) {
         />
       ) : null}
       <SettingsAction
-        label={t("apply")}
-        actionLabel={busy ? t("working") : t("applyLabel")}
-        disabled={disabled}
-        onPress={apply}
-      />
-      <SettingsAction
         label={t("defaults")}
         actionLabel={t("save")}
         disabled={disabled}
         onPress={save}
+      />
+      <SettingsAction
+        label={t("apply")}
+        actionLabel={busy ? t("working") : t("applyLabel")}
+        disabled={disabled}
+        onPress={apply}
       />
     </SettingsCard>
   );
