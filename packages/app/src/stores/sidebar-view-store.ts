@@ -5,11 +5,11 @@ import { z } from "zod";
 import { workspaceLabelKey } from "@getpaseo/protocol/workspace-labels";
 import { createValidatedPersistStorage } from "@/storage/validated-persist-storage";
 
-export type SidebarGroupMode = "project" | "status";
+export type SidebarGroupMode = "project" | "host" | "status";
 
 const SIDEBAR_VIEW_STORAGE_KEY = "sidebar-view";
 const LEGACY_SIDEBAR_GROUP_MODE_STORAGE_KEY = "sidebar-group-mode";
-const SIDEBAR_VIEW_STORE_VERSION = 7;
+const SIDEBAR_VIEW_STORE_VERSION = 8;
 
 /**
  * The key standing for "this workspace carries no labels at all".
@@ -82,7 +82,7 @@ interface SidebarViewPersistedState {
   labelFilter: SidebarLabelFilter;
 }
 
-const PersistedSidebarGroupModeSchema = z.enum(["project", "status", "label"]);
+const PersistedSidebarGroupModeSchema = z.enum(["project", "host", "status", "label"]);
 const SidebarLabelFilterSchema = z.object({
   labels: z.array(z.string()),
 });
@@ -146,9 +146,11 @@ export function migrateSidebarViewState(persistedState: unknown): SidebarViewPer
     };
   }
 
+  const groupMode =
+    state.groupMode === "host" || state.groupMode === "status" ? state.groupMode : "project";
   return {
     showBackground: state.showBackground ?? false,
-    groupMode: state.groupMode === "status" ? "status" : "project",
+    groupMode,
     hostFilters: readHostFilters(state),
     projectFilters: state.projectFilters ?? [],
     labelFilter: state.labelFilter

@@ -1181,6 +1181,7 @@ export const ru: TranslationResources = {
       grouping: {
         label: "Группировка",
         project: "Проект",
+        host: "Хосты и проекты",
         status: "Статус",
         labels: "Метки",
       },

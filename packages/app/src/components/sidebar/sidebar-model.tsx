@@ -17,6 +17,8 @@ import {
 import { useSidebarOrderStore } from "@/stores/sidebar-order-store";
 import type { SidebarShortcutModel } from "@/utils/sidebar-shortcuts";
 import { buildSidebarProjection } from "./sidebar-projection";
+import { filterSidebarProjectHosts, type SidebarHostProjectGroup } from "./host-project-groups";
+import { useHosts } from "@/runtime/host-runtime";
 import type { SidebarProjectIconTarget } from "@/utils/sidebar-project-row-model";
 import { filterWorkspacesByLabels, type SidebarWorkspaceGroup } from "./sidebar-labels";
 import { filterWorkspacesByProjects, resolveActiveProjectFilters } from "./sidebar-project-filter";
@@ -39,6 +41,7 @@ interface SidebarModel extends SidebarWorkspacesListResult {
   hasProjectsBeforeFilter: boolean;
   groupMode: SidebarGroupMode;
   workspaceGroups: SidebarWorkspaceGroup[];
+  hostGroups: SidebarHostProjectGroup[];
   projectIconTargets: SidebarProjectIconTarget[];
   pinnedGroups: PinnedSidebarGroups;
   collapsedProjectKeys: ReadonlySet<string>;
@@ -57,6 +60,8 @@ export function SidebarModelProvider({
 }) {
   const { t } = useTranslation();
   const list = useSidebarWorkspacesList({ enabled: active });
+  const hosts = useHosts();
+  const serverIds = useMemo(() => hosts.map((host) => host.serverId), [hosts]);
   const showBackground = useSidebarViewStore((state) => state.showBackground);
   const groupMode = useSidebarViewStore((state) => state.groupMode);
   const labelFilter = useSidebarViewStore((state) => state.labelFilter);
@@ -98,7 +103,7 @@ export function SidebarModelProvider({
   // anything; the label filter reads `labels`, which only exists on an entry. Hydration opens a
   // live session-store subscription over every workspace on every visible host, so widening this
   // for a filter that does not need it costs a retained-but-inactive sidebar real work.
-  const needsWorkspaceEntries = groupMode !== "project" || hasActiveLabelFilter;
+  const needsWorkspaceEntries = groupMode === "status" || hasActiveLabelFilter;
   const workspaceEntriesByKey = useSidebarWorkspaceEntries(
     list.workspacePlacements,
     active !== false || needsWorkspaceEntries,
@@ -133,8 +138,16 @@ export function SidebarModelProvider({
         const workspaces = project.workspaces.filter((workspace) =>
           visibleWorkspaceKeys.has(workspace.workspaceKey),
         );
+        const projectHosts =
+          groupMode === "host"
+            ? filterSidebarProjectHosts({
+                project,
+                workspaces,
+                keepEmptyProjects: !hasActiveLabelFilter,
+              })
+            : project.hosts;
         return workspaces.length > 0 || (!hasActiveLabelFilter && project.workspaces.length === 0)
-          ? [{ ...project, workspaces }]
+          ? [{ ...project, hosts: projectHosts, workspaces }]
           : [];
       });
     }
@@ -145,12 +158,14 @@ export function SidebarModelProvider({
     hasActiveProjectFilter,
     resolvedProjectFilters,
     list.projects,
+    groupMode,
     visibleWorkspaceKeys,
   ]);
   const pinnedKeys = usePinnedSidebarKeys(filteredProjects);
   const projectionInput = useMemo(
     () => ({
       projects: filteredProjects,
+      serverIds,
       pinnedKeys,
       pinnedWorkspaceOrder,
       workspaceEntriesByKey: filteredWorkspaceEntriesByKey,
@@ -167,6 +182,7 @@ export function SidebarModelProvider({
       groupMode,
       list.projectNamesByViewKey,
       filteredProjects,
+      serverIds,
       pinnedCollapsed,
       pinnedKeys,
       pinnedWorkspaceOrder,
@@ -185,6 +201,7 @@ export function SidebarModelProvider({
       workspaceEntriesByKey: filteredWorkspaceEntriesByKey,
       groupMode,
       workspaceGroups: projection.workspaceGroups,
+      hostGroups: projection.hostGroups,
       projectIconTargets: projection.projectIconTargets,
       pinnedGroups: projection.pinnedGroups,
       collapsedProjectKeys,

@@ -1,3 +1,4 @@
+import type { SidebarHostProjectGroup } from "@/components/sidebar/host-project-groups";
 import { router } from "expo-router";
 import {
   CircleGauge,
@@ -90,6 +91,7 @@ const DEV_BUILD_LABEL = process.env.EXPO_PUBLIC_PASEO_DEV_BUILD_LABEL?.trim() ||
 interface SidebarSharedProps {
   theme: SidebarTheme;
   workspaceGroups: SidebarWorkspaceGroup[];
+  hostGroups: SidebarHostProjectGroup[];
   projectIconTargets: SidebarProjectIconTarget[];
   pinnedGroups: PinnedSidebarGroups;
   projects: SidebarProjectEntry[];
@@ -149,6 +151,7 @@ export const LeftSidebar = memo(function LeftSidebar({ active }: { active: boole
     isRevalidating,
     refreshAll,
     workspaceGroups,
+    hostGroups,
     projectIconTargets,
     pinnedGroups,
     collapsedProjectKeys,
@@ -233,6 +236,7 @@ export const LeftSidebar = memo(function LeftSidebar({ active }: { active: boole
   const sharedProps = {
     theme,
     workspaceGroups,
+    hostGroups,
     projectIconTargets,
     pinnedGroups,
     projects,
@@ -523,6 +527,7 @@ function MobileSidebar({
   active,
   theme,
   workspaceGroups,
+  hostGroups,
   projectIconTargets,
   pinnedGroups,
   projects,
@@ -591,6 +596,7 @@ function MobileSidebar({
             shortcutIndexByWorkspaceKey={shortcutIndexByWorkspaceKey}
             groupMode={groupMode}
             workspaceGroups={workspaceGroups}
+            hostGroups={hostGroups}
             projectIconTargets={projectIconTargets}
             pinnedGroups={pinnedGroups}
             projects={projects}
@@ -652,6 +658,7 @@ function SidebarCloseButton({ label, onPress }: { label: string; onPress: () => 
 function DesktopSidebar({
   theme,
   workspaceGroups,
+  hostGroups,
   projectIconTargets,
   pinnedGroups,
   projects,
@@ -796,6 +803,7 @@ function DesktopSidebar({
             shortcutIndexByWorkspaceKey={shortcutIndexByWorkspaceKey}
             groupMode={groupMode}
             workspaceGroups={workspaceGroups}
+            hostGroups={hostGroups}
             projectIconTargets={projectIconTargets}
             pinnedGroups={pinnedGroups}
             projects={projects}

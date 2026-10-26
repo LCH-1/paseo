@@ -1172,6 +1172,7 @@ export const en = {
       grouping: {
         label: "Grouping",
         project: "Project",
+        host: "Hosts and projects",
         status: "Status",
         labels: "Labels",
       },

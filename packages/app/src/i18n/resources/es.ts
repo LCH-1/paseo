@@ -1200,6 +1200,7 @@ export const es: TranslationResources = {
       grouping: {
         label: "Agrupación",
         project: "Proyecto",
+        host: "Hosts y proyectos",
         status: "Estado",
         labels: "Etiquetas",
       },

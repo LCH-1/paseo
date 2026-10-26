@@ -1192,6 +1192,7 @@ export const fr: TranslationResources = {
       grouping: {
         label: "Regroupement",
         project: "Projet",
+        host: "Hôtes et projets",
         status: "Statut",
         labels: "Libellés",
       },

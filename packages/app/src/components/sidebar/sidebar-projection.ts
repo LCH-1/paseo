@@ -20,9 +20,16 @@ import {
   type SidebarShortcutSection,
 } from "@/utils/sidebar-shortcuts";
 import { statusWorkspaceGroups, type SidebarWorkspaceGroup } from "./sidebar-labels";
+import {
+  buildSidebarHostProjectGroups,
+  sidebarHostGroupKey,
+  sidebarHostProjectKey,
+  type SidebarHostProjectGroup,
+} from "./host-project-groups";
 
 export interface SidebarProjection {
   pinnedGroups: PinnedSidebarGroups;
+  hostGroups: SidebarHostProjectGroup[];
   workspaceGroups: SidebarWorkspaceGroup[];
   /**
    * The project icons this projection needs fetched, keyed by `projectViewKey` — one per project,
@@ -38,6 +45,7 @@ export interface SidebarProjection {
 
 export interface SidebarProjectionInput {
   projects: SidebarProjectEntry[];
+  serverIds: readonly string[];
   pinnedKeys: PinnedSidebarKeys;
   pinnedWorkspaceOrder: string[];
   workspaceEntriesByKey: ReadonlyMap<string, SidebarWorkspaceEntry>;
@@ -63,6 +71,10 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
   // two cannot disagree and a new grouping mode is a compile error here rather than a silent
   // fall-through to the project rows.
   const workspaceGroups = buildWorkspaceGroups(input, unpinnedWorkspaces);
+  const hostGroups = buildSidebarHostProjectGroups({
+    projects: pinnedGroups.unpinnedProjects,
+    serverIds: input.serverIds,
+  });
 
   const sections: SidebarShortcutSection[] = [];
   if (!input.pinnedCollapsed) {
@@ -75,6 +87,22 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
         collapsed: input.collapsedProjectKeys.has(project.viewKey),
       })),
     );
+  } else if (input.groupMode === "host") {
+    for (const group of hostGroups) {
+      const hostCollapsed = input.collapsedWorkspaceGroupKeys.has(
+        sidebarHostGroupKey(group.serverId),
+      );
+      sections.push(
+        ...group.projects.map((project) => {
+          const projectKey = sidebarHostProjectKey({
+            serverId: group.serverId,
+            projectViewKey: project.viewKey,
+          });
+          const collapsed = hostCollapsed || input.collapsedProjectKeys.has(projectKey);
+          return { workspaces: project.workspaces, collapsed };
+        }),
+      );
+    }
   } else {
     sections.push(
       ...workspaceGroups.map((group) => ({
@@ -86,19 +114,21 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
 
   return {
     pinnedGroups,
+    hostGroups,
     workspaceGroups,
     projectIconTargets: resolveSidebarProjectIconTargets(input.projects),
     shortcutModel: buildSidebarShortcutSections({ sections }),
   };
 }
 
-/** Project mode keeps its project headers and groups nothing; status mode groups the rows. */
+/** Project and host modes keep project headers; status mode groups the workspace rows. */
 function buildWorkspaceGroups(
   input: SidebarProjectionInput,
   unpinnedWorkspaces: SidebarWorkspaceEntry[],
 ): SidebarWorkspaceGroup[] {
   switch (input.groupMode) {
     case "project":
+    case "host":
       return [];
     case "status":
       return statusWorkspaceGroups(

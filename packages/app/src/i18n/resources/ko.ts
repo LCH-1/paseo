@@ -1171,6 +1171,7 @@ export const ko: TranslationResources = {
       grouping: {
         label: "그룹화",
         project: "프로젝트",
+        host: "호스트·프로젝트",
         status: "상태",
         labels: "레이블",
       },

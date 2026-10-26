@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { StateStorage } from "zustand/middleware";
 import {
   createSidebarViewStorage,
@@ -121,6 +122,39 @@ describe("sidebar view store", () => {
       projectFilters: [],
       labelFilter: { labels: [] },
     });
+  });
+
+  it("keeps host grouping and the other facets during version migration", () => {
+    expect(
+      migrateSidebarViewState({
+        showBackground: true,
+        groupMode: "host",
+        hostFilters: ["host-a"],
+        projectFilters: ["project-a"],
+        labelFilter: { labels: ["urgent"] },
+      }),
+    ).toEqual({
+      showBackground: true,
+      groupMode: "host",
+      hostFilters: ["host-a"],
+      projectFilters: ["project-a"],
+      labelFilter: { labels: ["urgent"] },
+    });
+  });
+
+  it.each([7, 8])("rehydrates host grouping from persisted version %i", async (version) => {
+    const state = {
+      showBackground: true,
+      groupMode: "host",
+      hostFilters: ["host-a", "host-b"],
+      projectFilters: ["project-a"],
+      labelFilter: { labels: ["urgent"] },
+    };
+    await AsyncStorage.setItem("sidebar-view", JSON.stringify({ state, version }));
+
+    await useSidebarViewStore.persist.rehydrate();
+
+    expect(useSidebarViewStore.getState()).toMatchObject(state);
   });
 
   it("clears only the label facet", () => {

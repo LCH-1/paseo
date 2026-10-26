@@ -153,6 +153,12 @@ import type { HostBadgeModel } from "@/hosts/appearance";
 import { useHostBadges } from "@/hosts/use-host-badges";
 import { useSidebarRowItems } from "@/components/sidebar/display-preferences/model";
 import { PullRequestStateIcon } from "@/git/pull-request-state-icon";
+import { HostStatusDot } from "@/components/host-status-dot";
+import {
+  sidebarHostGroupKey,
+  sidebarHostProjectKey,
+  type SidebarHostProjectGroup,
+} from "@/components/sidebar/host-project-groups";
 
 const workspaceKeyExtractor = (workspace: SidebarWorkspacePlacement) => workspace.workspaceKey;
 
@@ -214,6 +220,7 @@ function selectionForSelectedWorkspace(
 
 interface SidebarWorkspaceListProps {
   workspaceGroups: SidebarWorkspaceGroup[];
+  hostGroups: SidebarHostProjectGroup[];
   /** What `useProjectIcons` is asked for, straight from the projection. See `SidebarProjection`. */
   projectIconTargets: SidebarProjectIconTarget[];
   pinnedGroups: PinnedSidebarGroups;
@@ -1545,6 +1552,7 @@ function WorkspaceRow({
 
 function ProjectBlock({
   project,
+  collapseKey = project.viewKey,
   workspaceEntriesByKey,
   collapsed,
   displayName,
@@ -1570,6 +1578,7 @@ function ProjectBlock({
   onToggleWorkspacePin,
 }: {
   project: SidebarProjectEntry;
+  collapseKey?: string;
   workspaceEntriesByKey: ReadonlyMap<string, SidebarWorkspaceEntry>;
   collapsed: boolean;
   displayName: string;
@@ -1751,8 +1760,8 @@ function ProjectBlock({
   }, [isRemovingProject, displayName, t, toast, project.hosts]);
 
   const handleToggleCollapsed = useCallback(() => {
-    onToggleCollapsed(project.viewKey);
-  }, [onToggleCollapsed, project.viewKey]);
+    onToggleCollapsed(collapseKey);
+  }, [onToggleCollapsed, collapseKey]);
 
   let projectChildren = null;
   if (!collapsed) {
@@ -1834,6 +1843,7 @@ type ProjectBlockProps = Parameters<typeof ProjectBlock>[0];
 function areProjectBlockPropsEqual(previous: ProjectBlockProps, next: ProjectBlockProps): boolean {
   return (
     previous.project === next.project &&
+    previous.collapseKey === next.collapseKey &&
     previous.workspaceEntriesByKey === next.workspaceEntriesByKey &&
     previous.collapsed === next.collapsed &&
     previous.displayName === next.displayName &&
@@ -1889,8 +1899,38 @@ function areProjectBlockSelectionsEqual(
 
 const MemoProjectBlock = memo(ProjectBlock, areProjectBlockPropsEqual);
 
+function SidebarHostProjectSection({
+  group,
+  label,
+  children,
+}: PropsWithChildren<{ group: SidebarHostProjectGroup; label: string }>) {
+  const groupKey = sidebarHostGroupKey(group.serverId);
+  const collapsed = useSidebarCollapsedSectionsStore((state) =>
+    state.collapsedWorkspaceGroupKeys.has(groupKey),
+  );
+  const toggleCollapsed = useSidebarCollapsedSectionsStore(
+    (state) => state.toggleWorkspaceGroupCollapsed,
+  );
+  const handleToggle = useCallback(() => toggleCollapsed(groupKey), [toggleCollapsed, groupKey]);
+
+  return (
+    <View testID={`sidebar-host-group-${group.serverId}`}>
+      <SidebarSectionHeader
+        title={label}
+        collapsed={collapsed}
+        onToggle={handleToggle}
+        testID={`sidebar-host-header-${group.serverId}`}
+      >
+        <HostStatusDot serverId={group.serverId} />
+      </SidebarSectionHeader>
+      {collapsed ? null : <View style={styles.hostProjects}>{children}</View>}
+    </View>
+  );
+}
+
 export function SidebarWorkspaceList({
   workspaceGroups,
+  hostGroups,
   projectIconTargets,
   pinnedGroups,
   projects,
@@ -1963,11 +2003,8 @@ export function SidebarWorkspaceList({
   // reach the display menu to reveal their work again.
   const sidebarFilterEmpty = hasProjectsBeforeFilter && projects.length === 0;
 
-  // Project mode is the one that keeps its project headers; every other grouping mode is a flat
-  // list of grouped rows, so a new mode lands in the grouped branch rather than silently in this
-  // one's `else`.
   const content =
-    groupMode !== "project" ? (
+    groupMode === "status" ? (
       <SidebarGroupedModeList
         workspaceGroups={workspaceGroups}
         pinnedGroups={pinnedGroups}
@@ -1986,6 +2023,8 @@ export function SidebarWorkspaceList({
       />
     ) : (
       <ProjectModeList
+        hostGroups={hostGroups}
+        groupMode={groupMode}
         projects={projects}
         pinnedGroups={pinnedGroups}
         workspaceEntriesByKey={workspaceEntriesByKey}
@@ -2083,6 +2122,8 @@ function SidebarGroupedModeList({
 
 function ProjectModeList({
   projects,
+  hostGroups,
+  groupMode,
   pinnedGroups,
   workspaceEntriesByKey,
   projectIconByProjectViewKey,
@@ -2108,7 +2149,6 @@ function ProjectModeList({
   SidebarWorkspaceListProps,
   | "workspaceGroups"
   | "projectIconTargets"
-  | "groupMode"
   | "hasProjectsBeforeFilter"
   | "isRefreshing"
   | "onRefresh"
@@ -2124,6 +2164,11 @@ function ProjectModeList({
   onPinnedWorkspaceReorder: (workspaces: SidebarWorkspacePlacement[]) => void;
 }) {
   const { t } = useTranslation();
+  const hosts = useHosts();
+  const hostLabels = useMemo(
+    () => new Map(hosts.map((host) => [host.serverId, host.label])),
+    [hosts],
+  );
   const hasActiveHostFilter = useSidebarViewStore((state) => state.hostFilters.length > 0);
   const [creatingWorkspaceIds, setCreatingWorkspaceIds] = useState<Set<string>>(() => new Set());
   const creatingWorkspaceTimeoutsRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
@@ -2295,12 +2340,20 @@ function ProjectModeList({
         dragHandleProps?: DraggableRenderItemInfo<SidebarProjectEntry>["dragHandleProps"];
       },
     ) => {
+      const collapseKey =
+        groupMode === "host"
+          ? sidebarHostProjectKey({
+              serverId: item.hosts[0].serverId,
+              projectViewKey: item.viewKey,
+            })
+          : item.viewKey;
       return (
         <MemoProjectBlock
           key={item.viewKey}
           project={item}
+          collapseKey={collapseKey}
           workspaceEntriesByKey={workspaceEntriesByKey}
-          collapsed={collapsedProjectKeys.has(item.viewKey)}
+          collapsed={collapsedProjectKeys.has(collapseKey)}
           displayName={item.projectName}
           iconDataUri={projectIconByProjectViewKey.get(item.viewKey) ?? null}
           selectionEnabled={selectionEnabled}
@@ -2326,6 +2379,7 @@ function ProjectModeList({
       );
     },
     [
+      groupMode,
       collapsedProjectKeys,
       activeWorkspaceSelection,
       handleWorktreeCreated,
@@ -2399,13 +2453,11 @@ function ProjectModeList({
     ],
   );
 
-  const projectBody =
-    projects.length === 0 ? (
-      <SidebarProjectEmptyState onAddProject={onAddProject} onImportSession={onImportSession} />
-    ) : (
+  function renderProjectList(items: SidebarProjectEntry[], testID: string) {
+    return (
       <DraggableList
-        testID="sidebar-project-list"
-        data={unpinnedProjects}
+        testID={testID}
+        data={items}
         keyExtractor={projectViewKeyExtractor}
         renderItem={renderProject}
         onDragEnd={handleProjectDragEnd}
@@ -2418,6 +2470,30 @@ function ProjectModeList({
         containerStyle={styles.projectListContainer}
       />
     );
+  }
+
+  let projectBody =
+    groupMode === "host" ? (
+      <View testID="sidebar-host-project-list">
+        {hostGroups.map((group) => (
+          <SidebarHostProjectSection
+            key={group.serverId}
+            group={group}
+            label={hostLabels.get(group.serverId) ?? group.serverId}
+          >
+            {renderProjectList(group.projects, `sidebar-host-projects-${group.serverId}`)}
+          </SidebarHostProjectSection>
+        ))}
+      </View>
+    ) : (
+      renderProjectList(unpinnedProjects, "sidebar-project-list")
+    );
+
+  if (projects.length === 0) {
+    projectBody = (
+      <SidebarProjectEmptyState onAddProject={onAddProject} onImportSession={onImportSession} />
+    );
+  }
 
   const content = (
     <>
@@ -2515,6 +2591,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   projectListContainer: {
     width: "100%",
+  },
+  hostProjects: {
+    paddingLeft: theme.spacing[3],
   },
   pinnedSection: {
     marginBottom: theme.spacing[1],
