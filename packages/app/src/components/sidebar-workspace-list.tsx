@@ -1920,10 +1920,15 @@ function SidebarHostProjectSection({
         title={label}
         collapsed={collapsed}
         onToggle={handleToggle}
+        fullRowToggle
         testID={`sidebar-host-header-${group.serverId}`}
       >
-        <SidebarCollapseHostProjectsButton group={group} />
-        <HostStatusDot serverId={group.serverId} />
+        <View pointerEvents="auto">
+          <SidebarCollapseHostProjectsButton group={group} />
+        </View>
+        <View pointerEvents="none">
+          <HostStatusDot serverId={group.serverId} />
+        </View>
       </SidebarSectionHeader>
       {collapsed ? null : <View style={styles.hostProjects}>{children}</View>}
     </View>

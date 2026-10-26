@@ -1,6 +1,6 @@
 import { useMemo, type ReactNode } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react-native";
-import { Pressable, Text, View } from "react-native";
+import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { DensityIcon } from "@/components/ui/density-icon";
 import { useIsCompactFormFactor } from "@/constants/layout";
@@ -8,20 +8,34 @@ import { isNative } from "@/constants/platform";
 import { density } from "@/styles/density";
 
 /** A sidebar section label such as "Pinned" or "Workspaces". A section with `onToggle`
- * collapses from its title; children sit at the trailing edge as its actions. */
+ * collapses from its title or row; children sit at the trailing edge as its actions. */
 export function SidebarSectionHeader({
   title,
   collapsed,
   onToggle,
   testID,
   children,
+  fullRowToggle = false,
 }: {
   title: string;
   collapsed?: boolean;
   onToggle?: () => void;
   testID?: string;
   children?: ReactNode;
+  fullRowToggle?: boolean;
 }) {
+  if (fullRowToggle && onToggle) {
+    return (
+      <FullRowCollapsibleHeader
+        title={title}
+        collapsed={collapsed ?? false}
+        onToggle={onToggle}
+        testID={testID}
+      >
+        {children}
+      </FullRowCollapsibleHeader>
+    );
+  }
   return (
     <View style={styles.header}>
       {onToggle ? (
@@ -39,6 +53,54 @@ export function SidebarSectionHeader({
       {children ? <View style={styles.actions}>{children}</View> : null}
     </View>
   );
+}
+
+function FullRowCollapsibleHeader({
+  title,
+  collapsed,
+  onToggle,
+  testID,
+  children,
+}: {
+  title: string;
+  collapsed: boolean;
+  onToggle: () => void;
+  testID?: string;
+  children?: ReactNode;
+}) {
+  const accessibilityState = useMemo(() => ({ expanded: !collapsed }), [collapsed]);
+
+  return (
+    <View style={styles.header}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={title}
+        accessibilityState={accessibilityState}
+        onPress={onToggle}
+        style={fullRowToggleStyle}
+        testID={testID}
+      />
+      <View pointerEvents="none" style={styles.fullRowTitle}>
+        <Text style={[styles.title, styles.fullRowTitleText]} numberOfLines={1}>
+          {title}
+        </Text>
+        <DensityIcon
+          icon={collapsed ? ChevronRight : ChevronDown}
+          size="xs"
+          color="foregroundMuted"
+        />
+      </View>
+      {children ? (
+        <View pointerEvents="box-none" style={styles.actions}>
+          {children}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function fullRowToggleStyle({ hovered, pressed }: PressableStateCallbackType) {
+  return [styles.fullRowToggle, (hovered || pressed) && styles.fullRowToggleActive];
 }
 
 function CollapsibleTitle({
@@ -101,6 +163,26 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[1],
     marginLeft: -theme.spacing[2],
     paddingHorizontal: theme.spacing[2],
+  },
+  fullRowToggle: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  fullRowToggleActive: {
+    backgroundColor: theme.colors.interactionHighlight,
+  },
+  fullRowTitle: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+  },
+  fullRowTitleText: {
+    flexShrink: 1,
   },
   title: {
     color: theme.colors.foregroundMuted,
