@@ -9,6 +9,7 @@ import {
   resolveKnownHostRoute,
   buildSessionsRoute,
   buildSettingsAddHostRoute,
+  buildSettingsSectionRoute,
   buildProjectSettingsRoute,
   buildProjectsSettingsRoute,
   decodeFilePathFromPathSegment,
@@ -263,6 +264,10 @@ describe("host settings section slugs", () => {
 });
 
 describe("settings section slugs", () => {
+  it("opens global session settings as a dedicated settings section", () => {
+    expect(isSettingsSectionSlug("session")).toBe(true);
+    expect(buildSettingsSectionRoute("session")).toBe("/settings/session");
+  });
   it("includes desktop notification settings", () => {
     expect(isSettingsSectionSlug("notifications")).toBe(true);
   });

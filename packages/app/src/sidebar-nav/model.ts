@@ -8,7 +8,7 @@ export type SidebarSection = PluginSidebarSection;
  * (Add project and the Hosts, Help and support, Settings icons) is fixed.
  */
 export const BUILTIN_SIDEBAR_ITEM_IDS = {
-  header: ["new-workspace", "history", "search", "schedules"],
+  header: ["new-workspace", "history", "search", "session-settings"],
   footer: ["usage"],
 } as const satisfies Record<SidebarSection, readonly string[]>;
 
@@ -44,7 +44,7 @@ const BUILTIN_LABEL_KEYS: Record<BuiltinSidebarItemId, string> = {
   "new-workspace": "sidebar.actions.newWorkspace",
   history: "sidebar.sections.sessions",
   search: "sidebar.sections.search",
-  schedules: "sidebar.sections.schedules",
+  "session-settings": "sessionSettings:navigationTitle",
   usage: "sidebar.footer.usage",
 };
 
@@ -61,7 +61,7 @@ const BUILTIN_SHORTCUT_ACTIONS: Record<BuiltinSidebarItemId, string | null> = {
   "new-workspace": "new-workspace",
   history: null,
   search: "toggle-command-center",
-  schedules: null,
+  "session-settings": null,
   usage: null,
 };
 
@@ -90,6 +90,19 @@ function isBuiltinSidebarItemId<Section extends SidebarSection>(
   return ids.includes(key);
 }
 
+function resolveLegacyPreferences(input: {
+  section: SidebarSection;
+  preferences: readonly SidebarNavPreference[];
+}): readonly SidebarNavPreference[] {
+  if (input.section !== "header") return input.preferences;
+  const hasSessionSettings = input.preferences.some((item) => item.key === "session-settings");
+  // COMPAT(sidebarSchedulesSlot): added 2026-10-26, remove after 2027-04-26.
+  return input.preferences.flatMap((item) => {
+    if (item.key !== "schedules") return [item];
+    return hasSessionSettings ? [] : [{ key: "session-settings", visible: true }];
+  });
+}
+
 export function resolveSidebarNavItems<Section extends SidebarSection>(input: {
   section: Section;
   pluginGroups: readonly PluginSidebarGroup[];
@@ -103,7 +116,7 @@ export function resolveSidebarNavItems<Section extends SidebarSection>(input: {
   const items: SidebarNavItem<Section>[] = [];
   const placed = new Set<string>();
 
-  for (const preference of input.preferences) {
+  for (const preference of resolveLegacyPreferences(input)) {
     if (placed.has(preference.key)) continue;
     const group = groupsByKey.get(preference.key);
     if (group) {
@@ -150,6 +163,7 @@ function toPreferences(
   const seenPrevious = new Set<string>();
 
   for (const preference of previous) {
+    if (preference.key === "schedules") continue;
     if (seenPrevious.has(preference.key)) continue;
     seenPrevious.add(preference.key);
 

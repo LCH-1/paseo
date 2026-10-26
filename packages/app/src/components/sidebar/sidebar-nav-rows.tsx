@@ -1,5 +1,5 @@
 import { router, usePathname } from "expo-router";
-import { CalendarClock, History, Plus, Search } from "lucide-react-native";
+import { History, Plus, Search, Settings } from "lucide-react-native";
 import { memo, useCallback, useMemo, useRef, type ComponentType, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
@@ -18,7 +18,7 @@ import { useSidebarNavItems } from "@/sidebar-nav/use-sidebar-nav-items";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useWorkspace } from "@/stores/session-store-hooks";
-import { buildSchedulesRoute, buildSessionsRoute } from "@/utils/host-routes";
+import { buildSettingsSectionRoute, buildSessionsRoute } from "@/utils/host-routes";
 import { newWorkspaceTabsBridge } from "@/workspace-tabs/new-workspace-tabs";
 
 interface SidebarNavRowProps {
@@ -161,21 +161,21 @@ function SidebarSearchRow({ onBeforeNavigate }: SidebarNavRowProps) {
   );
 }
 
-function SidebarSchedulesRow({ onBeforeNavigate }: SidebarNavRowProps) {
+function SidebarSessionSettingsRow({ onBeforeNavigate }: SidebarNavRowProps) {
   const { t } = useTranslation();
   const pathname = usePathname();
   const handlePress = useCallback(() => {
     onBeforeNavigate?.();
-    router.push(buildSchedulesRoute());
+    router.push(buildSettingsSectionRoute("session"));
   }, [onBeforeNavigate]);
 
   return (
     <SidebarHeaderRow
-      icon={CalendarClock}
-      label={t(builtinSidebarNavLabelKey("schedules"))}
+      icon={Settings}
+      label={t(builtinSidebarNavLabelKey("session-settings"))}
       onPress={handlePress}
-      isActive={pathname.includes("/schedules")}
-      testID="sidebar-schedules"
+      isActive={pathname === buildSettingsSectionRoute("session")}
+      testID="sidebar-session-settings"
       variant="compact"
     />
   );
@@ -185,7 +185,7 @@ const BUILTIN_ROWS: Record<BuiltinSidebarNavId, ComponentType<SidebarNavRowProps
   "new-workspace": SidebarNewWorkspaceRow,
   history: SidebarHistoryRow,
   search: SidebarSearchRow,
-  schedules: SidebarSchedulesRow,
+  "session-settings": SidebarSessionSettingsRow,
 };
 
 const styles = StyleSheet.create({

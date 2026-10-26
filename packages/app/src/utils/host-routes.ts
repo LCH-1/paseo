@@ -491,6 +491,7 @@ export function resolveKnownHostRoute(input: {
 
 export const SETTINGS_SECTION_SLUGS = [
   "general",
+  "session",
   "appearance",
   "sidebar",
   "chat",

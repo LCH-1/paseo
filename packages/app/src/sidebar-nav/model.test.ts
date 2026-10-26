@@ -31,6 +31,53 @@ function summarize(items: readonly SidebarNavItem[]): SidebarNavPreference[] {
 }
 
 describe("resolveSidebarNavItems", () => {
+  it("replaces the saved schedules slot with visible global settings", () => {
+    const preferences = [
+      { key: kanbanKey, visible: true },
+      { key: "schedules", visible: false },
+      { key: "search", visible: true },
+    ];
+    const items = resolveSidebarNavItems({
+      section: "header",
+      pluginGroups: [kanban],
+      preferences,
+    });
+    expect(summarize(items).slice(0, 3)).toEqual([
+      { key: kanbanKey, visible: true },
+      { key: "session-settings", visible: true },
+      { key: "search", visible: true },
+    ]);
+    const saved = setSidebarNavItemVisible({
+      items,
+      key: "session-settings",
+      visible: false,
+      previous: preferences,
+    });
+    expect(saved.some((item) => item.key === "schedules")).toBe(false);
+    expect(
+      summarize(
+        resolveSidebarNavItems({ section: "header", pluginGroups: [kanban], preferences: saved }),
+      ),
+    ).toEqual(saved);
+  });
+
+  it("prefers explicit global settings preferences over the old schedules slot", () => {
+    const items = resolveSidebarNavItems({
+      section: "header",
+      pluginGroups: [],
+      preferences: [
+        { key: "schedules", visible: true },
+        { key: "search", visible: true },
+        { key: "session-settings", visible: false },
+      ],
+    });
+    expect(summarize(items).slice(0, 2)).toEqual([
+      { key: "search", visible: true },
+      { key: "session-settings", visible: false },
+    ]);
+    expect(items.filter((item) => item.key === "session-settings")).toHaveLength(1);
+  });
+
   it("yields builtins then plugins, all visible, when nothing is stored", () => {
     const items = resolveSidebarNavItems({
       section: "header",
@@ -42,7 +89,7 @@ describe("resolveSidebarNavItems", () => {
       { key: "new-workspace", visible: true },
       { key: "history", visible: true },
       { key: "search", visible: true },
-      { key: "schedules", visible: true },
+      { key: "session-settings", visible: true },
       { key: kanbanKey, visible: true },
       { key: notesKey, visible: true },
     ]);
@@ -61,14 +108,14 @@ describe("resolveSidebarNavItems", () => {
       pluginGroups: [notes, kanban],
       preferences: [
         { key: kanbanKey, visible: false },
-        { key: "schedules", visible: true },
+        { key: "session-settings", visible: true },
         { key: "new-workspace", visible: false },
       ],
     });
 
     expect(summarize(items)).toEqual([
       { key: kanbanKey, visible: false },
-      { key: "schedules", visible: true },
+      { key: "session-settings", visible: true },
       { key: "new-workspace", visible: false },
       { key: "history", visible: true },
       { key: "search", visible: true },
@@ -91,7 +138,7 @@ describe("resolveSidebarNavItems", () => {
       "history",
       "new-workspace",
       "search",
-      "schedules",
+      "session-settings",
     ]);
   });
 
@@ -109,7 +156,7 @@ describe("resolveSidebarNavItems", () => {
       { key: "history", visible: false },
       { key: "new-workspace", visible: true },
       { key: "search", visible: true },
-      { key: "schedules", visible: true },
+      { key: "session-settings", visible: true },
     ]);
   });
 });
@@ -138,7 +185,7 @@ describe("setSidebarNavItemVisible", () => {
       { key: "new-workspace", visible: true },
       { key: "history", visible: true },
       { key: "search", visible: false },
-      { key: "schedules", visible: true },
+      { key: "session-settings", visible: true },
       { key: kanbanKey, visible: true },
     ]);
   });
@@ -161,7 +208,7 @@ describe("setSidebarNavItemVisible", () => {
       { key: "history", visible: false },
       { key: "new-workspace", visible: true },
       { key: "search", visible: true },
-      { key: "schedules", visible: true },
+      { key: "session-settings", visible: true },
     ]);
   });
 
@@ -171,7 +218,7 @@ describe("setSidebarNavItemVisible", () => {
       { key: notesKey, visible: false },
       { key: "history", visible: true },
       { key: "search", visible: true },
-      { key: "schedules", visible: true },
+      { key: "session-settings", visible: true },
     ];
     const items = resolveSidebarNavItems({
       section: "header",
@@ -186,7 +233,7 @@ describe("setSidebarNavItemVisible", () => {
       { key: notesKey, visible: false },
       { key: "history", visible: false },
       { key: "search", visible: true },
-      { key: "schedules", visible: true },
+      { key: "session-settings", visible: true },
     ]);
     expect(
       summarize(
@@ -226,20 +273,25 @@ describe("moveSidebarNavItem", () => {
       "new-workspace",
       "search",
       "history",
-      "schedules",
+      "session-settings",
       kanbanKey,
     ]);
   });
 
   it("moves an item down", () => {
-    const next = moveSidebarNavItem({ items, key: "schedules", direction: "down", previous: [] });
+    const next = moveSidebarNavItem({
+      items,
+      key: "session-settings",
+      direction: "down",
+      previous: [],
+    });
 
     expect(next.map((preference) => preference.key)).toEqual([
       "new-workspace",
       "history",
       "search",
       kanbanKey,
-      "schedules",
+      "session-settings",
     ]);
   });
 
@@ -281,7 +333,7 @@ describe("builtinSidebarNavShortcutAction", () => {
     expect(builtinSidebarNavShortcutAction("new-workspace")).toBe("new-workspace");
     expect(builtinSidebarNavShortcutAction("search")).toBe("toggle-command-center");
     expect(builtinSidebarNavShortcutAction("history")).toBeNull();
-    expect(builtinSidebarNavShortcutAction("schedules")).toBeNull();
+    expect(builtinSidebarNavShortcutAction("session-settings")).toBeNull();
   });
 });
 

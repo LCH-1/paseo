@@ -154,6 +154,12 @@ interface SidebarSectionItem {
 const SIDEBAR_SECTION_ITEMS: SidebarSectionItem[] = [
   { id: "general", labelKey: "settings.sections.general", icon: Settings },
   {
+    id: "session",
+    labelKey: "sessionSettings:navigationTitle",
+    icon: Settings,
+    Content: SessionSettingsSection,
+  },
+  {
     id: "appearance",
     labelKey: "settings.sections.appearance",
     icon: Palette,
@@ -1381,7 +1387,6 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
             <>
               <GeneralSection settings={settings} handleLanguageChange={handleLanguageChange} />
               <SendingSection />
-              <SessionSettingsSection />
               {isDesktopApp ? <OpenLocationSection /> : null}
             </>
           );
