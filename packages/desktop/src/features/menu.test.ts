@@ -1,5 +1,51 @@
-import { describe, expect, it } from "vitest";
-import { reloadActiveBrowserOrWindow } from "./menu.js";
+import { describe, expect, it, vi } from "vitest";
+import { reloadActiveBrowserOrWindow, setupApplicationMenu } from "./menu.js";
+
+const electron = vi.hoisted(() => ({
+  app: { name: "Paseo", on: vi.fn() },
+  Menu: {
+    buildFromTemplate: vi.fn((template: Electron.MenuItemConstructorOptions[]) => ({ template })),
+    setApplicationMenu: vi.fn(),
+  },
+  BrowserWindow: vi.fn(),
+  ipcMain: { handle: vi.fn() },
+}));
+
+vi.mock("electron", () => electron);
+
+function windowMenuForPlatform(platform: NodeJS.Platform): Electron.MenuItemConstructorOptions[] {
+  const original = Object.getOwnPropertyDescriptor(process, "platform");
+  if (!original) throw new Error("Process platform descriptor is unavailable");
+  try {
+    Object.defineProperty(process, "platform", { value: platform });
+    setupApplicationMenu({ onNewWindow: vi.fn() });
+  } finally {
+    Object.defineProperty(process, "platform", original);
+  }
+  const template = electron.Menu.buildFromTemplate.mock.calls.at(-1)?.[0];
+  const submenu = template?.find((item) => item.label === "Window")?.submenu;
+  if (!Array.isArray(submenu)) throw new Error("Window menu is unavailable");
+  return submenu;
+}
+
+describe("application window menu", () => {
+  it.each(["win32", "linux"] as const)("reserves Alt+F4 for window close on %s", (platform) => {
+    expect(windowMenuForPlatform(platform)).toEqual([
+      { role: "minimize" },
+      { role: "zoom" },
+      { role: "close", accelerator: "Alt+F4" },
+    ]);
+  });
+
+  it("preserves the macOS window menu", () => {
+    expect(windowMenuForPlatform("darwin")).toEqual([
+      { role: "minimize" },
+      { role: "zoom" },
+      { type: "separator" },
+      { role: "front" },
+    ]);
+  });
+});
 
 class FakeWebContents {
   public readonly reloads: string[] = [];

@@ -175,7 +175,7 @@ function buildApplicationMenuTemplate(
         { role: "zoom" },
         ...(isMac
           ? [{ type: "separator" as const }, { role: "front" as const }]
-          : [{ role: "close" as const }]),
+          : [{ role: "close" as const, accelerator: "Alt+F4" }]),
       ],
     },
   ];
