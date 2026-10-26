@@ -93,10 +93,10 @@ import { recordRenderProfileReasons, RenderProfile } from "@/utils/render-profil
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { isNative } from "@/constants/platform";
 import { panelTargetSupportsHost } from "@/plugins/workspace-panels/locations";
+import { SidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
 
 interface SplitContainerProps {
   layout: WorkspaceLayout;
-  renderMainHeader?: () => ReactNode;
   renderExplorerSidebarHeaderAction?: () => ReactNode;
   workspaceKey: string;
   normalizedServerId: string;
@@ -309,7 +309,6 @@ const dropCollisionDetection: CollisionDetection = (args) => {
 
 export function SplitContainer({
   layout,
-  renderMainHeader,
   renderExplorerSidebarHeaderAction,
   workspaceKey,
   normalizedServerId,
@@ -342,8 +341,8 @@ export function SplitContainer({
   focusModeEnabled,
   onExitFocusMode,
 }: SplitContainerProps) {
-  const inheritedWindowChromeCorners = useWindowChromeCorners();
-  const windowChromeCorners = focusModeEnabled ? inheritedWindowChromeCorners : "none";
+  // The workspace header lives in the left sidebar, so the pane tab rows sit at the window top.
+  const windowChromeCorners = useWindowChromeCorners();
   const [activeDragTabId, setActiveDragTabId] = useState<string | null>(null);
   const [dropPreview, setDropPreview] = useState<SplitDropZoneHover | null>(null);
   const [tabDropPreview, setTabDropPreview] = useState<TabDropPreview | null>(null);
@@ -433,8 +432,8 @@ export function SplitContainer({
     !focusModeEnabled && explorerSidebarPane && explorerSidebarPane.hidden !== true,
   );
   const mainColumnWindowChromeCorners = renderExplorerSidebarDock
-    ? removeWindowChromeCorner(inheritedWindowChromeCorners, "top-right")
-    : inheritedWindowChromeCorners;
+    ? removeWindowChromeCorner(windowChromeCorners, "top-right")
+    : windowChromeCorners;
   const mainColumnStyle = styles.mainColumn;
   const explorerSidebarDockStyle = useMemo(
     () => [styles.explorerSidebarDock, inlineUnistylesStyle({ width: explorerSidebarWidth })],
@@ -646,7 +645,6 @@ export function SplitContainer({
         <View style={styles.workspaceShell} onLayout={handleWorkspaceShellLayout}>
           <WindowChromeRegion corners={mainColumnWindowChromeCorners}>
             <View style={mainColumnStyle}>
-              {renderMainHeader?.()}
               {splitRoot.usesFallbackStrip && <WindowChromeSafeArea placement="below" />}
               {renderRoot ? (
                 <SplitNodeView
@@ -1262,40 +1260,45 @@ const SplitPaneView = memo(function SplitPaneView({
       >
         <WindowChromeSafeArea placement="inline" style={styles.paneTabs}>
           <TitlebarDragRegion />
-          <WorkspaceDesktopTabsRow
-            paneId={pane.id}
-            isFocused={isFocused && isWorkspaceFocused}
-            tabs={desktopTabRowItems}
-            normalizedServerId={normalizedServerId}
-            normalizedWorkspaceId={normalizedWorkspaceId}
-            setHoveredCloseTabKey={setHoveredCloseTabKey}
-            onNavigateTab={onNavigateTab}
-            onCloseTab={onCloseTab}
-            onCopyResumeCommand={onCopyResumeCommand}
-            onCopyAgentId={onCopyAgentId}
-            onCopyTerminalId={onCopyTerminalId}
-            onCopyFilePath={onCopyFilePath}
-            onReloadAgent={onReloadAgent}
-            onRenameTab={onRenameTab}
-            onCloseTabsToLeft={handleCloseTabsToLeft}
-            onCloseTabsToRight={handleCloseTabsToRight}
-            onCloseOtherTabs={handleCloseOtherTabs}
-            onCreateNewTab={onCreateNewTab}
-            onReorderTabs={handleReorderTabs}
-            externalDndContext
-            activeDragTabId={activeDragTabId}
-            tabDropPreviewIndex={
-              tabDropPreview?.paneId === pane.id ? tabDropPreview.indicatorIndex : null
-            }
-            showPaneSplitActions={!focusModeEnabled}
-            showPaneMaximizeAction={workspaceHasMultiplePanes && !focusModeEnabled}
-            paneMaximized={paneId === maximizedPaneId}
-            onTogglePaneMaximized={handleTogglePaneMaximized}
-            onSplitRight={handleSplitRight}
-            onSplitDown={handleSplitDown}
-            focusModeEnabled={Boolean(focusModeEnabled)}
-            onExitFocusMode={onExitFocusMode}
-          />
+          <View style={styles.paneTabsRow}>
+            {focusModeEnabled ? null : <SidebarMenuToggle />}
+            <View style={styles.paneTabsFill}>
+              <WorkspaceDesktopTabsRow
+                paneId={pane.id}
+                isFocused={isFocused && isWorkspaceFocused}
+                tabs={desktopTabRowItems}
+                normalizedServerId={normalizedServerId}
+                normalizedWorkspaceId={normalizedWorkspaceId}
+                setHoveredCloseTabKey={setHoveredCloseTabKey}
+                onNavigateTab={onNavigateTab}
+                onCloseTab={onCloseTab}
+                onCopyResumeCommand={onCopyResumeCommand}
+                onCopyAgentId={onCopyAgentId}
+                onCopyTerminalId={onCopyTerminalId}
+                onCopyFilePath={onCopyFilePath}
+                onReloadAgent={onReloadAgent}
+                onRenameTab={onRenameTab}
+                onCloseTabsToLeft={handleCloseTabsToLeft}
+                onCloseTabsToRight={handleCloseTabsToRight}
+                onCloseOtherTabs={handleCloseOtherTabs}
+                onCreateNewTab={onCreateNewTab}
+                onReorderTabs={handleReorderTabs}
+                externalDndContext
+                activeDragTabId={activeDragTabId}
+                tabDropPreviewIndex={
+                  tabDropPreview?.paneId === pane.id ? tabDropPreview.indicatorIndex : null
+                }
+                showPaneSplitActions={!focusModeEnabled}
+                showPaneMaximizeAction={workspaceHasMultiplePanes && !focusModeEnabled}
+                paneMaximized={paneId === maximizedPaneId}
+                onTogglePaneMaximized={handleTogglePaneMaximized}
+                onSplitRight={handleSplitRight}
+                onSplitDown={handleSplitDown}
+                focusModeEnabled={Boolean(focusModeEnabled)}
+                onExitFocusMode={onExitFocusMode}
+              />
+            </View>
+          </View>
         </WindowChromeSafeArea>
 
         <View style={styles.paneContent}>
@@ -1428,6 +1431,15 @@ const styles = StyleSheet.create((theme) => ({
   },
   paneTabs: {
     position: "relative",
+    minWidth: 0,
+  },
+  paneTabsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    minWidth: 0,
+  },
+  paneTabsFill: {
+    flex: 1,
     minWidth: 0,
   },
   paneContent: {
