@@ -1789,6 +1789,7 @@ function WorkspaceScreenContent({
     useWorkspaceTabRename({
       client,
       normalizedServerId,
+      normalizedWorkspaceId,
       queryClient,
       terminalsData: terminalsQuery.data,
       terminalsQueryKey,

@@ -9,7 +9,7 @@ import type { TFunction } from "i18next";
 import { MenuHeader } from "@/components/headers/menu-header";
 import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
-import { AgentList } from "@/components/agent-list";
+import { SessionHistoryTable } from "@/screens/session-history/session-history-table";
 import { SearchField } from "@/components/ui/search-field";
 import { HostFilter } from "@/components/hosts/host-filter";
 import { ALL_HOSTS_OPTION_ID } from "@/components/hosts/host-picker";
@@ -97,6 +97,10 @@ function SessionsScreenContent() {
   const isSearching = isSearchSupported && search.length > 0;
 
   useEffect(() => {
+    if (hasMore && !isLoadingMore && !isError) loadMore();
+  }, [hasMore, isLoadingMore, isError, loadMore]);
+
+  useEffect(() => {
     if (
       selectedHost !== ALL_HOSTS_OPTION_ID &&
       !hosts.some((host) => host.serverId === selectedHost)
@@ -112,7 +116,6 @@ function SessionsScreenContent() {
     void refreshAll().finally(() => setIsManualRefresh(false));
   }, [refreshAll]);
 
-  // Searching filters the chronological history without changing its date buckets.
   const emptyText = resolveEmptyText({
     t,
     isSearching,
@@ -208,15 +211,12 @@ function SessionsScreenContent() {
         </View>
       ) : null}
       {!isInitialLoad && !showLoadError && agents.length > 0 ? (
-        <AgentList
+        <SessionHistoryTable
           agents={agents}
-          showCheckoutInfo={false}
           isRefreshing={isManualRefresh}
           onRefresh={handleRefresh}
-          listFooterComponent={listFooterComponent}
-          showAttentionIndicator={false}
-          showHostColumn
-          search={isSearching ? search : undefined}
+          footer={listFooterComponent}
+          isLoadingPages={hasMore || isLoadingMore}
         />
       ) : null}
       {importSession.sheet}
