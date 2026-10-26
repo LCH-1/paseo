@@ -173,6 +173,57 @@ export function WorkspaceHeaderMenuDesktop(props: WorkspaceHeaderWorkspaceAction
   );
 }
 
+export interface WorkspaceHeaderMenuOverflowProps extends WorkspaceHeaderWorkspaceActions {
+  title: string;
+  subtitle: string;
+  scripts: UseWorkspaceScriptsMenuPagesInput;
+}
+
+/**
+ * Desktop has no workspace header; the tab strip's trailing ⋯ carries the workspace name, scripts
+ * and workspace actions instead.
+ */
+export function WorkspaceHeaderMenuOverflow({
+  title,
+  subtitle,
+  scripts,
+  ...workspaceActions
+}: WorkspaceHeaderMenuOverflowProps) {
+  const { t } = useTranslation();
+  const scriptsMenu = useWorkspaceScriptsMenuPages(scripts);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        testID="workspace-header-menu-trigger"
+        style={workspaceHeaderMenuButtonStyle}
+        accessibilityRole="button"
+        accessibilityLabel={
+          scriptsMenu.needsAttention
+            ? t("workspace.header.actions.workspaceActionsUnhealthy")
+            : t("workspace.header.actions.workspaceActions")
+        }
+      >
+        {scriptsMenu.needsAttention ? (
+          <WorkspaceHeaderMenuAttentionTriggerIcon />
+        ) : (
+          <WorkspaceHeaderMenuTriggerIcon />
+        )}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        width={260}
+        testID="workspace-header-menu"
+        pages={scriptsMenu.pages}
+      >
+        <DropdownMenuLabel>{subtitle ? `${title} · ${subtitle}` : title}</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {scriptsMenu.trigger}
+        <WorkspaceHeaderWorkspaceActionItems {...workspaceActions} />
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 interface HeaderMenuProfileItemProps {
   profile: TerminalProfile;
   disabled: boolean;

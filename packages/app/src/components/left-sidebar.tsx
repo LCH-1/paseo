@@ -40,7 +40,6 @@ import { HostPicker } from "@/components/hosts/host-picker";
 import { SidebarDisplayPreferencesMenu } from "@/components/sidebar/display-preferences/menu";
 import { SidebarSeparator } from "@/components/sidebar/sidebar-separator";
 import { SidebarNavRows } from "@/components/sidebar/sidebar-nav-rows";
-import { WorkspaceSidebarHeaderHost } from "@/components/sidebar/workspace-sidebar-header-slot";
 import { SidebarFooterIconHighlight } from "@/components/sidebar/sidebar-footer-icon-highlight";
 import { SidebarHelpMenu } from "@/components/sidebar/sidebar-help-menu";
 import { SidebarResizeHandle } from "@/components/sidebar-resize-handle";
@@ -793,7 +792,6 @@ function DesktopSidebar({
           ) : (
             <TitlebarDragRegion />
           )}
-          <WorkspaceSidebarHeaderHost />
           <SidebarNavRows style={sidebarHeaderGroupStyle} />
         </View>
 

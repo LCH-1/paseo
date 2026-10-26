@@ -44,7 +44,6 @@ import {
   MobileWorkspaceTabSwitcher,
 } from "@/screens/workspace/compact-workspace-header";
 import { WorkspaceHeaderProjectRow } from "@/screens/workspace/workspace-header-project-row";
-import { WorkspaceSidebarHeaderPortal } from "@/components/sidebar/workspace-sidebar-header-slot";
 import { ScreenTitle } from "@/components/headers/screen-title";
 import {
   FloatingPanelPortalHost,
@@ -204,6 +203,7 @@ import type { TerminalProfile } from "@getpaseo/protocol/messages";
 import {
   WorkspaceHeaderMenuDesktop,
   WorkspaceHeaderMenuMobile,
+  WorkspaceHeaderMenuOverflow,
 } from "@/screens/workspace/workspace-header-menu";
 import { PluginHeaderButtons } from "@/plugins";
 import {
@@ -471,7 +471,6 @@ interface WorkspaceHeaderTitleBarProps {
   onCopyWorkspacePath: () => void;
   onCopyBranchName: () => void;
   onOpenSetupTab: () => void;
-  stacked?: boolean;
 }
 
 function WorkspaceHeaderTitleBar({
@@ -488,19 +487,15 @@ function WorkspaceHeaderTitleBar({
   onCopyWorkspacePath,
   onCopyBranchName,
   onOpenSetupTab,
-  stacked,
 }: WorkspaceHeaderTitleBarProps) {
-  const textGroupStyle = stacked
-    ? [styles.headerTitleTextGroup, styles.headerTitleTextGroupStacked]
-    : styles.headerTitleTextGroup;
   return (
     <View style={styles.headerTitleContainer}>
       {isLoading ? (
-        <View style={textGroupStyle}>
+        <View style={styles.headerTitleTextGroup}>
           <View style={styles.headerTitleSkeleton} />
         </View>
       ) : (
-        <View style={textGroupStyle}>
+        <View style={styles.headerTitleTextGroup}>
           <ScreenTitle testID="workspace-header-title">{title}</ScreenTitle>
           <WorkspaceHeaderProjectRow
             subtitle={subtitle}
@@ -522,30 +517,6 @@ function WorkspaceHeaderTitleBar({
         />
       </View>
     </View>
-  );
-}
-
-function WorkspaceSidebarHeader({
-  rendersSplitLayout,
-  showHeader,
-  isFocused,
-  actions,
-  ...titleBarProps
-}: Omit<WorkspaceHeaderTitleBarProps, "stacked"> & {
-  rendersSplitLayout: boolean;
-  showHeader: boolean;
-  isFocused: boolean;
-  actions: ReactNode;
-}) {
-  // Retained workspaces stay mounted; only the focused one may fill the shared sidebar slot.
-  if (!rendersSplitLayout || !showHeader || !isFocused) return null;
-  return (
-    <WorkspaceSidebarHeaderPortal>
-      <View style={styles.sidebarHeader} testID="workspace-sidebar-header">
-        <WorkspaceHeaderTitleBar {...titleBarProps} stacked />
-        <View style={styles.sidebarHeaderActions}>{actions}</View>
-      </View>
-    </WorkspaceSidebarHeaderPortal>
   );
 }
 
@@ -3535,6 +3506,66 @@ function WorkspaceScreenContent({
       workspaceHeaderTitle,
     ],
   );
+  const paneTrailing = useMemo(
+    () => (
+      <>
+        <PluginHeaderButtons serverId={normalizedServerId} workspaceId={normalizedWorkspaceId} />
+        {workspaceDirectory ? (
+          <>
+            <WorkspaceOpenInEditorButton
+              serverId={normalizedServerId}
+              cwd={workspaceDirectory}
+              activeFile={activeFileLocation}
+              hideLabels
+            />
+            <WorkspaceActions serverId={normalizedServerId} cwd={workspaceDirectory} />
+            <WorkspaceHeaderExplorerToggle
+              owner={explorerToggleOwner}
+              onPress={handleToggleExplorerSidebar}
+              label={explorerSidebarToggleLabel}
+              tooltipLabel={t("workspace.tabs.explorerSidebar.toggle")}
+              tooltipKeys={EXPLORER_TOGGLE_KEYS}
+              accessibilityState={explorerSidebarToggleAccessibilityState}
+            />
+          </>
+        ) : null}
+        <WorkspaceHeaderMenuOverflow
+          title={workspaceHeaderTitle}
+          subtitle={workspaceHeaderSubtitle}
+          scripts={compactHeaderScripts}
+          currentBranchName={currentBranchName}
+          showWorkspaceSetup={showWorkspaceSetup}
+          importAgentDisabled={!canOpenImportSheet}
+          copyPathDisabled={!workspaceDirectory}
+          onOpenImportSheet={openImportSheet}
+          onCopyWorkspacePath={handleCopyWorkspacePath}
+          onCopyBranchName={handleCopyBranchName}
+          onOpenSetupTab={handleOpenSetupTab}
+        />
+      </>
+    ),
+    [
+      activeFileLocation,
+      canOpenImportSheet,
+      compactHeaderScripts,
+      currentBranchName,
+      explorerSidebarToggleAccessibilityState,
+      explorerSidebarToggleLabel,
+      explorerToggleOwner,
+      handleCopyBranchName,
+      handleCopyWorkspacePath,
+      handleOpenSetupTab,
+      handleToggleExplorerSidebar,
+      normalizedServerId,
+      normalizedWorkspaceId,
+      openImportSheet,
+      showWorkspaceSetup,
+      t,
+      workspaceDirectory,
+      workspaceHeaderSubtitle,
+      workspaceHeaderTitle,
+    ],
+  );
   const desktopSplitContent = useMemo(() => {
     if (!canRenderDesktopPaneSplits || !workspaceLayout || !persistenceKey) {
       return null;
@@ -3542,6 +3573,7 @@ function WorkspaceScreenContent({
     return (
       <SplitContainer
         layout={workspaceLayout}
+        paneTrailing={paneTrailing}
         renderExplorerSidebarHeaderAction={renderExplorerSidebarHeaderAction}
         focusModeEnabled={desktopFocusModeEnabled}
         onExitFocusMode={toggleFocusMode}
@@ -3578,6 +3610,7 @@ function WorkspaceScreenContent({
   }, [
     canRenderDesktopPaneSplits,
     workspaceLayout,
+    paneTrailing,
     renderExplorerSidebarHeaderAction,
     persistenceKey,
     desktopFocusModeEnabled,
@@ -3611,27 +3644,6 @@ function WorkspaceScreenContent({
   ]);
   const desktopContent = desktopSplitContent ?? content;
   const rendersDesktopSplitContent = !isMobile && desktopSplitContent !== null;
-  const sidebarWorkspaceHeader = (
-    <WorkspaceSidebarHeader
-      rendersSplitLayout={rendersDesktopSplitContent}
-      showHeader={showScreenHeader}
-      isFocused={isRouteFocused}
-      actions={headerRight}
-      isLoading={isWorkspaceHeaderLoading}
-      title={workspaceHeaderTitle}
-      subtitle={workspaceHeaderSubtitle}
-      isSubtitleDistinct={isWorkspaceHeaderSubtitleDistinct}
-      currentBranchName={currentBranchName}
-      normalizedServerId={normalizedServerId}
-      showWorkspaceSetup={showWorkspaceSetup}
-      importAgentDisabled={!canOpenImportSheet}
-      copyPathDisabled={!workspaceDirectory}
-      onOpenImportSheet={openImportSheet}
-      onCopyWorkspacePath={handleCopyWorkspacePath}
-      onCopyBranchName={handleCopyBranchName}
-      onOpenSetupTab={handleOpenSetupTab}
-    />
-  );
 
   const workspacePanelTabIds = useMemo(
     () => [...uiTabs.map((tab) => tab.tabId), ...sheets.map((sheet) => sheet.tab.tabId)],
@@ -3675,7 +3687,7 @@ function WorkspaceScreenContent({
     </WorkspacePanelProviders>
   ) : (
     <View style={styles.centerColumn}>
-      {rendersDesktopSplitContent ? sidebarWorkspaceHeader : renderWorkspaceScreenHeader()}
+      {rendersDesktopSplitContent ? null : renderWorkspaceScreenHeader()}
 
       {shouldRenderDesktopPaneFallback ? (
         <NewTabLauncherProvider value={newTabLauncher}>
@@ -3857,24 +3869,6 @@ const styles = StyleSheet.create((theme) => ({
       xs: 0,
       md: theme.spacing[2],
     },
-  },
-  headerTitleTextGroupStacked: {
-    flexGrow: 1,
-    flexDirection: "column",
-    alignItems: "stretch",
-    gap: 0,
-  },
-  sidebarHeader: {
-    gap: theme.spacing[1.5],
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[2],
-    borderBottomWidth: theme.borderWidth[1],
-    borderBottomColor: theme.colors.border,
-  },
-  sidebarHeaderActions: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
   },
   headerTitleSkeleton: {
     width: 220,
