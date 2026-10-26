@@ -120,6 +120,7 @@ export function SortableInlineList<T>({
   disabled = false,
   activationDistance = 8,
   onDragBegin,
+  onDragStartKey,
   externalDndContext = false,
   activeId: externalActiveId = null,
   getItemData,
@@ -128,6 +129,7 @@ export function SortableInlineList<T>({
   keyExtractor: (item: T, index: number) => string;
   renderItem: (info: DraggableRenderItemInfo<T>) => ReactElement;
   onDragEnd?: (data: T[]) => void;
+  onDragStartKey?: (key: string) => void;
   useDragHandle?: boolean;
   disabled?: boolean;
   activationDistance?: number;
@@ -147,6 +149,13 @@ export function SortableInlineList<T>({
     onDragBegin,
     disabled,
   });
+  const handleDragStart = useCallback(
+    (event: import("@dnd-kit/core").DragStartEvent) => {
+      onDragStartKey?.(String(event.active.id));
+      handlers.onDragStart(event);
+    },
+    [onDragStartKey, handlers],
+  );
   const items = externalDndContext ? data : managedItems;
   const activeId = externalDndContext ? externalActiveId : internalActiveId;
 
@@ -197,7 +206,7 @@ export function SortableInlineList<T>({
       sensors={sensors}
       collisionDetection={closestCenter}
       modifiers={DND_MODIFIERS}
-      onDragStart={handlers.onDragStart}
+      onDragStart={handleDragStart}
       onDragCancel={handlers.onDragCancel}
       onDragEnd={handlers.onDragEnd}
     >

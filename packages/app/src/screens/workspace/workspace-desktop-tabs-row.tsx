@@ -1,3 +1,10 @@
+import { TabGroupHeader, TabGroupItems, SavedTabGroups } from "@/workspace-tabs/tab-group-controls";
+import {
+  useGroupedWorkspaceTabs,
+  TabGroupRowContext,
+  useTabGroupRow,
+} from "@/workspace-tabs/use-grouped-workspace-tabs";
+import { TAB_GROUP_COLORS, type TabGroup } from "@/workspace-tabs/tab-groups";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, {
   useCallback,
@@ -477,6 +484,7 @@ export interface WorkspaceDesktopTabRowItem {
 }
 
 interface ResolvedWorkspaceDesktopTabRowItem extends WorkspaceDesktopTabRowItem {
+  groupHeader?: TabGroup;
   presentation: WorkspaceTabPresentation;
 }
 
@@ -550,6 +558,7 @@ export interface WorkspaceDesktopTabsRowProps {
   onCloseTabsToRight: (tabId: string) => Promise<void> | void;
   onCloseOtherTabs: (tabId: string) => Promise<void> | void;
   onCreateNewTab: (input: { paneId?: string }) => void;
+  onKeepTab?: (tab: WorkspaceTabDescriptor) => void;
   onReorderTabs: (nextTabs: WorkspaceTabDescriptor[]) => void;
   externalDndContext?: boolean;
   activeDragTabId?: string | null;
@@ -776,6 +785,8 @@ function TabChip({
   onCloseTab: (tabId: string) => Promise<void> | void;
   dragHandleProps: DraggableListDragHandleProps | undefined;
 }) {
+  const groups = useTabGroupRow();
+  const tabGroup = groups?.groupFor(tab.key);
   const { closeButtonTestId, contextMenuTestId, menuEntries } = resolvedTab;
   const { t } = useTranslation();
   const middleClickRef = useMiddleClickClose(
@@ -807,6 +818,8 @@ function TabChip({
   const tabChipStyle = useCallback(
     () => [
       styles.tab,
+      tabGroup && { borderBottomWidth: 3, borderBottomColor: TAB_GROUP_COLORS[tabGroup.color] },
+      groups?.selected.includes(tab.key) && { backgroundColor: "#8ab4f833" },
       resolveWorkspaceTabTitleLines(presentation) && styles.tabTwoLine,
       isActiveFocused && styles.tabActive,
       isActive && !isFocused && styles.tabActiveUnfocused,
@@ -818,7 +831,18 @@ function TabChip({
         maxWidth: resolvedTabWidth,
       },
     ],
-    [isActive, isActiveFocused, isDragging, isFocused, isHovered, presentation, resolvedTabWidth],
+    [
+      isActive,
+      isActiveFocused,
+      isDragging,
+      isFocused,
+      isHovered,
+      presentation,
+      resolvedTabWidth,
+      tabGroup,
+      groups,
+      tab.key,
+    ],
   );
 
   const handleTabPointerEnter = useCallback(() => {
@@ -829,9 +853,23 @@ function TabChip({
     setHovered(false);
   }, []);
 
-  const handleNavigateTab = useCallback(() => {
-    onNavigateTab(tab.tabId);
-  }, [onNavigateTab, tab.tabId]);
+  const handleNavigateTab = useCallback(
+    (event: import("react-native").GestureResponderEvent) => {
+      if (
+        groups?.select(
+          tab.key,
+          event.nativeEvent as unknown as {
+            ctrlKey?: boolean;
+            metaKey?: boolean;
+            shiftKey?: boolean;
+          },
+        )
+      )
+        return;
+      onNavigateTab(tab.tabId);
+    },
+    [onNavigateTab, tab.tabId, tab.key, groups],
+  );
 
   const handleCloseButtonPressIn = useCallback((event: { stopPropagation?: () => void }) => {
     event.stopPropagation?.();
@@ -878,7 +916,6 @@ function TabChip({
               testID={`workspace-tab-${testIdentity}`}
               triggerRef={dragHandleProps?.setActivatorNodeRef as unknown as undefined}
               style={tabChipStyle}
-              onPressIn={isWeb ? handleNavigateTab : undefined}
               onPress={handleNavigateTab}
               accessibilityRole="button"
               accessibilityLabel={accessibilityLabel}
@@ -958,6 +995,7 @@ function TabChip({
         ) : null}
 
         <ContextMenuContent align="start" width={DROPDOWN_WIDTH} testID={contextMenuTestId}>
+          <TabGroupItems tabKey={tab.key} />
           {menuEntries.map((entry) =>
             entry.kind === "separator" ? (
               <ContextMenuSeparator key={entry.key} />
@@ -1014,9 +1052,17 @@ export function WorkspaceDesktopTabsRow(props: WorkspaceDesktopTabsRowProps) {
     [presentations, props.tabs],
   );
 
+  const grouping = useGroupedWorkspaceTabs(props, resolvedTabs);
   return (
     <>
-      <ResolvedWorkspaceDesktopTabsRow {...props} tabs={resolvedTabs} />
+      <TabGroupRowContext.Provider value={props.host === "explorer" ? null : grouping.context}>
+        <ResolvedWorkspaceDesktopTabsRow
+          {...props}
+          tabs={props.host === "explorer" ? resolvedTabs : grouping.rows}
+          onReorderTabs={grouping.context.reorder}
+          onCloseTab={grouping.context.closeTab}
+        />
+      </TabGroupRowContext.Provider>
       {props.tabs.map(({ tab }) => (
         <WorkspaceDesktopTabPresentationSlot
           key={`${tab.key}:${tab.kind}`}
@@ -1066,6 +1112,8 @@ function ResolvedWorkspaceDesktopTabsRow({
   focusModeEnabled,
   onExitFocusMode,
 }: ResolvedWorkspaceDesktopTabsRowProps) {
+  const groups = useTabGroupRow();
+  const movedKey = useRef<string | undefined>(undefined);
   const { t } = useTranslation();
   const newTabKeys = useShortcutKeys("workspace-tab-new");
   const [tabsContainerWidth, setTabsContainerWidth] = useState<number>(0);
@@ -1090,6 +1138,7 @@ function ResolvedWorkspaceDesktopTabsRow({
       actionsReservedWidth: Math.max(
         0,
         DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH +
+          (groups ? 30 : 0) +
           (focusModeEnabled ? exitFocusModeWidth : 0) +
           (showPaneSplitActions ? PANE_SPLIT_ACTIONS_RESERVED_WIDTH : 0) +
           (showPaneMaximizeAction ? PANE_MAXIMIZE_ACTION_RESERVED_WIDTH : 0),
@@ -1103,7 +1152,7 @@ function ResolvedWorkspaceDesktopTabsRow({
       tabHorizontalPadding: TAB_CHIP_HORIZONTAL_PADDING,
       closeButtonWidth: TAB_CLOSE_BUTTON_RESERVED_WIDTH,
     }),
-    [exitFocusModeWidth, focusModeEnabled, showPaneMaximizeAction, showPaneSplitActions],
+    [exitFocusModeWidth, focusModeEnabled, showPaneMaximizeAction, showPaneSplitActions, groups],
   );
 
   const panePanelKinds = useMemo(() => tabs.map(({ tab }) => tab.kind), [tabs]);
@@ -1243,11 +1292,20 @@ function ResolvedWorkspaceDesktopTabsRow({
     metrics: layoutMetrics,
   });
 
+  const handleDragStartKey = useCallback((key: string) => {
+    movedKey.current = key;
+  }, []);
   const handleDragEnd = useCallback(
     (nextTabs: ResolvedWorkspaceDesktopTabRowItem[]) => {
-      onReorderTabs(nextTabs.map((tab) => tab.tab));
+      if (groups)
+        groups.reorder(
+          nextTabs.map((tab) => tab.tab),
+          movedKey.current,
+        );
+      else onReorderTabs(nextTabs.map((tab) => tab.tab));
+      movedKey.current = undefined;
     },
-    [onReorderTabs],
+    [onReorderTabs, groups],
   );
 
   const getTabDragData = useMemo(() => {
@@ -1293,6 +1351,16 @@ function ResolvedWorkspaceDesktopTabsRow({
       dragHandleProps,
       isActive,
     }: DraggableRenderItemInfo<ResolvedWorkspaceDesktopTabRowItem>) => {
+      if (item.groupHeader && groups) {
+        const group = item.groupHeader;
+        return (
+          <TabGroupHeader
+            group={group}
+            width={layout.items[index]?.width ?? 80}
+            dragHandleProps={dragHandleProps}
+          />
+        );
+      }
       const shouldShowCloseButton =
         layout.closeButtonPolicy === "all" && item.presentation.showCloseButton;
       const layoutItem = layout.items[index] ?? null;
@@ -1355,6 +1423,7 @@ function ResolvedWorkspaceDesktopTabsRow({
       setHoveredCloseTabKey,
       tabMenuLabels,
       tabDropPreviewIndex,
+      groups,
       displayedTabs.length,
     ],
   );
@@ -1416,6 +1485,7 @@ function ResolvedWorkspaceDesktopTabsRow({
             keyExtractor={tabKeyExtractor}
             useDragHandle
             disabled={!externalDndContext && displayedTabs.length < 2}
+            onDragStartKey={handleDragStartKey}
             onDragEnd={handleDragEnd}
             externalDndContext={externalDndContext}
             activeId={activeDragTabId}
@@ -1442,6 +1512,7 @@ function ResolvedWorkspaceDesktopTabsRow({
           rightStyle={tabScrollBoundary.rightShadeStyle}
         />
       </View>
+      {groups ? <SavedTabGroups /> : null}
       <WorkspacePaneToolbarActions
         panePanelKinds={panePanelKinds}
         host={host}
