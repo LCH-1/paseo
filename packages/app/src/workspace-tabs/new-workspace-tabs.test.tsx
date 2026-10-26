@@ -13,6 +13,7 @@ import {
   NewWorkspaceTabsBar,
   newWorkspaceTabsBridge as bridge,
   useNewWorkspaceTabPresence,
+  useHistoryTabPresence,
 } from "./new-workspace-tabs";
 import {
   clearNewWorkspaceDraftState,
@@ -43,6 +44,24 @@ afterEach(() => {
   route.focused = true;
   route.pathname = "/new";
   vi.clearAllMocks();
+});
+
+it("keeps one history tab across navigation and closes it without clearing a composer draft", () => {
+  route.pathname = "/sessions";
+  const presence = renderHook(() => useHistoryTabPresence());
+  expect(bridge.getSnapshot().entries).toEqual([
+    { draftId: "history", serverId: "", href: "/sessions", kind: "history" },
+  ]);
+  expect(bridge.getSnapshot().activeDraftId).toBe("history");
+  presence.unmount();
+  expect(bridge.getSnapshot().entries).toHaveLength(1);
+  const second = renderHook(() => useHistoryTabPresence());
+  expect(bridge.getSnapshot().entries).toHaveLength(1);
+  act(() => bridge.activate("history"));
+  expect(router.navigate).toHaveBeenCalledWith("/sessions");
+  act(() => bridge.close("history"));
+  expect(bridge.getSnapshot().entries).toHaveLength(0);
+  second.unmount();
 });
 
 describe("new workspace tab ownership", () => {

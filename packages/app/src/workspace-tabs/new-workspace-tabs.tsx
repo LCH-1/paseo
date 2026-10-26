@@ -15,6 +15,7 @@ import { NewTabLauncherProvider, type NewTabLauncher } from "@/workspace-tabs/la
 import { clearNewWorkspaceDraftState } from "./new-workspace-draft-state";
 
 export interface NewWorkspaceTabEntry {
+  readonly kind?: "history";
   readonly draftId: string;
   readonly serverId: string;
   readonly href: string;
@@ -86,8 +87,9 @@ export const newWorkspaceTabsBridge = {
     if (entry) router.navigate(entry.href as never);
   },
   close(draftId: string): void {
+    const entry = snapshot.entries.find((item) => item.draftId === draftId);
     const entries = snapshot.entries.filter((entry) => entry.draftId !== draftId);
-    clearNewWorkspaceDraftState(draftId);
+    if (entry?.kind !== "history") clearNewWorkspaceDraftState(draftId);
     knownDrafts.delete(draftId);
     if (entries.length === snapshot.entries.length) return;
     publish({
@@ -110,6 +112,19 @@ export const newWorkspaceTabsBridge = {
     };
   },
 };
+
+export function useHistoryTabPresence(): void {
+  const focused = useIsFocused();
+  const pathname = usePathname();
+  useEffect(() => {
+    if (!focused || pathname !== "/sessions") return;
+    registerDraft({ draftId: "history", serverId: "", href: "/sessions", kind: "history" });
+    publish({ ...snapshot, activeDraftId: "history" });
+    return () => {
+      if (snapshot.activeDraftId === "history") publish({ ...snapshot, activeDraftId: null });
+    };
+  }, [focused, pathname]);
+}
 
 export async function adoptLegacyNewWorkspaceDraft(draftId: string): Promise<void> {
   const store = useDraftStore.getState();

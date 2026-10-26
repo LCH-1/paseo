@@ -18,6 +18,7 @@ import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { useImportSession } from "@/hooks/use-import-session";
 import { useHosts } from "@/runtime/host-runtime";
 import { buildOpenProjectRoute } from "@/utils/host-routes";
+import { NewWorkspaceTabsBar, useHistoryTabPresence } from "@/workspace-tabs/new-workspace-tabs";
 
 /** Long enough that a typed word is one request, short enough to feel live. */
 const SEARCH_DEBOUNCE_MS = 200;
@@ -71,6 +72,7 @@ export function SessionsScreen() {
 }
 
 function SessionsScreenContent() {
+  useHistoryTabPresence();
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const importSession = useImportSession();
@@ -156,6 +158,7 @@ function SessionsScreenContent() {
   return (
     <View style={styles.container}>
       <MenuHeader title={t("sessions.title")} />
+      <NewWorkspaceTabsBar />
       {showFilterRow ? (
         <View style={styles.filterContainer}>
           {isSearchSupported ? (

@@ -2,6 +2,7 @@ import { useQueries } from "@tanstack/react-query";
 import type { AggregatedAgent } from "@/hooks/use-aggregated-agents";
 import { useSessionStore } from "@/stores/session-store";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
+import { formatHistoryPath, isHistoryAgentWorking } from "./history-presentation";
 import {
   EMPTY_CONVERSATION,
   compareLastResponse,
@@ -57,6 +58,8 @@ export function useHistoryConversations(agents: AggregatedAgent[]) {
       const workspace = workspaceId ? session?.workspaces.get(workspaceId) : undefined;
       return {
         agent,
+        pathLabel: formatHistoryPath(agent.cwd),
+        isWorking: isHistoryAgentWorking(live ?? agent),
         workspaceName:
           workspace?.title ?? workspace?.name ?? agent.projectPlacement?.workspaceName ?? "—",
         summary: mergeConversationSummaries(

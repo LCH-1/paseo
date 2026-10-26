@@ -97,7 +97,15 @@ export function SessionHistoryTable({
             refreshControl={<RefreshControl refreshing={isRefreshing} onRefresh={onRefresh} />}
             ListFooterComponent={footer}
             renderItem={({
-              item: { agent, workspaceName, summary, isLoading: pending, isError },
+              item: {
+                agent,
+                workspaceName,
+                pathLabel,
+                isWorking,
+                summary,
+                isLoading: pending,
+                isError,
+              },
             }) => {
               const presence = agentTabPresenceBridge.read(agent.serverId, agent.id);
               return (
@@ -117,7 +125,7 @@ export function SessionHistoryTable({
                   onLongPress={() => setActionAgent(agent)}
                 >
                   <Cell text={agent.serverLabel} index={0} />
-                  <Cell text={agent.cwd} index={1} />
+                  <Cell text={pathLabel} index={1} />
                   <Cell text={workspaceName} index={2} />
                   <View style={[styles.work, { width: widths[3] }]}>
                     <Text style={styles.workTitle} numberOfLines={1} selectable>
@@ -149,7 +157,9 @@ export function SessionHistoryTable({
                     )}
                   </View>
                   <View style={[styles.timeCell, { width: widths[6] }]}>
-                    {summary.lastResponseAt !== null ? (
+                    {isWorking ? (
+                      <Text style={styles.open}>작업중</Text>
+                    ) : summary.lastResponseAt !== null ? (
                       <ElapsedTime at={summary.lastResponseAt} />
                     ) : (
                       <Text style={styles.time}>{pending ? "…" : isError ? "조회 실패" : "—"}</Text>
