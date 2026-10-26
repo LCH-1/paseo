@@ -1,5 +1,5 @@
 import { router, usePathname } from "expo-router";
-import { History, Plus, Search, Settings } from "lucide-react-native";
+import { History, Plus, Search, SlidersHorizontal } from "lucide-react-native";
 import { memo, useCallback, useMemo, useRef, type ComponentType, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
@@ -171,7 +171,7 @@ function SidebarSessionSettingsRow({ onBeforeNavigate }: SidebarNavRowProps) {
 
   return (
     <SidebarHeaderRow
-      icon={Settings}
+      icon={SlidersHorizontal}
       label={t(builtinSidebarNavLabelKey("session-settings"))}
       onPress={handlePress}
       isActive={pathname === buildSettingsSectionRoute("session")}

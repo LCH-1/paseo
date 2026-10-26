@@ -18,6 +18,7 @@ import { Buffer } from "buffer";
 import {
   ArrowLeft,
   Settings,
+  SlidersHorizontal,
   Palette,
   Server,
   Network,
@@ -156,7 +157,7 @@ const SIDEBAR_SECTION_ITEMS: SidebarSectionItem[] = [
   {
     id: "session",
     labelKey: "sessionSettings:navigationTitle",
-    icon: Settings,
+    icon: SlidersHorizontal,
     Content: SessionSettingsSection,
   },
   {

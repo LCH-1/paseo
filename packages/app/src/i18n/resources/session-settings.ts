@@ -1,5 +1,5 @@
 export const sessionSettingsEn = {
-  navigationTitle: "Global settings",
+  navigationTitle: "Bulk session settings",
   title: "Session settings",
   catalogHost: "Model catalog host",
   catalogHostHint:
@@ -40,7 +40,7 @@ export const sessionSettingsEn = {
 };
 
 export const sessionSettingsKo = {
-  navigationTitle: "전체 설정",
+  navigationTitle: "세션 일괄 설정",
   title: "전체 세션 설정",
   catalogHost: "모델 목록 기준 호스트",
   catalogHostHint:
