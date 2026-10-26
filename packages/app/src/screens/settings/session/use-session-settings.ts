@@ -16,6 +16,8 @@ import {
   hasSessionSettings,
   openSessionSettings,
   resolveFastSetting,
+  resolveSessionSettingsHostId,
+  selectSessionSettingsHosts,
   saveSessionDefaults,
   type SessionSettingsSelection,
 } from "./model";
@@ -25,7 +27,7 @@ type SessionFormState = ReturnType<ReturnType<typeof openSessionSettings>["getSt
 function useSessionCatalog(state: SessionFormState) {
   const { t } = useTranslation("sessionSettings");
   const hosts = useHosts();
-  const hostId = state.hostId || hosts[0]?.serverId || "";
+  const hostId = resolveSessionSettingsHostId({ ...state, hosts });
   const client = useHostRuntimeClient(hostId);
   const connected = useHostRuntimeIsConnected(hostId);
   const catalog = useProvidersSnapshot(hostId || null);
@@ -73,7 +75,7 @@ interface SettingsActionInput {
 }
 
 async function executeSettingsAction({ action, catalog, state, features }: SettingsActionInput) {
-  const { t, entry, hosts, hostId, defaults } = catalog;
+  const { t, entry, hosts, defaults } = catalog;
   const provider = entry?.provider ?? "";
   if (action === "defaults") {
     await defaults.updatePreferences((current) =>
@@ -82,11 +84,11 @@ async function executeSettingsAction({ action, catalog, state, features }: Setti
     return {
       message: t("saved", { provider: entry?.label ?? provider }),
       failures: [],
+      skippedHosts: [],
       notices: [],
     };
   }
-  const targetHosts =
-    state.target === "all" ? hosts : hosts.filter((host) => host.serverId === hostId);
+  const targetHosts = selectSessionSettingsHosts({ target: state.target, hosts });
   const runtime = getHostRuntimeStore();
   const result = await applySessionSettings({
     provider,
@@ -104,8 +106,17 @@ async function executeSettingsAction({ action, catalog, state, features }: Setti
       applied: result.applied,
       failed: result.failed,
       hosts: result.failures.filter((failure) => !failure.session).length,
+      skipped: result.skippedHosts.length,
     }),
-    failures: result.failures,
+    failures: result.failures.map((failure) => {
+      const missingDirectory = "Working directory does not exist: ";
+      if (!failure.message.startsWith(missingDirectory)) return failure;
+      return {
+        ...failure,
+        message: t("missingDirectory", { path: failure.message.slice(missingDirectory.length) }),
+      };
+    }),
+    skippedHosts: result.skippedHosts,
     notices: [...new Set(result.notices)],
   };
 }

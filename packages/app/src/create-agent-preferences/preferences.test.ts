@@ -9,6 +9,8 @@ import {
   EMPTY_SESSION_SETTINGS,
   openSessionSettings,
   resolveFastSetting,
+  resolveSessionSettingsHostId,
+  selectSessionSettingsHosts,
   saveSessionDefaults,
 } from "@/screens/settings/session/model";
 import { CreateAgentPreferencesService } from "./service";
@@ -21,6 +23,25 @@ import {
 import { FakeCreateAgentPreferenceStorage } from "./test-utils/fake-preference-storage";
 
 describe("create agent preferences", () => {
+  it("uses explicit target host IDs independently of the model catalog host", () => {
+    const hosts = [
+      { serverId: "work", label: "Work" },
+      { serverId: "home", label: "Home" },
+    ];
+    expect(resolveSessionSettingsHostId({ hosts, target: "all", hostId: "home" })).toBe("home");
+    expect(resolveSessionSettingsHostId({ hosts, target: "work", hostId: "home" })).toBe("work");
+    expect(selectSessionSettingsHosts({ hosts, target: "work" })).toEqual([hosts[0]]);
+    expect(selectSessionSettingsHosts({ hosts, target: "all" })).toEqual(hosts);
+    const form = openSessionSettings();
+    form.select({ model: "work-model", mode: "full-access", fast: "on" });
+    form.setTarget("home");
+    expect(form.getState()).toMatchObject({
+      target: "home",
+      provider: "",
+      selection: EMPTY_SESSION_SETTINGS,
+    });
+  });
+
   it("saves bulk defaults without erasing thinking, features, or other providers", () => {
     const next = saveSessionDefaults({
       preferences: {
@@ -178,6 +199,7 @@ describe("create agent preferences", () => {
         page(
           [
             { ...agent, id: "broken" },
+            { ...agent, id: "missing-directory" },
             { ...agent, id: "last" },
           ],
           null,
@@ -187,6 +209,8 @@ describe("create agent preferences", () => {
     vi.spyOn(client, "setAgentModel").mockImplementation(async (id) => {
       calls.push(`${id}:model`);
       if (id === "broken") throw new Error("model rejected");
+      if (id === "missing-directory")
+        throw new Error("Working directory does not exist: /missing-project");
     });
     vi.spyOn(client, "setAgentMode").mockImplementation(async (id) => {
       calls.push(`${id}:mode`);
@@ -226,10 +250,15 @@ describe("create agent preferences", () => {
     });
     expect(result).toMatchObject({
       applied: 2,
-      failed: 1,
+      failed: 2,
+      skippedHosts: ["offline"],
       failures: [
         { host: "online", session: "broken", message: "model rejected" },
-        { host: "offline", session: "", message: "Host is offline" },
+        {
+          host: "online",
+          session: "missing-directory",
+          message: "Working directory does not exist: /missing-project",
+        },
       ],
     });
     expect(fetch).toHaveBeenLastCalledWith({
@@ -241,6 +270,7 @@ describe("create agent preferences", () => {
       "first:mode",
       "first:fast",
       "broken:model",
+      "missing-directory:model",
       "last:model",
       "last:mode",
       "last:fast",

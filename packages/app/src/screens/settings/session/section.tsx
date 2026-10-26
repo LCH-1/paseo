@@ -12,12 +12,26 @@ interface SettingsProps {
 }
 
 function CatalogCard({ settings }: SettingsProps) {
-  const { t, hosts, hostId, connected, catalog, providers, busy, selectHost } = settings;
+  const { t, hosts, hostId, connected, catalog, providers, busy, state, selectHost, selectTarget } =
+    settings;
   return (
     <SettingsCard>
       {hosts.length > 0 ? (
         <SettingsSelect
+          label={t("target")}
+          value={state.target}
+          options={[
+            { value: "all", label: t("allHosts") },
+            ...hosts.map((host) => ({ value: host.serverId, label: host.label })),
+          ]}
+          onValueChange={selectTarget}
+          disabled={busy}
+        />
+      ) : null}
+      {hosts.length > 0 && state.target === "all" ? (
+        <SettingsSelect
           label={t("catalogHost")}
+          hint={t("catalogHostHint")}
           value={hostId}
           options={hosts.map((host) => ({ value: host.serverId, label: host.label }))}
           onValueChange={selectHost}
@@ -50,7 +64,6 @@ function SelectionCard({ settings }: SettingsProps) {
     selectModel,
     selectMode,
     selectFast,
-    selectTarget,
     apply,
     save,
   } = settings;
@@ -106,16 +119,6 @@ function SelectionCard({ settings }: SettingsProps) {
           error={t("featuresError", { message: features.error.message })}
         />
       ) : null}
-      <SettingsSelect
-        label={t("target")}
-        value={state.target}
-        options={[
-          { value: "all", label: t("allHosts") },
-          { value: "host", label: t("selectedHost") },
-        ]}
-        onValueChange={selectTarget}
-        disabled={busy}
-      />
       <SettingsAction
         label={t("apply")}
         actionLabel={busy ? t("working") : t("applyLabel")}
@@ -152,6 +155,12 @@ function ResultCard({ settings }: SettingsProps) {
       {data?.notices.map((notice) => (
         <SettingsRow key={notice} label={notice} />
       ))}
+      {data?.skippedHosts.length ? (
+        <SettingsRow
+          label={t("skippedHosts", { hosts: data.skippedHosts.join(", ") })}
+          hint={t("skippedHostsHint")}
+        />
+      ) : null}
     </SettingsCard>
   );
 }

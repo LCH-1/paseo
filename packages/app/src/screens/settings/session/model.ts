@@ -44,12 +44,34 @@ export function openSessionSettings() {
       publish({ ...state, provider, selection: EMPTY_SESSION_SETTINGS });
     },
     setTarget(target: string) {
-      publish({ ...state, target });
+      publish({ ...state, target, provider: "", selection: EMPTY_SESSION_SETTINGS });
     },
     select(selection: Partial<SessionSettingsSelection>) {
       publish({ ...state, selection: { ...state.selection, ...selection } });
     },
   };
+}
+
+interface TargetHost {
+  serverId: string;
+}
+
+export function resolveSessionSettingsHostId(input: {
+  target: string;
+  hostId: string;
+  hosts: readonly TargetHost[];
+}) {
+  if (input.target !== "all") return input.target;
+  return input.hostId || input.hosts[0]?.serverId || "";
+}
+
+export function selectSessionSettingsHosts<Host extends TargetHost>(input: {
+  target: string;
+  hosts: Host[];
+}) {
+  return input.target === "all"
+    ? input.hosts
+    : input.hosts.filter((host) => host.serverId === input.target);
 }
 
 export function hasSessionSettings(selection: SessionSettingsSelection) {
@@ -108,6 +130,7 @@ export interface SessionSettingsResult {
   applied: number;
   failed: number;
   failures: SessionSettingsFailure[];
+  skippedHosts: string[];
   notices: string[];
 }
 
@@ -162,11 +185,17 @@ export async function applySessionSettings(input: {
   provider: AgentProvider;
   selection: SessionSettingsSelection;
 }): Promise<SessionSettingsResult> {
-  const result: SessionSettingsResult = { applied: 0, failed: 0, failures: [], notices: [] };
+  const result: SessionSettingsResult = {
+    applied: 0,
+    failed: 0,
+    failures: [],
+    skippedHosts: [],
+    notices: [],
+  };
   for (const host of input.hosts) {
     const client = host.client;
     if (!client) {
-      result.failures.push({ host: host.label, session: "", message: "Host is offline" });
+      result.skippedHosts.push(host.label);
       continue;
     }
     try {
