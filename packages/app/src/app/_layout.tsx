@@ -458,6 +458,10 @@ interface AppContainerProps {
 
 const WINDOW_SIDEBAR_TOGGLE_HORIZONTAL_PADDING = 12;
 
+function usesResponsiveShellWrapper(compact: boolean): boolean {
+  return compact || getIsElectronRuntime();
+}
+
 function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppContainerProps) {
   const keyboardActionDispatcher = useKeyboardActionDispatcher();
   const daemons = useHosts();
@@ -556,9 +560,9 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
           {themedSidebarChrome}
         </WindowChromeRegion>
       ) : null}
-      {usesCompactExplorerHost ? (
+      {usesResponsiveShellWrapper(usesCompactExplorerHost) ? (
         <CompactExplorerSidebarHost
-          enabled={chromeEnabled}
+          enabled={chromeEnabled && usesCompactExplorerHost}
           presentation={explorerSidebarPresentation === "dock" ? "dock" : "overlay"}
         >
           <WindowChromeRegion corners={chromeEnabled ? "both" : appChromeLayout.contentCorners}>
@@ -620,8 +624,10 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
     </View>
   );
 
-  const content = isCompactLayout ? (
-    <MobileGestureWrapper chromeEnabled={chromeEnabled}>{surface}</MobileGestureWrapper>
+  const content = usesResponsiveShellWrapper(isCompactLayout) ? (
+    <MobileGestureWrapper chromeEnabled={chromeEnabled && isCompactLayout}>
+      {surface}
+    </MobileGestureWrapper>
   ) : (
     surface
   );
