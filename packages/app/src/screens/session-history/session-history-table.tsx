@@ -16,7 +16,7 @@ const columns = [
   "작업내용",
   "마지막 탭 닫힘",
   "마지막 요청",
-  "마지막 응답 ↓",
+  "마지막 응답",
 ];
 const widths = [130, 220, 180, 380, 150, 130, 130];
 
@@ -73,8 +73,8 @@ export function SessionHistoryTable({
       <View style={styles.toolbar}>
         <Text style={styles.hint}>
           {isLoading || isLoadingPages
-            ? "대화 시간 확인 중… · 마지막 응답 최신순"
-            : "마지막 응답 최신순 · 탭 닫힘은 이 PC 기준"}
+            ? "대화 시간 확인 중… · 작업중 우선, 요청 최신순 → 완료 최신순"
+            : "작업중 우선, 요청 최신순 → 완료 최신순 · 탭 닫힘은 이 PC 기준"}
         </Text>
         <Button variant="ghost" onPress={onRefresh} disabled={isRefreshing}>
           새로고침

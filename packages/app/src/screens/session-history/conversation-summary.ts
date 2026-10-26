@@ -117,3 +117,16 @@ export function compareLastResponse(
     )
   );
 }
+
+export function compareHistoryRows(
+  a: Parameters<typeof compareLastResponse>[0] & { isWorking: boolean },
+  b: Parameters<typeof compareLastResponse>[1] & { isWorking: boolean },
+): number {
+  if (a.isWorking !== b.isWorking) return a.isWorking ? -1 : 1;
+  if (a.isWorking) {
+    const requestOrder =
+      (b.summary.lastRequestAt ?? -Infinity) - (a.summary.lastRequestAt ?? -Infinity);
+    if (requestOrder) return requestOrder;
+  }
+  return compareLastResponse(a, b);
+}

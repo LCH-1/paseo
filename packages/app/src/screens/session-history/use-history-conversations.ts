@@ -5,7 +5,7 @@ import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { formatHistoryPath, isHistoryAgentWorking } from "./history-presentation";
 import {
   EMPTY_CONVERSATION,
-  compareLastResponse,
+  compareHistoryRows,
   fetchConversationSummary,
   mergeConversationSummaries,
   summarizeStream,
@@ -75,6 +75,6 @@ export function useHistoryConversations(agents: AggregatedAgent[]) {
         isError: queries[index].isError,
       };
     })
-    .sort(compareLastResponse);
+    .sort(compareHistoryRows);
   return { rows, isLoading: queries.some((query) => query.isFetching) };
 }
