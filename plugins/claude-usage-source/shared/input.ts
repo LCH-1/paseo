@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const routeSchema = z.discriminatedUnion("store", [
+  z.object({ store: z.literal("windows-credman"), service: z.string().min(1) }).strict(),
   z.object({ store: z.enum(["claude", "pi"]), path: z.string().min(1) }).strict(),
   z
     .object({

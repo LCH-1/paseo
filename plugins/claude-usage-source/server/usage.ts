@@ -1,4 +1,6 @@
 import { discoverOmp, piAuthPath, readHarness, type StoreLookup } from "./stores.js";
+import { configuredClaudeProviders } from "./claude-provider-config.js";
+import { readWindowsCredentials } from "./windows-credentials.js";
 import type { UsageInput } from "../shared/input.js";
 import { execFile } from "node:child_process";
 import { existsSync, promises as fs } from "node:fs";
@@ -339,6 +341,7 @@ export async function readClaudeKeychainCredentials(
 }
 
 interface ClaudeCredentialLookup extends StoreLookup {
+  readWindowsCredentials?: (service: string) => Promise<unknown | null>;
   readKeychainCredentials?: (service: string, account: string) => Promise<unknown | null>;
   claudeHome?: string;
 }
@@ -380,9 +383,13 @@ export async function discover(
   for (const input of candidates) {
     const credentials = await resolveClaudeCredentials(input, lookup);
     if (!credentials) continue;
-    const harness = { pi: "Pi", omp: "OMP", claude: "Claude", keychain: "Claude" }[
-      input.route.store
-    ];
+    const harness = {
+      pi: "Pi",
+      omp: "OMP",
+      claude: "Claude",
+      keychain: "Claude",
+      "windows-credman": "Claude",
+    }[input.route.store];
     const fallback = { key: hashAccountKey(JSON.stringify(input.route)), harness, input };
     if (credentials.expires !== undefined && credentials.expires <= (lookup.now ?? Date.now)()) {
       accounts.push(fallback);
@@ -419,6 +426,13 @@ function claudeKeychainRoute(lookup: ClaudeCredentialLookup) {
 }
 
 async function claudeRoute(lookup: ClaudeCredentialLookup): Promise<UsageInput> {
+  if ((lookup.platform ?? process.platform) === "win32") {
+    const env = lookup.env ?? process.env;
+    const directory = env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? env.CLAUDE_CONFIG_DIR;
+    const service = `${CLAUDE_KEYCHAIN_SERVICE}${directory ? `-${hashAccountKey(directory.normalize("NFC")).slice(0, 8)}` : ""}`;
+    if (await windowsCredentialRecord(service, lookup))
+      return { route: { store: "windows-credman", service } };
+  }
   const route = claudeKeychainRoute(lookup);
   return (await keychainCredentialRecord(lookup, route))
     ? { route }
@@ -426,18 +440,33 @@ async function claudeRoute(lookup: ClaudeCredentialLookup): Promise<UsageInput> 
 }
 
 async function globalRoutes(lookup: ClaudeCredentialLookup): Promise<UsageInput[]> {
-  return [
+  const providers = await configuredClaudeProviders(lookup);
+  const env = lookup.env ?? process.env;
+  const routes: UsageInput[] = [
     await claudeRoute(lookup),
+    ...(await Promise.all(
+      providers.map((provider) =>
+        claudeRoute({
+          ...lookup,
+          env: { ...env, ...provider.env },
+          claudeHome: provider.env.CLAUDE_CONFIG_DIR ?? lookup.claudeHome,
+        }),
+      ),
+    )),
     { route: { store: "pi", path: piAuthPath(lookup) } },
     ...discoverOmp(lookup).map((route) => ({ route })),
   ];
+  return [...new Map(routes.map((input) => [JSON.stringify(input.route), input])).values()];
 }
 
 async function sessionRoutes(
   scope: Extract<UsageScope, { kind: "session" }>,
   lookup: ClaudeCredentialLookup,
 ): Promise<UsageInput[]> {
-  if (scope.provider === "claude") {
+  if (
+    scope.provider === "claude" ||
+    (await configuredClaudeProviders(lookup)).some((provider) => provider.id === scope.provider)
+  ) {
     const env = scope.env;
     const foreign =
       env.ANTHROPIC_BASE_URL &&
@@ -462,6 +491,7 @@ export async function resolveClaudeCredentials(
   lookup: ClaudeCredentialLookup = {},
 ): Promise<ClaudeCredentialRecord | null> {
   const route = input.route;
+  if (route.store === "windows-credman") return windowsCredentialRecord(route.service, lookup);
   if (route.store === "claude") return readCredentialFile(route.path);
   if (route.store === "keychain")
     return keychainCredentialRecord(lookup, {
@@ -471,6 +501,13 @@ export async function resolveClaudeCredentials(
     });
   const oauth = await readHarness(route, lookup);
   return oauth ? { oauth: { accessToken: oauth.access }, expires: oauth.expires } : null;
+}
+
+async function windowsCredentialRecord(service: string, lookup: ClaudeCredentialLookup) {
+  const parsed = ClaudeCredentialsSchema.safeParse(
+    await (lookup.readWindowsCredentials ?? readWindowsCredentials)(service),
+  );
+  return parsed.success ? toCredentialRecord(parsed.data) : null;
 }
 
 async function readCredentialFile(path: string): Promise<ClaudeCredentialRecord | null> {
@@ -555,7 +592,9 @@ export async function fetchUsage(
   const credentials = await resolveClaudeCredentials(input, credentialLookup);
   if (!credentials) throw new Error("Claude login store no longer exists");
   const refreshedBy =
-    input.route.store === "claude" || input.route.store === "keychain"
+    input.route.store === "claude" ||
+    input.route.store === "keychain" ||
+    input.route.store === "windows-credman"
       ? "claude"
       : input.route.store;
   if (

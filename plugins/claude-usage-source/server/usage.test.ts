@@ -7,6 +7,11 @@ import { fetchUsage, discover } from "./usage.js";
 import { inputSchema, type UsageInput } from "../shared/input.js";
 import { hashAccountKey, type UsageReport } from "@getpaseo/plugin/server/usage";
 
+vi.mock("./windows-credentials.js", () => ({ readWindowsCredentials: vi.fn(async () => null) }));
+vi.mock("./claude-provider-config.js", () => ({
+  configuredClaudeProviders: vi.fn(async () => []),
+}));
+
 function credentialInput(directory: string): UsageInput {
   return { route: { store: "claude", path: join(directory, ".credentials.json") } };
 }
