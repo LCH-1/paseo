@@ -10,6 +10,9 @@ import { useSidebarCollapsedSectionsStore } from "@/stores/sidebar-collapsed-sec
 import { sidebarHostProjectKey } from "./host-project-groups";
 import { useSidebarWorkspaceReveal } from "./use-sidebar-workspace-reveal";
 import { useLimitedSidebarGroup } from "./use-limited-sidebar-group";
+import { followSidebarWorkspace } from "./sidebar-workspace-scroll";
+
+vi.mock("./sidebar-workspace-scroll", () => ({ followSidebarWorkspace: vi.fn(() => vi.fn()) }));
 
 const workspace: SidebarWorkspacePlacement = {
   workspaceKey: "host-a:workspace-a",
@@ -163,26 +166,15 @@ describe("sidebar workspace reveal", () => {
     act(() => view.result.current.toggleExpanded());
     expect(view.result.current.visibleItems).toHaveLength(20);
   });
-  it("scrolls the revealed row into view and removes observers after completion", async () => {
-    const row = document.createElement("div");
-    row.dataset.testid = "sidebar-workspace-row-host-a:workspace-a";
-    vi.spyOn(row, "getBoundingClientRect").mockReturnValue({
-      ...row.getBoundingClientRect(),
-      width: 200,
-      height: 40,
-    });
-    row.scrollIntoView = vi.fn();
-    document.body.append(row);
-    renderHook(() => useSidebarWorkspaceReveal(input));
+  it("restarts viewport tracking on every activation and stops it on unmount", () => {
+    const stop = vi.fn();
+    vi.mocked(followSidebarWorkspace).mockReturnValue(stop);
+    const view = renderHook(() => useSidebarWorkspaceReveal(input));
     reveal();
-    await vi.waitFor(() =>
-      expect(row.scrollIntoView).toHaveBeenCalledWith({
-        block: "nearest",
-        inline: "nearest",
-      }),
-    );
-    document.body.append(document.createElement("span"));
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(row.scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(followSidebarWorkspace).toHaveBeenLastCalledWith("host-a:workspace-a");
+    reveal();
+    expect(stop).toHaveBeenCalledTimes(1);
+    view.unmount();
+    expect(stop).toHaveBeenCalledTimes(2);
   });
 });

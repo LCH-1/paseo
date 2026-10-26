@@ -6,6 +6,7 @@ import { useSidebarCollapsedSectionsStore } from "@/stores/sidebar-collapsed-sec
 import type { SidebarGroupMode } from "@/stores/sidebar-view-store";
 import type { SidebarWorkspaceGroup } from "./sidebar-labels";
 import { sidebarHostGroupKey, sidebarHostProjectKey } from "./host-project-groups";
+import { followSidebarWorkspace } from "./sidebar-workspace-scroll";
 
 interface SidebarRevealInput {
   projects: readonly SidebarProjectEntry[];
@@ -49,36 +50,6 @@ export function useSidebarWorkspaceReveal(input: SidebarRevealInput): void {
 
   useEffect(() => {
     if (!request || typeof document === "undefined") return;
-    const testId = `sidebar-workspace-row-${request.serverId}:${request.workspaceId}`;
-    let frame = 0;
-    function reveal(): void {
-      const rows = document.querySelectorAll<HTMLElement>(
-        '[data-testid^="sidebar-workspace-row-"]',
-      );
-      const row = Array.from(rows).find(
-        (element) =>
-          element.dataset.testid === testId && element.getBoundingClientRect().height > 0,
-      );
-      if (!row) return;
-      row.scrollIntoView({ block: "nearest", inline: "nearest" });
-      observer.disconnect();
-      clearTimeout(timeout);
-    }
-    function schedule(): void {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(reveal);
-    }
-    const observer = new MutationObserver(schedule);
-    const sidebar = document.querySelector(
-      '[data-testid="sidebar-project-workspace-list-scroll"],[data-testid="sidebar-status-list-scroll"]',
-    );
-    observer.observe(sidebar ?? document.body, { childList: true, subtree: true });
-    const timeout = setTimeout(() => observer.disconnect(), 2000);
-    schedule();
-    return () => {
-      observer.disconnect();
-      clearTimeout(timeout);
-      cancelAnimationFrame(frame);
-    };
+    return followSidebarWorkspace(`${request.serverId}:${request.workspaceId}`);
   }, [request]);
 }
