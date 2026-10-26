@@ -10,6 +10,7 @@ import { ko } from "./resources/ko";
 import { ptBR } from "./resources/pt-BR";
 import { ru } from "./resources/ru";
 import { zhCN } from "./resources/zh-CN";
+import { sessionSettingsEn, sessionSettingsKo } from "./resources/session-settings";
 
 const i18n = createInstance();
 
@@ -20,11 +21,11 @@ observeI18nInit(
     lng: "en",
     resources: {
       ar: { translation: ar },
-      en: { translation: en },
+      en: { translation: en, sessionSettings: sessionSettingsEn },
       es: { translation: es },
       fr: { translation: fr },
       ja: { translation: ja },
-      ko: { translation: ko },
+      ko: { translation: ko, sessionSettings: sessionSettingsKo },
       "pt-BR": { translation: ptBR },
       ru: { translation: ru },
       "zh-CN": { translation: zhCN },

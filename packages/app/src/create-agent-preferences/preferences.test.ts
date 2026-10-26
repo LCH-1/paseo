@@ -1,4 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import {
+  AgentSnapshotPayloadSchema,
+  FetchAgentsResponseMessageSchema,
+} from "@getpaseo/protocol/messages";
+import {
+  applySessionSettings,
+  EMPTY_SESSION_SETTINGS,
+  openSessionSettings,
+  resolveFastSetting,
+  saveSessionDefaults,
+} from "@/screens/settings/session/model";
 import { CreateAgentPreferencesService } from "./service";
 import {
   applyAgentProfilePreferences,
@@ -9,6 +21,233 @@ import {
 import { FakeCreateAgentPreferenceStorage } from "./test-utils/fake-preference-storage";
 
 describe("create agent preferences", () => {
+  it("saves bulk defaults without erasing thinking, features, or other providers", () => {
+    const next = saveSessionDefaults({
+      preferences: {
+        isolation: "worktree",
+        providerPreferences: {
+          claude: { model: "opus" },
+          codex: {
+            model: "old",
+            thinkingByModel: { old: "high" },
+            featureValues: { plan_mode: true },
+          },
+        },
+      },
+      provider: "codex",
+      selection: { model: "new", mode: "full-access", fast: "off" },
+      features: [
+        {
+          type: "select",
+          id: "service_tier",
+          label: "Speed",
+          value: "priority",
+          options: [
+            { id: "default", label: "Normal" },
+            { id: "priority", label: "Fast" },
+          ],
+        },
+      ],
+    });
+    expect(parseFormPreferences(next)).toEqual({
+      provider: "codex",
+      isolation: "worktree",
+      providerPreferences: {
+        claude: { model: "opus" },
+        codex: {
+          model: "new",
+          mode: "full-access",
+          thinkingByModel: { old: "high" },
+          featureValues: { plan_mode: true, service_tier: "default" },
+        },
+      },
+    });
+  });
+
+  it("keeps unchanged defaults and supports both Fast representations", () => {
+    expect(
+      saveSessionDefaults({
+        preferences: {
+          providerPreferences: {
+            claude: { model: "opus", mode: "default", featureValues: { fast_mode: true } },
+          },
+        },
+        provider: "claude",
+        selection: EMPTY_SESSION_SETTINGS,
+        features: [],
+      }).providerPreferences?.claude,
+    ).toEqual({ model: "opus", mode: "default", featureValues: { fast_mode: true } });
+    expect(
+      resolveFastSetting([{ type: "toggle", id: "fast_mode", label: "Fast", value: true }], false),
+    ).toEqual({ id: "fast_mode", value: false });
+    expect(resolveFastSetting([], true)).toBeNull();
+    expect(() =>
+      saveSessionDefaults({
+        preferences: {},
+        provider: "claude",
+        selection: { model: "", mode: "", fast: "on" },
+        features: [],
+      }),
+    ).toThrow("Fast is unavailable");
+  });
+
+  it("resets selections when changing catalog host or provider", () => {
+    const form = openSessionSettings();
+    const changed = vi.fn();
+    const unsubscribe = form.subscribe(changed);
+    form.select({ model: "opus", fast: "on" });
+    form.setProvider("codex");
+    expect(form.getState().selection).toEqual(EMPTY_SESSION_SETTINGS);
+    form.select({ mode: "full-access" });
+    form.setHost("other-host");
+    expect(form.getState()).toMatchObject({
+      hostId: "other-host",
+      provider: "",
+      selection: EMPTY_SESSION_SETTINGS,
+    });
+    expect(changed).toHaveBeenCalledTimes(4);
+    unsubscribe();
+  });
+
+  it("paginates bulk updates, isolates failures, and never changes another provider or archived sessions", async () => {
+    const client = new DaemonClient({
+      url: "ws://unused",
+      clientId: "bulk-settings-test",
+      reconnect: { enabled: false },
+    });
+    const agent = AgentSnapshotPayloadSchema.parse({
+      id: "first",
+      provider: "codex",
+      cwd: "/repo",
+      model: "old",
+      createdAt: "2026-10-26T00:00:00Z",
+      updatedAt: "2026-10-26T00:00:00Z",
+      lastUserMessageAt: null,
+      status: "idle",
+      capabilities: {
+        supportsStreaming: true,
+        supportsSessionPersistence: true,
+        supportsDynamicModes: true,
+        supportsMcpServers: true,
+        supportsReasoningStream: true,
+        supportsToolInvocations: true,
+      },
+      currentModeId: "default",
+      availableModes: [],
+      pendingPermissions: [],
+      persistence: null,
+      title: null,
+    });
+    function page(agents: (typeof agent)[], nextCursor: string | null) {
+      return FetchAgentsResponseMessageSchema.parse({
+        type: "fetch_agents_response",
+        payload: {
+          requestId: "test",
+          entries: agents.map((snapshot) => ({
+            agent: snapshot,
+            project: {
+              projectKey: "/repo",
+              projectName: "repo",
+              checkout: {
+                cwd: "/repo",
+                isGit: false,
+                currentBranch: null,
+                remoteUrl: null,
+                isPaseoOwnedWorktree: false,
+                mainRepoRoot: null,
+              },
+            },
+          })),
+          pageInfo: { nextCursor, prevCursor: null, hasMore: Boolean(nextCursor) },
+        },
+      }).payload;
+    }
+    const fetch = vi
+      .spyOn(client, "fetchAgents")
+      .mockResolvedValueOnce(
+        page(
+          [
+            agent,
+            { ...agent, id: "other-provider", provider: "claude" },
+            { ...agent, id: "archived", archivedAt: "2026-10-25T00:00:00Z" },
+          ],
+          "next",
+        ),
+      )
+      .mockResolvedValueOnce(
+        page(
+          [
+            { ...agent, id: "broken" },
+            { ...agent, id: "last" },
+          ],
+          null,
+        ),
+      );
+    const calls: string[] = [];
+    vi.spyOn(client, "setAgentModel").mockImplementation(async (id) => {
+      calls.push(`${id}:model`);
+      if (id === "broken") throw new Error("model rejected");
+    });
+    vi.spyOn(client, "setAgentMode").mockImplementation(async (id) => {
+      calls.push(`${id}:mode`);
+      return null;
+    });
+    vi.spyOn(client, "fetchAgent").mockImplementation(async () => ({
+      agent: { ...agent, model: "new" },
+      project: null,
+    }));
+    vi.spyOn(client, "listProviderFeatures").mockResolvedValue({
+      requestId: "features-test",
+      fetchedAt: "2026-10-26T00:00:00Z",
+      provider: "codex",
+      features: [
+        {
+          type: "select",
+          id: "service_tier",
+          label: "Speed",
+          value: "default",
+          options: [
+            { id: "default", label: "Normal" },
+            { id: "priority", label: "Fast" },
+          ],
+        },
+      ],
+    });
+    const feature = vi.spyOn(client, "setAgentFeature").mockImplementation(async (id) => {
+      calls.push(`${id}:fast`);
+    });
+    const result = await applySessionSettings({
+      hosts: [
+        { label: "online", client },
+        { label: "offline", client: null },
+      ],
+      provider: "codex",
+      selection: { model: "new", mode: "full-access", fast: "on" },
+    });
+    expect(result).toMatchObject({
+      applied: 2,
+      failed: 1,
+      failures: [
+        { host: "online", session: "broken", message: "model rejected" },
+        { host: "offline", session: "", message: "Host is offline" },
+      ],
+    });
+    expect(fetch).toHaveBeenLastCalledWith({
+      filter: { includeArchived: false },
+      page: { limit: 200, cursor: "next" },
+    });
+    expect(calls).toEqual([
+      "first:model",
+      "first:mode",
+      "first:fast",
+      "broken:model",
+      "last:model",
+      "last:mode",
+      "last:fast",
+    ]);
+    expect(feature).toHaveBeenCalledWith("last", "service_tier", "priority");
+  });
+
   it("keeps the selected mode after saving model and thinking", async () => {
     const storage = new FakeCreateAgentPreferenceStorage();
     const preferences = new CreateAgentPreferencesService(storage);
