@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import {
   SettingsAction,
   SettingsCard,
@@ -5,6 +6,7 @@ import {
   SettingsSection,
   SettingsSelect,
 } from "@/components/settings";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { useSessionSettings, type SessionSettings } from "./use-session-settings";
 
 interface SettingsProps {
@@ -64,6 +66,8 @@ function SelectionCard({ settings }: SettingsProps) {
     selectModel,
     selectMode,
     selectFast,
+    thinkingOptions,
+    selectThinking,
     apply,
     save,
   } = settings;
@@ -100,6 +104,18 @@ function SelectionCard({ settings }: SettingsProps) {
         onValueChange={selectMode}
         disabled={busy}
       />
+      {thinkingOptions.length ? (
+        <SettingsSelect
+          label={t("thinking")}
+          value={state.selection.thinking}
+          options={[
+            { value: "", label: t("keep") },
+            ...thinkingOptions.map((option) => ({ value: option.id, label: option.label })),
+          ]}
+          onValueChange={selectThinking}
+          disabled={busy}
+        />
+      ) : null}
       {fastSupported ? (
         <SettingsSelect
           label={t("fast")}
@@ -138,6 +154,11 @@ function SelectionCard({ settings }: SettingsProps) {
 function ResultCard({ settings }: SettingsProps) {
   const { mutation, t } = settings;
   const { data, error } = mutation;
+  const warningLabel = t("warning");
+  const warningBadge = useMemo(
+    () => <StatusBadge label={warningLabel} variant="warning" />,
+    [warningLabel],
+  );
   if (!error && !data) return null;
   const failureText = data?.failures
     .map((failure) => `${failure.host} ${failure.session}: ${failure.message}`)
@@ -158,6 +179,7 @@ function ResultCard({ settings }: SettingsProps) {
       {data?.skippedHosts.length ? (
         <SettingsRow
           label={t("skippedHosts", { hosts: data.skippedHosts.join(", ") })}
+          labelAccessory={warningBadge}
           hint={t("skippedHostsHint")}
         />
       ) : null}

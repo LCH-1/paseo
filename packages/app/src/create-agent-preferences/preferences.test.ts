@@ -56,7 +56,7 @@ describe("create agent preferences", () => {
         },
       },
       provider: "codex",
-      selection: { model: "new", mode: "full-access", fast: "off" },
+      selection: { model: "new", mode: "full-access", thinking: "xhigh", fast: "off" },
       features: [
         {
           type: "select",
@@ -78,7 +78,7 @@ describe("create agent preferences", () => {
         codex: {
           model: "new",
           mode: "full-access",
-          thinkingByModel: { old: "high" },
+          thinkingByModel: { old: "high", new: "xhigh" },
           featureValues: { plan_mode: true, service_tier: "default" },
         },
       },
@@ -106,7 +106,7 @@ describe("create agent preferences", () => {
       saveSessionDefaults({
         preferences: {},
         provider: "claude",
-        selection: { model: "", mode: "", fast: "on" },
+        selection: { model: "", mode: "", thinking: "", fast: "on" },
         features: [],
       }),
     ).toThrow("Fast is unavailable");
@@ -128,6 +128,28 @@ describe("create agent preferences", () => {
     });
     expect(changed).toHaveBeenCalledTimes(4);
     unsubscribe();
+  });
+
+  it("stores thinking against the effective model and clears it when selecting another model", () => {
+    const next = saveSessionDefaults({
+      preferences: {},
+      provider: "codex",
+      selection: { ...EMPTY_SESSION_SETTINGS, thinking: "high" },
+      features: [],
+      modelId: "effective-model",
+    });
+    expect(next.providerPreferences?.codex).toEqual({
+      thinkingByModel: { "effective-model": "high" },
+    });
+    const form = openSessionSettings();
+    form.select({ thinking: "high", mode: "full-access", fast: "on" });
+    form.setModel("different-model");
+    expect(form.getState().selection).toEqual({
+      model: "different-model",
+      mode: "full-access",
+      thinking: "",
+      fast: "keep",
+    });
   });
 
   it("paginates bulk updates, isolates failures, and never changes another provider or archived sessions", async () => {
@@ -216,6 +238,10 @@ describe("create agent preferences", () => {
       calls.push(`${id}:mode`);
       return null;
     });
+    vi.spyOn(client, "setAgentThinkingOption").mockImplementation(async (id, option) => {
+      calls.push(`${id}:thinking:${option}`);
+      return null;
+    });
     vi.spyOn(client, "fetchAgent").mockImplementation(async () => ({
       agent: { ...agent, model: "new" },
       project: null,
@@ -246,7 +272,7 @@ describe("create agent preferences", () => {
         { label: "offline", client: null },
       ],
       provider: "codex",
-      selection: { model: "new", mode: "full-access", fast: "on" },
+      selection: { model: "new", mode: "full-access", thinking: "high", fast: "on" },
     });
     expect(result).toMatchObject({
       applied: 2,
@@ -268,11 +294,13 @@ describe("create agent preferences", () => {
     expect(calls).toEqual([
       "first:model",
       "first:mode",
+      "first:thinking:high",
       "first:fast",
       "broken:model",
       "missing-directory:model",
       "last:model",
       "last:mode",
+      "last:thinking:high",
       "last:fast",
     ]);
     expect(feature).toHaveBeenCalledWith("last", "service_tier", "priority");

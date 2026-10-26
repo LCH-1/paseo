@@ -2,6 +2,7 @@ import { useCallback, useState, useSyncExternalStore } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useFetchQuery } from "@/data/query";
+import { useToast } from "@/contexts/toast-api-context";
 import { useFormPreferences } from "@/hooks/use-form-preferences";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import {
@@ -10,7 +11,7 @@ import {
   useHostRuntimeIsConnected,
   useHosts,
 } from "@/runtime/host-runtime";
-import { filterSelectableModels } from "@/provider-selection/model-catalog";
+import { filterSelectableModels, findModelByReference } from "@/provider-selection/model-catalog";
 import {
   applySessionSettings,
   hasSessionSettings,
@@ -42,14 +43,26 @@ function useSessionCatalog(state: SessionFormState) {
 
 type SessionCatalog = ReturnType<typeof useSessionCatalog>;
 
+function resolveSessionModel(catalog: SessionCatalog, selection: SessionSettingsSelection) {
+  const { entry, defaults } = catalog;
+  const models = filterSelectableModels(entry?.models ?? []) ?? [];
+  const savedModel = defaults.preferences.providerPreferences?.[entry?.provider ?? ""]?.model;
+  const modelId = selection.model || savedModel;
+  const model = modelId
+    ? findModelByReference(models, modelId)
+    : (models.find((item) => item.isDefault) ?? models[0] ?? null);
+  return { models, model };
+}
+
 function useSessionFeatures(catalog: SessionCatalog, selection: SessionSettingsSelection) {
   const { client, connected, hostId, defaults, entry, t } = catalog;
   const provider = entry?.provider ?? "";
   const saved = defaults.preferences.providerPreferences?.[provider];
   const model = selection.model || saved?.model;
   const mode = selection.mode || saved?.mode;
+  const thinkingOptionId = selection.thinking || undefined;
   return useFetchQuery({
-    queryKey: ["session-settings-features", hostId, provider, model, mode],
+    queryKey: ["session-settings-features", hostId, provider, model, mode, thinkingOptionId],
     dataShape: "value",
     staleTimeMs: 300_000,
     enabled: Boolean(client && connected && provider),
@@ -60,6 +73,7 @@ function useSessionFeatures(catalog: SessionCatalog, selection: SessionSettingsS
         cwd: ".",
         model,
         modeId: mode,
+        thinkingOptionId,
       });
       if (payload.error) throw new Error(payload.error);
       return payload.features ?? [];
@@ -72,14 +86,27 @@ interface SettingsActionInput {
   catalog: SessionCatalog;
   state: SessionFormState;
   features: NonNullable<ReturnType<typeof useSessionFeatures>["data"]>;
+  modelId?: string;
 }
 
-async function executeSettingsAction({ action, catalog, state, features }: SettingsActionInput) {
+async function executeSettingsAction({
+  action,
+  catalog,
+  state,
+  features,
+  modelId,
+}: SettingsActionInput) {
   const { t, entry, hosts, defaults } = catalog;
   const provider = entry?.provider ?? "";
   if (action === "defaults") {
     await defaults.updatePreferences((current) =>
-      saveSessionDefaults({ preferences: current, provider, selection: state.selection, features }),
+      saveSessionDefaults({
+        preferences: current,
+        provider,
+        selection: state.selection,
+        features,
+        modelId,
+      }),
     );
     return {
       message: t("saved", { provider: entry?.label ?? provider }),
@@ -122,13 +149,29 @@ async function executeSettingsAction({ action, catalog, state, features }: Setti
 }
 
 export function useSessionSettings() {
+  const toast = useToast();
   const [form] = useState(openSessionSettings);
   const state = useSyncExternalStore(form.subscribe, form.getState, form.getState);
   const catalog = useSessionCatalog(state);
+  const { models, model } = resolveSessionModel(catalog, state.selection);
   const features = useSessionFeatures(catalog, state.selection);
   const mutation = useMutation({
     mutationFn: (action: SettingsActionInput["action"]) =>
-      executeSettingsAction({ action, catalog, state, features: features.data ?? [] }),
+      executeSettingsAction({
+        action,
+        catalog,
+        state,
+        features: features.data ?? [],
+        modelId: model?.id,
+      }),
+    onSuccess: (result) => {
+      if (result.skippedHosts.length)
+        toast.show(catalog.t("skippedHosts", { hosts: result.skippedHosts.join(", ") }), {
+          variant: "warning",
+          durationMs: 7000,
+          testID: "session-settings-skipped-warning",
+        });
+    },
   });
   const { reset, mutate, isPending: busy } = mutation;
   const selectHost = useCallback(
@@ -148,7 +191,7 @@ export function useSessionSettings() {
   const selectModel = useCallback(
     (value: string) => {
       reset();
-      form.select({ model: value, fast: "keep" });
+      form.setModel(value);
     },
     [form, reset],
   );
@@ -163,6 +206,13 @@ export function useSessionSettings() {
     (value: SessionSettingsSelection["fast"]) => {
       reset();
       form.select({ fast: value });
+    },
+    [form, reset],
+  );
+  const selectThinking = useCallback(
+    (value: string) => {
+      reset();
+      form.select({ thinking: value });
     },
     [form, reset],
   );
@@ -186,7 +236,6 @@ export function useSessionSettings() {
     !catalog.entry ||
     !hasSessionSettings(state.selection) ||
     waitingForFast;
-  const models = filterSelectableModels(catalog.entry?.models ?? []) ?? [];
   return {
     ...catalog,
     state,
@@ -196,11 +245,13 @@ export function useSessionSettings() {
     disabled,
     fastSupported,
     models,
+    thinkingOptions: model?.thinkingOptions ?? [],
     selectHost,
     selectProvider,
     selectModel,
     selectMode,
     selectFast,
+    selectThinking,
     selectTarget,
     apply,
     save,

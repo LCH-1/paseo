@@ -13,12 +13,14 @@ import {
 export interface SessionSettingsSelection {
   model: string;
   mode: string;
+  thinking: string;
   fast: "keep" | "on" | "off";
 }
 
 export const EMPTY_SESSION_SETTINGS: SessionSettingsSelection = {
   model: "",
   mode: "",
+  thinking: "",
   fast: "keep",
 };
 
@@ -42,6 +44,9 @@ export function openSessionSettings() {
     },
     setProvider(provider: string) {
       publish({ ...state, provider, selection: EMPTY_SESSION_SETTINGS });
+    },
+    setModel(model: string) {
+      publish({ ...state, selection: { ...state.selection, model, thinking: "", fast: "keep" } });
     },
     setTarget(target: string) {
       publish({ ...state, target, provider: "", selection: EMPTY_SESSION_SETTINGS });
@@ -75,7 +80,9 @@ export function selectSessionSettingsHosts<Host extends TargetHost>(input: {
 }
 
 export function hasSessionSettings(selection: SessionSettingsSelection) {
-  return Boolean(selection.model || selection.mode || selection.fast !== "keep");
+  return Boolean(
+    selection.model || selection.mode || selection.thinking || selection.fast !== "keep",
+  );
 }
 
 export function resolveFastSetting(features: readonly AgentFeature[], enabled: boolean) {
@@ -100,8 +107,15 @@ export function saveSessionDefaults(input: {
   provider: AgentProvider;
   selection: SessionSettingsSelection;
   features: readonly AgentFeature[];
+  modelId?: string;
 }) {
   const { selection } = input;
+  const thinkingModelId =
+    input.modelId ||
+    selection.model ||
+    input.preferences.providerPreferences?.[input.provider]?.model;
+  if (selection.thinking && !thinkingModelId)
+    throw new Error("Select a model before saving thinking preferences");
   const fast = resolveFastSetting(input.features, selection.fast === "on");
   if (selection.fast !== "keep" && !fast) throw new Error("Fast is unavailable for this model");
   return mergeProviderPreferences({
@@ -110,6 +124,9 @@ export function saveSessionDefaults(input: {
     updates: {
       model: selection.model || undefined,
       mode: selection.mode || undefined,
+      ...(selection.thinking && thinkingModelId
+        ? { thinkingByModel: { [thinkingModelId]: selection.thinking } }
+        : {}),
       ...(selection.fast !== "keep" && fast ? { featureValues: { [fast.id]: fast.value } } : {}),
     },
   });
@@ -147,6 +164,10 @@ async function applySession(input: {
     const notice = await client.setAgentMode(agentId, selection.mode);
     if (notice) notices.push(notice.message);
   }
+  if (selection.thinking) {
+    const notice = await client.setAgentThinkingOption(agentId, selection.thinking);
+    if (notice) notices.push(notice.message);
+  }
   if (selection.fast !== "keep") {
     const snapshot = await client.fetchAgent(agentId);
     if (!snapshot) throw new Error("Session no longer exists");
@@ -154,6 +175,7 @@ async function applySession(input: {
     const config: AgentSessionConfig = { provider: agent.provider, cwd: agent.cwd };
     if (agent.model) config.model = agent.model;
     if (agent.currentModeId) config.modeId = agent.currentModeId;
+    if (agent.thinkingOptionId) config.thinkingOptionId = agent.thinkingOptionId;
     const payload = await client.listProviderFeatures(config);
     if (payload.error) throw new Error(payload.error);
     const fast = resolveFastSetting(payload.features ?? [], selection.fast === "on");
