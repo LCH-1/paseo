@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { FlatList, Text, View } from "react-native";
+import { FlatList, Text, View, type LayoutChangeEvent } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { create } from "zustand";
 import { RetainedPanel, useRetainedPanelActive } from "@/components/retained-panel";
@@ -19,11 +19,12 @@ import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { density } from "@/styles/density";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { subscribeToRelativeTimeTick } from "@/utils/relative-time-ticker";
+import type { RelativeTimeResolution } from "@/utils/time";
 import { useHistoryConversations } from "@/screens/session-history/use-history-conversations";
 import {
   activitySessionTiming,
   buildSidebarActivitySessions,
-  formatActivityDuration,
+  describeActivityAge,
   type SidebarActivityView,
 } from "./model";
 
@@ -108,15 +109,23 @@ function ActivitySessionList({
   onSessionPress?: () => void;
 }) {
   const { rows } = useHistoryConversations(active ? agents : EMPTY_AGENTS);
+  const [width, setWidth] = useState(0);
+  const onLayout = useCallback((event: LayoutChangeEvent) => {
+    const nextWidth = event.nativeEvent.layout.width;
+    if (nextWidth > 0) setWidth(nextWidth);
+  }, []);
+  const compact = width < 280;
   const renderSession = useCallback(
     ({ item }: { item: ActivityRow }) => (
-      <ActivitySessionRow row={item} onSessionPress={onSessionPress} />
+      <ActivitySessionRow row={item} compact={compact} onSessionPress={onSessionPress} />
     ),
-    [onSessionPress],
+    [compact, onSessionPress],
   );
   return (
     <FlatList
       testID="sidebar-activity-sessions"
+      onLayout={onLayout}
+      extraData={compact}
       data={rows}
       keyExtractor={sessionKey}
       renderItem={renderSession}
@@ -158,9 +167,11 @@ const ActivityTab = memo(function ActivityTab({
 
 const ActivitySessionRow = memo(function ActivitySessionRow({
   row,
+  compact,
   onSessionPress,
 }: {
   row: ActivityRow;
+  compact: boolean;
   onSessionPress?: () => void;
 }) {
   const { t } = useTranslation();
@@ -183,120 +194,86 @@ const ActivitySessionRow = memo(function ActivitySessionRow({
   let unknownTime = "-";
   if (row.isLoading) unknownTime = t("sidebar.activity.loadingDetails");
   if (row.isError) unknownTime = t("sidebar.activity.detailsFailed");
-  const completedText = isRunning ? t("sidebar.activity.inProgress") : unknownTime;
   return (
     <View onPointerEnter={hoverIn} onPointerLeave={hoverOut}>
       <PressHighlight
         testID={`sidebar-activity-session-${agent.serverId}-${agent.id}`}
         accessibilityRole="button"
-        accessibilityLabel={`${title}, ${agent.serverLabel}, ${agent.cwd}`}
+        accessibilityLabel={title}
         onPress={open}
         style={[styles.row, hovered && styles.pressed]}
         highlightStyle={styles.pressed}
       >
-        <Text numberOfLines={2} style={styles.title}>
+        <Text numberOfLines={1} style={styles.title}>
           {title}
         </Text>
-        <Text numberOfLines={1} style={styles.metadata}>
-          {agent.provider} · {row.workspaceName}
-        </Text>
-        <Text numberOfLines={1} style={styles.metadata}>
-          {agent.serverLabel} · {row.pathLabel}
-        </Text>
-        {row.summary.preview ? (
-          <Text numberOfLines={2} style={styles.preview} testID="sidebar-activity-preview">
+        <ActivityAges
+          requestedAt={timing.requestedAt}
+          completedAt={timing.completedAt}
+          isRunning={isRunning}
+          compact={compact}
+          empty={unknownTime}
+        />
+        {!compact && row.summary.preview ? (
+          <Text numberOfLines={1} style={styles.preview} testID="sidebar-activity-preview">
             {row.summary.preview}
           </Text>
         ) : null}
-        <View style={styles.timing}>
-          <ActivityTimestamp
-            label={t("sidebar.activity.requestedAt")}
-            at={timing.requestedAt}
-            empty={unknownTime}
-            testID="sidebar-activity-requested-at"
-          />
-          <ActivityTimestamp
-            label={t("sidebar.activity.completedAt")}
-            at={timing.completedAt}
-            empty={completedText}
-            testID="sidebar-activity-completed-at"
-          />
-          <ActivityDuration
-            requestedAt={timing.requestedAt}
-            completedAt={timing.completedAt}
-            isRunning={isRunning}
-          />
-        </View>
       </PressHighlight>
     </View>
   );
 });
 
-function ActivityTimestamp({
-  label,
-  at,
-  empty,
-  testID,
-}: {
-  label: string;
-  at: number | null;
-  empty: string;
-  testID: string;
-}) {
-  const { i18n } = useTranslation();
-  const dataSet = useMemo(
-    () => (at === null ? undefined : { timestamp: new Date(at).toISOString() }),
-    [at],
-  );
-  let value = empty;
-  let description = label;
-  if (at !== null) {
-    const date = new Date(at);
-    value = date.toLocaleString(i18n.language, {
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    });
-    description = `${label} ${date.toLocaleString(i18n.language)}`;
-  }
-  return (
-    <View style={styles.timeRow} testID={testID} dataSet={dataSet} accessibilityLabel={description}>
-      <Text style={styles.timeLabel}>{label}</Text>
-      <Text style={styles.timeValue}>{value}</Text>
-    </View>
-  );
-}
-
-function ActivityDuration({
+function ActivityAges({
   requestedAt,
   completedAt,
   isRunning,
+  compact,
+  empty,
 }: {
   requestedAt: number | null;
   completedAt: number | null;
   isRunning: boolean;
+  compact: boolean;
+  empty: string;
 }) {
   const { t } = useTranslation();
   const active = useRetainedPanelActive();
   const [now, setNow] = useState(Date.now);
+  const requested = requestedAt === null ? null : describeActivityAge(requestedAt, now, t, compact);
+  const completed = completedAt === null ? null : describeActivityAge(completedAt, now, t, compact);
+  const resolutions = new Set([requested?.resolution, completed?.resolution]);
+  let resolution: RelativeTimeResolution = "day";
+  if (resolutions.has("second")) resolution = "second";
+  else if (resolutions.has("minute")) resolution = "minute";
+  else if (resolutions.has("hour")) resolution = "hour";
   useEffect(() => {
-    if (!active || !isRunning || requestedAt === null) return;
+    if (!active || (requestedAt === null && completedAt === null)) return;
     const tick = () => setNow(Date.now());
     tick();
-    return subscribeToRelativeTimeTick("second", tick);
-  }, [active, isRunning, requestedAt]);
-  const end = isRunning ? now : completedAt;
-  let value = "-";
-  if (requestedAt !== null && end !== null) value = formatActivityDuration(end - requestedAt, t);
-  const label = isRunning ? t("sidebar.activity.elapsed") : t("sidebar.activity.duration");
+    return subscribeToRelativeTimeTick(resolution, tick);
+  }, [active, requestedAt, completedAt, resolution]);
+  const requestedData = useMemo(
+    () => (requestedAt === null ? undefined : { timestamp: new Date(requestedAt).toISOString() }),
+    [requestedAt],
+  );
+  const completedData = useMemo(
+    () => (completedAt === null ? undefined : { timestamp: new Date(completedAt).toISOString() }),
+    [completedAt],
+  );
+  const completedText = isRunning
+    ? t(compact ? "sidebar.activity.inProgressShort" : "sidebar.activity.inProgress")
+    : t("sidebar.activity.completedAt") + " " + (completed?.label ?? empty);
   return (
-    <View style={styles.timeRow} testID="sidebar-activity-duration">
-      <Text style={styles.timeLabel}>{label}</Text>
-      <Text style={styles.timeValue}>{value}</Text>
-    </View>
+    <Text numberOfLines={1} style={styles.time} testID="sidebar-activity-ages">
+      <Text testID="sidebar-activity-requested-at" dataSet={requestedData}>
+        {t("sidebar.activity.requestedAt")} {requested?.label ?? empty}
+      </Text>
+      {" · "}
+      <Text testID="sidebar-activity-completed-at" dataSet={completedData}>
+        {completedText}
+      </Text>
+    </Text>
   );
 }
 
@@ -328,15 +305,10 @@ const styles = StyleSheet.create((theme) => ({
   },
   pressed: { backgroundColor: theme.colors.surfaceSidebarHover },
   title: { color: theme.colors.foreground, fontSize: theme.fontSize.base },
-  metadata: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
   preview: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
-  timing: { gap: theme.spacing[1], marginTop: theme.spacing[1] },
-  timeRow: { flexDirection: "row", alignItems: "baseline", gap: theme.spacing[2] },
-  timeLabel: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm, minWidth: 32 },
-  timeValue: {
-    color: theme.colors.foreground,
+  time: {
+    color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
-    flexShrink: 1,
     fontVariant: ["tabular-nums"],
   },
   empty: {

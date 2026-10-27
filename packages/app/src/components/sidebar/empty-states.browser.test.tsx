@@ -177,7 +177,7 @@ describe("sidebar activity tabs", () => {
       "true",
     );
     expect(queryByRole(container, "button", { name: "workspace-list" })).toBeNull();
-    expect(getByRole(container, "button", { name: "working-session, Host, /repo" })).toBeVisible();
+    expect(getByRole(container, "button", { name: "working-session" })).toBeVisible();
     expect(
       container
         .querySelector('[data-testid="sidebar-activity-requested-at"]')
@@ -185,19 +185,19 @@ describe("sidebar activity tabs", () => {
     ).toBe("2026-10-27T03:00:00.000Z");
     expect(
       container.querySelector('[data-testid="sidebar-activity-completed-at"]')?.textContent,
-    ).toContain("진행 중");
-    expect(container.textContent).toContain("codex · Shared workspace");
-    expect(container.textContent).toContain("Recent conversation preview");
+    ).toContain("진행");
+    expect(container.textContent).not.toContain("codex · Shared workspace");
+    expect(container.textContent).not.toContain("/repo");
     act(() => getByRole(container, "tab", { name: "미확인 1" }).click());
     expect(
       container
         .querySelector('[data-testid="sidebar-activity-completed-at"]')
         ?.getAttribute("data-timestamp"),
     ).toBe("2026-10-27T03:01:25.000Z");
-    expect(
-      container.querySelector('[data-testid="sidebar-activity-duration"]')?.textContent,
-    ).toContain("1분 25초");
-    act(() => getByRole(container, "button", { name: "completed-session, Host, /repo" }).click());
+    expect(container.querySelector('[data-testid="sidebar-activity-ages"]')?.textContent).toContain(
+      "완료",
+    );
+    act(() => getByRole(container, "button", { name: "completed-session" }).click());
     expect(navigateToAgent).toHaveBeenCalledWith({
       serverId: "activity-host",
       agentId: "completed-session",

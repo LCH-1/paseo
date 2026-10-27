@@ -1,6 +1,7 @@
 import type { AggregatedAgent } from "@/hooks/use-aggregated-agents";
 import { deriveSidebarStateBucket } from "@/utils/sidebar-agent-state";
 import type { ConversationSummary } from "@/screens/session-history/conversation-summary";
+import { describeCompletionTimeAgo } from "@/utils/time";
 import type { TFunction } from "i18next";
 
 export type SidebarActivityView = "all" | "running" | "unreviewed";
@@ -20,15 +21,17 @@ export function activitySessionTiming(input: { isRunning: boolean; summary: Conv
   return { requestedAt, completedAt };
 }
 
-export function formatActivityDuration(milliseconds: number, t: TFunction): string {
-  const seconds = Math.floor(Math.max(0, milliseconds) / 1_000);
-  if (seconds < 60) return t("sidebar.activity.durationSeconds", { count: seconds });
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60)
-    return t("sidebar.activity.durationMinutes", { minutes, seconds: seconds % 60 });
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return t("sidebar.activity.durationHours", { hours, minutes: minutes % 60 });
-  return t("sidebar.activity.durationDays", { days: Math.floor(hours / 24), hours: hours % 24 });
+export function describeActivityAge(at: number, now: number, t: TFunction, compact: boolean) {
+  const age = describeCompletionTimeAgo(new Date(at), new Date(now));
+  if (compact) return age;
+  const count = Number.parseInt(age.label, 10);
+  const labels = {
+    second: "sidebar.activity.agoSeconds",
+    minute: "sidebar.activity.agoMinutes",
+    hour: "sidebar.activity.agoHours",
+    day: "sidebar.activity.agoDays",
+  } as const;
+  return { ...age, label: t(labels[age.resolution as keyof typeof labels], { count }) };
 }
 
 export function buildSidebarActivitySessions(input: {

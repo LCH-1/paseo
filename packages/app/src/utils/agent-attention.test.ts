@@ -4,7 +4,7 @@ import { pickAttentionAgent, shouldClearAgentAttention } from "@/utils/agent-att
 import {
   activitySessionTiming,
   buildSidebarActivitySessions,
-  formatActivityDuration,
+  describeActivityAge,
 } from "@/components/sidebar/activity/model";
 import type { AggregatedAgent } from "@/hooks/use-aggregated-agents";
 import { EMPTY_CONVERSATION } from "@/screens/session-history/conversation-summary";
@@ -75,14 +75,17 @@ describe("sidebar activity sessions", () => {
     ).toEqual({ requestedAt: null, completedAt: 3_000 });
   });
 
-  it("formats elapsed and completed durations with bounded precision in the selected language", () => {
+  it("shows age since each event with compact and localized labels", () => {
     const t = i18n.getFixedT("ko");
-    expect(formatActivityDuration(-1_000, t)).toBe("0초");
-    expect(formatActivityDuration(59_999, t)).toBe("59초");
-    expect(formatActivityDuration(85_000, t)).toBe("1분 25초");
-    expect(formatActivityDuration(3_665_000, t)).toBe("1시간 1분");
-    expect(formatActivityDuration(90_000_000, t)).toBe("1일 1시간");
-    expect(formatActivityDuration(85_000, i18n.getFixedT("en"))).toBe("1m 25s");
+    const age = (elapsed: number, compact = false) =>
+      describeActivityAge(100_000_000, 100_000_000 + elapsed, t, compact);
+    expect(age(-1_000)).toEqual({ label: "0초 전", resolution: "second" });
+    expect(age(59_999).label).toBe("59초 전");
+    expect(age(85_000)).toEqual({ label: "1분 전", resolution: "minute" });
+    expect(age(3_665_000).label).toBe("1시간 전");
+    expect(age(90_000_000).label).toBe("1일 전");
+    expect(age(85_000, true).label).toBe("1m");
+    expect(describeActivityAge(0, 85_000, i18n.getFixedT("en"), false).label).toBe("1m ago");
   });
 
   const openTurn: Agent["turn"] = {
