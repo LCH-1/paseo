@@ -1,4 +1,11 @@
-import { TabGroupHeader, TabGroupItems, SavedTabGroups } from "@/workspace-tabs/tab-group-controls";
+import { TAB_GROUP_ROW_HEIGHT } from "@/workspace-tabs/tab-group-drag";
+import { useTabGroupDrag } from "@/workspace-tabs/use-tab-group-drag";
+import {
+  TabGroupHeader,
+  TabGroupItems,
+  TabGroupUnderline,
+  SavedTabGroups,
+} from "@/workspace-tabs/tab-group-controls";
 import {
   useGroupedWorkspaceTabs,
   TabGroupRowContext,
@@ -829,7 +836,8 @@ function TabChip({
   const tabChipStyle = useCallback(
     () => [
       styles.tab,
-      tabGroup && { borderBottomWidth: 3, borderBottomColor: TAB_GROUP_COLORS[tabGroup.color] },
+      groups && styles.tabGroupRow,
+      isDragging && tabGroup && { backgroundColor: TAB_GROUP_COLORS[tabGroup.color] + "22" },
       groups?.selected.includes(tab.key) && { backgroundColor: "#8ab4f833" },
       resolveWorkspaceTabTitleLines(presentation) && styles.tabTwoLine,
       isActiveFocused && styles.tabActive,
@@ -905,6 +913,7 @@ function TabChip({
   const tabAccessibilityState = useMemo(() => ({ selected: isActive }), [isActive]);
   const testIdentity =
     tab.target.kind === "new_tab" ? tab.tabId : buildDeterministicWorkspaceTabId(tab.target);
+  const tabGroupDataSet = useMemo(() => ({ tabGroup: tabGroup?.id ?? "none" }), [tabGroup]);
   const tabLabelSkeletonStyle = styles.tabLabelSkeleton;
   const tabLabelStyle = useMemo(
     () => [styles.tabLabel, isHighlighted && styles.tabLabelActive],
@@ -918,6 +927,7 @@ function TabChip({
       onPointerEnter={handleTabPointerEnter}
       onPointerLeave={handleTabPointerLeave}
     >
+      <TabGroupUnderline group={tabGroup} extend={TAB_CHIP_GAP / 2} />
       <ContextMenu key={tab.key} compactMode={menuMode}>
         <Tooltip delayDuration={400} enabledOnDesktop enabledOnMobile={false}>
           <TooltipTrigger asChild triggerRefProp="triggerRef">
@@ -925,6 +935,7 @@ function TabChip({
               {...(dragHandleProps?.attributes as object | undefined)}
               {...(dragHandleProps?.listeners as object | undefined)}
               testID={`workspace-tab-${testIdentity}`}
+              dataSet={tabGroupDataSet}
               triggerRef={dragHandleProps?.setActivatorNodeRef as unknown as undefined}
               style={tabChipStyle}
               onPress={handleNavigateTab}
@@ -1322,12 +1333,14 @@ function ResolvedWorkspaceDesktopTabsRow({
           nextTabs.map((tab) => tab.tab),
           nextTabs.find((row) => tabKeyExtractor(row) === drop.activeKey)?.tab.key,
           nextTabs.find((row) => tabKeyExtractor(row) === drop.overKey)?.tab.key,
+          drop.groupId,
         );
       else onReorderTabs(nextTabs.map((tab) => tab.tab));
     },
     [onReorderTabs, groups],
   );
 
+  const groupDragHandlers = useTabGroupDrag(displayedTabs, tabKeyExtractor);
   const getTabDragData = useMemo(() => {
     if (!paneId) return undefined;
     return (tab: ResolvedWorkspaceDesktopTabRowItem) => ({
@@ -1507,6 +1520,7 @@ function ResolvedWorkspaceDesktopTabsRow({
             useDragHandle
             disabled={!externalDndContext && displayedTabs.length < 2}
             onDragEnd={handleDragEnd}
+            {...groupDragHandlers}
             externalDndContext={externalDndContext}
             activeId={activeDragTabId}
             getItemData={getTabDragData}
@@ -1750,6 +1764,7 @@ const styles = StyleSheet.create((theme) => ({
   tabHovered: {
     backgroundColor: theme.colors.surface1,
   },
+  tabGroupRow: { height: TAB_GROUP_ROW_HEIGHT, paddingBottom: 3 },
   tabTwoLine: {
     height: 32,
   },

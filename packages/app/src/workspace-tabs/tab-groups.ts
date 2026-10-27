@@ -96,6 +96,7 @@ export function projectTabGroups<T extends { tab: WorkspaceTabDescriptor }>(
 }
 interface TabGroupDrop {
   overKey: string;
+  groupId?: string | null;
   tab: WorkspaceTabDescriptor;
 }
 function applyTabGroupDrop(
@@ -108,11 +109,15 @@ function applyTabGroupDrop(
   const destination = destinationKey?.startsWith(GROUP_HEADER_PREFIX)
     ? state.groups.find((group) => GROUP_HEADER_PREFIX + group.id === destinationKey)
     : groupForTab(state, destinationKey ?? "");
+  const targetGroup =
+    drop?.groupId === undefined
+      ? destination
+      : state.groups.find((group) => group.id === drop.groupId);
   const source = groupForTab(state, movedKey);
   const moving = drop?.tab ?? source?.tabs.find((tab) => tab.key === movedKey);
-  if (!moving || destination?.id === source?.id) return state;
-  return destination
-    ? assignToTabGroup(state, destination.id, [moving])
+  if (!moving || targetGroup?.id === source?.id) return state;
+  return targetGroup
+    ? assignToTabGroup(state, targetGroup.id, [moving])
     : removeFromTabGroups(state, [movedKey]);
 }
 /** A header moves its whole block; an individual tab follows its drop destination. */

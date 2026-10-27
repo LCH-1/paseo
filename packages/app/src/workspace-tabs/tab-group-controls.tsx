@@ -1,3 +1,4 @@
+import { TAB_GROUP_ROW_HEIGHT } from "./tab-group-drag";
 import { getIsElectron } from "@/constants/platform";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { View, Text } from "react-native";
@@ -72,7 +73,16 @@ export function TabGroupHeader({
     [groups, group],
   );
   const color = TAB_GROUP_COLORS[group.color];
-  const chip = useMemo(() => [styles.header, { width, borderBottomColor: color }], [width, color]);
+  const chip = useMemo(
+    () => [
+      styles.header,
+      {
+        width,
+        backgroundColor: groups.dragPreview?.groupId === group.id ? color + "22" : "transparent",
+      },
+    ],
+    [width, color, groups.dragPreview?.groupId, group.id],
+  );
   const label = useMemo(() => [styles.label, { backgroundColor: color }], [color]);
   const state = useMemo(() => ({ expanded: !group.collapsed }), [group.collapsed]);
   return (
@@ -91,6 +101,7 @@ export function TabGroupHeader({
         accessibilityState={state}
         testID={`tab-group-${group.id}`}
       >
+        <TabGroupUnderline group={group} />
         <Text numberOfLines={1} style={label}>
           {group.name || "●"}
         </Text>
@@ -194,12 +205,14 @@ export function SavedTabGroups() {
 }
 const styles = StyleSheet.create((theme) => ({
   header: {
-    height: 35,
+    height: TAB_GROUP_ROW_HEIGHT,
     justifyContent: "center",
     paddingHorizontal: 4,
-    borderBottomWidth: 3,
+    paddingBottom: 3,
+    position: "relative",
     flexShrink: 0,
   },
+  underline: { position: "absolute", bottom: 0, height: 3, zIndex: 5 },
   label: {
     fontSize: 12,
     color: "#202124",
@@ -225,4 +238,20 @@ const styles = StyleSheet.create((theme) => ({
 export function TabGroupItems({ tabKey }: { tabKey: string }) {
   const groups = useTabGroupRow();
   return groups ? <TabGroupItemsInner tabKey={tabKey} /> : null;
+}
+
+export function TabGroupUnderline({
+  group,
+  extend = 0,
+}: {
+  group: TabGroup | undefined;
+  extend?: number;
+}) {
+  const color = group ? TAB_GROUP_COLORS[group.color] : "transparent";
+  const style = useMemo(
+    () => [styles.underline, { left: -extend, right: -extend, backgroundColor: color }],
+    [extend, color],
+  );
+  if (!group) return null;
+  return <View pointerEvents="none" style={style} testID={`tab-group-line-${group.id}`} />;
 }

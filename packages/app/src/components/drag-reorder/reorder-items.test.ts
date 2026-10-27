@@ -60,3 +60,19 @@ describe("reorderItemsOnDragEnd", () => {
     ).toBeNull();
   });
 });
+
+it("inserts on either side of the target independently of the drag direction", () => {
+  const common = { items, activeId: "gamma", overId: "beta", keyExtractor: byValue };
+  expect(reorderItemsOnDragEnd({ ...common, before: true })).toEqual(["alpha", "gamma", "beta"]);
+  expect(reorderItemsOnDragEnd({ ...common, before: false })).toEqual(["alpha", "beta", "gamma"]);
+  expect(reorderItemsOnDragEnd({ ...common, activeId: "alpha", before: true })).toEqual([
+    "alpha",
+    "beta",
+    "gamma",
+  ]);
+  expect(reorderItemsOnDragEnd({ ...common, activeId: "alpha", before: false })).toEqual([
+    "beta",
+    "alpha",
+    "gamma",
+  ]);
+});

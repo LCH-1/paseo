@@ -69,4 +69,17 @@ export interface DraggableListProps<T> {
 export interface InlineListDrop {
   activeKey: string;
   overKey: string;
+  groupId?: string | null;
+  before?: boolean;
+}
+
+export interface InlineListDragItem {
+  key: string;
+  left: number;
+  right: number;
+}
+export interface InlineListDragPosition {
+  activeKey: string;
+  pointerX: number;
+  items: InlineListDragItem[];
 }

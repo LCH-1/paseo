@@ -5,6 +5,7 @@ export interface DragEndInput<T> {
   activeId: string;
   overId: string | null | undefined;
   keyExtractor: (item: T, index: number) => string;
+  before?: boolean;
 }
 
 export function reorderItemsOnDragEnd<T>({
@@ -12,6 +13,7 @@ export function reorderItemsOnDragEnd<T>({
   activeId,
   overId,
   keyExtractor,
+  before,
 }: DragEndInput<T>): T[] | null {
   if (!overId || activeId === overId) return null;
 
@@ -20,5 +22,11 @@ export function reorderItemsOnDragEnd<T>({
 
   if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) return null;
 
+  if (before !== undefined) {
+    const remaining = items.filter((_, index) => index !== oldIndex);
+    const target = remaining.findIndex((item, index) => keyExtractor(item, index) === overId);
+    remaining.splice(target + (before ? 0 : 1), 0, items[oldIndex]);
+    return remaining;
+  }
   return arrayMove(items, oldIndex, newIndex);
 }

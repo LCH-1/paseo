@@ -182,3 +182,70 @@ it("dropping outside a group removes membership even when the previous tab is gr
   );
   expect(next.groups[0].tabs.map((t) => t.key)).toEqual(["a"]);
 });
+
+import { resolveTabGroupDrag } from "./tab-group-drag";
+const dragItems = [
+  { key: "header", left: 100, right: 160, groupId: "one", header: true },
+  { key: "a", left: 160, right: 260, groupId: "one", header: false },
+  { key: "b", left: 260, right: 360, groupId: "one", header: false },
+  { key: "c", left: 360, right: 480, groupId: null, header: false },
+];
+it("joins near a group edge before the dragged tab crosses the group's center", () => {
+  const drop = resolveTabGroupDrag({
+    activeKey: "c",
+    pointerX: 374,
+    sourceGroupId: null,
+    items: dragItems,
+  });
+  expect(drop).toMatchObject({ overKey: "b", groupId: "one", before: false });
+});
+it("joins at the left edge and places the new member after the header", () => {
+  const drop = resolveTabGroupDrag({
+    activeKey: "c",
+    pointerX: 88,
+    sourceGroupId: null,
+    items: dragItems,
+  });
+  expect(drop).toMatchObject({ overKey: "header", groupId: "one", before: false });
+});
+it("leaves with a small pointer movement beyond the group edge while the dragged tab still overlaps", () => {
+  const inside = resolveTabGroupDrag({
+    activeKey: "b",
+    pointerX: 359,
+    sourceGroupId: "one",
+    items: dragItems,
+  });
+  const outside = resolveTabGroupDrag({
+    activeKey: "b",
+    pointerX: 364,
+    sourceGroupId: "one",
+    items: dragItems,
+  });
+  expect(inside.groupId).toBe("one");
+  expect(outside.groupId).toBeNull();
+});
+it("does not join a remote group", () => {
+  expect(
+    resolveTabGroupDrag({ activeKey: "c", pointerX: 400, sourceGroupId: null, items: dragItems })
+      .groupId,
+  ).toBeNull();
+});
+it("allows a drop near a collapsed header without visible members", () => {
+  expect(
+    resolveTabGroupDrag({
+      activeKey: "c",
+      pointerX: 172,
+      sourceGroupId: null,
+      items: [dragItems[0], dragItems[3]],
+    }).groupId,
+  ).toBe("one");
+});
+it("ungroups explicitly even if the nearest reorder target remains inside the group", () => {
+  const next = reorderTabGroups(
+    initial(),
+    [GROUP_HEADER_PREFIX + "one", "a", "b", "c", GROUP_HEADER_PREFIX + "two", "d", "e"],
+    "b",
+    { overKey: "a", groupId: null, tab: tab("b") },
+  );
+  expect(next.groups[0].tabs.map((t) => t.key)).toEqual(["a"]);
+});

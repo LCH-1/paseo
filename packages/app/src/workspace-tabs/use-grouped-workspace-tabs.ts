@@ -1,3 +1,4 @@
+import type { InlineListDrop } from "@/components/draggable-list.types";
 import { router } from "expo-router";
 import { newWorkspaceTabsBridge } from "./new-workspace-tabs";
 import { useStableEvent } from "@/hooks/use-stable-event";
@@ -66,6 +67,14 @@ export function useGroupedWorkspaceTabs(
   const [selected, setSelected] = useState<string[]>([]),
     [error, setError] = useState<string | null>(null);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [dragPreview, setDragPreview] = useState<{ key: string; groupId: string | null } | null>(
+    null,
+  );
+  const preview = useStableEvent((next: typeof dragPreview) =>
+    setDragPreview((current) =>
+      current?.key === next?.key && current?.groupId === next?.groupId ? current : next,
+    ),
+  );
   const anchor = useRef<string | null>(null);
   const pending = useRef<{ groupId: string; before: Set<string> } | null>(null);
   const capture = (tab: WorkspaceTabDescriptor): WorkspaceTabDescriptor => ({
@@ -258,7 +267,12 @@ export function useGroupedWorkspaceTabs(
       error,
       editingGroupId,
       endEditing: () => setEditingGroupId(null),
-      groupFor: (key: string) => groupForTab(state, key),
+      dragPreview,
+      preview,
+      groupFor: (key: string) =>
+        dragPreview?.key === key
+          ? state.groups.find((group) => group.id === dragPreview.groupId)
+          : groupForTab(state, key),
       moveToWindow,
       patch,
       ungroup,
@@ -287,10 +301,15 @@ export function useGroupedWorkspaceTabs(
         anchor.current = key;
         return false;
       },
-      reorder(next: WorkspaceTabDescriptor[], movedKey?: string, overKey?: string) {
+      reorder(
+        next: WorkspaceTabDescriptor[],
+        movedKey?: string,
+        overKey?: string,
+        groupId?: InlineListDrop["groupId"],
+      ) {
         const all = new Map(props.tabs.map((row) => [row.tab.key, row.tab]));
         const dragging = all.get(movedKey ?? "");
-        const drop = dragging && overKey ? { overKey, tab: capture(dragging) } : undefined;
+        const drop = dragging && overKey ? { overKey, groupId, tab: capture(dragging) } : undefined;
         const reordered = reorderTabGroups(
           state,
           next.map((tab) => tab.key),

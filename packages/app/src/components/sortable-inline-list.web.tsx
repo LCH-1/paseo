@@ -1,10 +1,12 @@
-import { useCallback, useMemo, type ReactElement } from "react";
+import { useCallback, useMemo, useRef, type ReactElement } from "react";
 import {
   DndContext,
   closestCenter,
   KeyboardSensor,
   PointerSensor,
   type Modifier,
+  type CollisionDetection,
+  type DragEndEvent,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
@@ -15,8 +17,12 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { InlineListDrop, DraggableRenderItemInfo } from "./draggable-list.types";
-import { useDragReorderState } from "./drag-reorder";
+import type {
+  InlineListDrop,
+  InlineListDragPosition,
+  DraggableRenderItemInfo,
+} from "./draggable-list.types";
+import { reorderItemsOnDragEnd, useDragReorderState } from "./drag-reorder";
 
 const restrictToHorizontalAxis: Modifier = ({ transform }) => ({
   ...transform,
@@ -121,6 +127,8 @@ export function SortableInlineList<T>({
   activationDistance = 8,
   onDragBegin,
   onDragStartKey,
+  resolveDrop,
+  onDragPreview,
   externalDndContext = false,
   activeId: externalActiveId = null,
   getItemData,
@@ -130,6 +138,8 @@ export function SortableInlineList<T>({
   renderItem: (info: DraggableRenderItemInfo<T>) => ReactElement;
   onDragEnd?: (data: T[], drop: InlineListDrop) => void;
   onDragStartKey?: (key: string) => void;
+  resolveDrop?: (position: InlineListDragPosition) => InlineListDrop;
+  onDragPreview?: (drop: InlineListDrop | null) => void;
   useDragHandle?: boolean;
   disabled?: boolean;
   activationDistance?: number;
@@ -149,6 +159,50 @@ export function SortableInlineList<T>({
     onDragBegin,
     disabled,
   });
+  const latestDrop = useRef<InlineListDrop | null>(null);
+  const detectDrop = useCallback<CollisionDetection>(
+    (args) => {
+      if (!resolveDrop) return closestCenter(args);
+      const items = args.droppableContainers.flatMap((container) => {
+        const rect = args.droppableRects.get(container.id);
+        return rect ? [{ key: String(container.id), left: rect.left, right: rect.right }] : [];
+      });
+      const drop = resolveDrop({
+        activeKey: String(args.active.id),
+        pointerX:
+          args.pointerCoordinates?.x ?? args.collisionRect.left + args.collisionRect.width / 2,
+        items,
+      });
+      latestDrop.current = drop;
+      return [{ id: drop.overKey }];
+    },
+    [resolveDrop],
+  );
+  const handleDragMove = useCallback(() => onDragPreview?.(latestDrop.current), [onDragPreview]);
+  const handleDragCancel = useCallback(() => {
+    latestDrop.current = null;
+    onDragPreview?.(null);
+    handlers.onDragCancel();
+  }, [handlers, onDragPreview]);
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const drop = latestDrop.current;
+      if (resolveDrop && drop) {
+        const reordered = reorderItemsOnDragEnd({
+          items: managedItems,
+          activeId: drop.activeKey,
+          overId: drop.overKey,
+          keyExtractor,
+          before: drop.before,
+        });
+        handlers.onDragCancel();
+        onDragEnd?.(reordered ?? managedItems, drop);
+      } else handlers.onDragEnd(event);
+      latestDrop.current = null;
+      onDragPreview?.(null);
+    },
+    [resolveDrop, managedItems, keyExtractor, handlers, onDragEnd, onDragPreview],
+  );
   const handleDragStart = useCallback(
     (event: import("@dnd-kit/core").DragStartEvent) => {
       onDragStartKey?.(String(event.active.id));
@@ -204,11 +258,12 @@ export function SortableInlineList<T>({
   return (
     <DndContext
       sensors={sensors}
-      collisionDetection={closestCenter}
+      collisionDetection={detectDrop}
       modifiers={DND_MODIFIERS}
       onDragStart={handleDragStart}
-      onDragCancel={handlers.onDragCancel}
-      onDragEnd={handlers.onDragEnd}
+      onDragMove={handleDragMove}
+      onDragCancel={handleDragCancel}
+      onDragEnd={handleDragEnd}
     >
       {renderedItems}
     </DndContext>
