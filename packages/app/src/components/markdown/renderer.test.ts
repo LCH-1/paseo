@@ -8,7 +8,7 @@ import type { ASTNode } from "react-native-enriched-markdown/src/web/types";
 import { QueryClient } from "@tanstack/react-query";
 import { decodeMarkdownImage, getMarkdownImageStatus } from "./image-decoding";
 import { describe, expect, it } from "vitest";
-import { darkTheme, lightTheme } from "@/styles/theme";
+import { darkTheme, darkZincTheme, lightTheme } from "@/styles/theme";
 import { createMarkdownStyles } from "./styles";
 import { prepareMarkdownSource, PENDING_MARKDOWN_IMAGE } from "./source";
 import { normalizeMarkdownHtml } from "./html";
@@ -383,6 +383,7 @@ describe("shared Markdown theme colours", () => {
 
 it.each([
   ["dark", darkTheme],
+  ["dark zinc", darkZincTheme],
   ["light", lightTheme],
 ] as const)(
   "uses %s theme colours for quotes, admonitions, code, links and dividers",
@@ -405,9 +406,11 @@ it.each([
       backgroundColor: theme.colors.surface2,
       borderColor: "transparent",
     });
-    expect(style.link?.color).toBe(theme.colors.accentBright);
+    const linkColor = theme.colors.palette.blue[theme.colorScheme === "dark" ? 400 : 600];
+    expect(style.link?.color).toBe(linkColor);
+    expect(style.link?.color).not.toBe(theme.colors.foreground);
     expect(style.linkVariants?.["^(?!https?://).+"]).toEqual({
-      color: theme.colors.accentBright,
+      color: linkColor,
     });
     expect(style.thematicBreak?.color).toBe(theme.colors.border);
   },

@@ -10,6 +10,7 @@ export function createMarkdownStyles(
   { compact = false, blockGap }: { compact?: boolean; blockGap: number },
 ): { markdownStyle: MarkdownStyle; selectionColor: string; containerStyle?: typeof WEB_CONTAINER } {
   const fontSize = compact ? theme.fontSize.base : theme.fontSize.content;
+  const linkColor = theme.colors.palette.blue[theme.colorScheme === "dark" ? 400 : 600];
   // Every block is followed by the same gap; the library drops it after the last block.
   const block = { marginTop: 0, marginBottom: blockGap };
   const paragraph = {
@@ -60,10 +61,10 @@ export function createMarkdownStyles(
           caution: { color: theme.colors.statusDanger, backgroundColor: theme.colors.surface2 },
         },
       },
-      link: { color: theme.colors.accentBright, underline: false },
+      link: { color: linkColor, underline: false },
       linkVariants: {
         "^(?!https?://).+": {
-          color: theme.colors.accentBright,
+          color: linkColor,
         },
       },
       code: {
