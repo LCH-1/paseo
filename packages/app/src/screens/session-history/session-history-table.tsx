@@ -58,6 +58,8 @@ function HistoryColumn({
   const style = [
     styles.column,
     columnStyles[index],
+    !compact && index >= 4 && styles.narrowTimeColumn,
+    index >= 4 && styles.centerColumn,
     compact && styles.compactColumn,
     compact && index < 4 && styles.fullColumn,
     metadata && styles.metadata,
@@ -65,7 +67,15 @@ function HistoryColumn({
   return (
     <View style={style}>
       {compact ? (
-        <Text style={[styles.fieldLabel, metadata && styles.metadataLabel]}>{columns[index]}</Text>
+        <Text
+          style={[
+            styles.fieldLabel,
+            metadata && styles.metadataLabel,
+            index >= 4 && styles.centerText,
+          ]}
+        >
+          {columns[index]}
+        </Text>
       ) : null}
       <View style={metadata ? styles.metadataValue : styles.value}>{children}</View>
     </View>
@@ -92,7 +102,7 @@ function ClosedTime({ agent }: { agent: AggregatedAgent }) {
   const presence = agentTabPresenceBridge.read(agent.serverId, agent.id);
   if (presence?.isOpen) return <Text style={styles.open}>열림</Text>;
   if (presence?.lastClosedAt != null) return <ElapsedTime at={presence.lastClosedAt} />;
-  return <Text style={styles.time}>{presence ? "닫힘 · 기록 없음" : "확인 중"}</Text>;
+  return <Text style={styles.time}>-</Text>;
 }
 function ResponseTime({ row }: { row: HistoryRowData }) {
   if (row.isWorking) return <Text style={styles.open}>작업중</Text>;
@@ -312,6 +322,9 @@ const styles = StyleSheet.create((theme) => ({
   table: { flex: 1, minWidth: 0 },
   list: { flex: 1, minWidth: 0, width: "100%" },
   column: { paddingHorizontal: theme.spacing[2], minWidth: 0 },
+  narrowTimeColumn: { width: 100, flexBasis: 100, flexGrow: 0, flexShrink: 0 },
+  centerColumn: { alignItems: "center" },
+  centerText: { textAlign: "center" },
   compactColumn: { flexBasis: "33.333%", width: "33.333%", flexGrow: 0 },
   fullColumn: { flexBasis: "100%", width: "100%" },
   metadata: { flexDirection: "row", gap: theme.spacing[2] },
