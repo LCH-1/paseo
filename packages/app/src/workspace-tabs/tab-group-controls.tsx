@@ -11,9 +11,12 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
 } from "@/components/ui/context-menu";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import {
+  DropdownMenuItem,
+  DropdownMenuSubTrigger,
+  type MenuPageDefinition,
+} from "@/components/ui/dropdown-menu";
 import { PressHighlight } from "@/components/ui/press-highlight";
-import { ToolbarButton } from "@/components/ui/pane-content-toolbar";
 import { Folder } from "lucide-react-native";
 import type { DraggableListDragHandleProps } from "@/components/draggable-list.types";
 import { TAB_GROUP_COLORS, type TabGroup, type TabGroupColor } from "./tab-groups";
@@ -184,24 +187,44 @@ function SavedGroup({ group }: { group: TabGroup }) {
     </View>
   );
 }
-export function SavedTabGroups() {
+const SAVED_TAB_GROUPS_PAGE = "saved-tab-groups";
+
+function SavedTabGroupsPage() {
   const groups = useTabGroupRow()!;
-  const [open, setOpen] = useState(false);
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
-      <ToolbarButton kind="menu" label="저장된 탭 그룹" testID="saved-tab-groups">
-        <Folder size={14} color="#9aa0a6" />
-      </ToolbarButton>
-      <DropdownMenuContent width={280}>
-        {groups.state.groups.length === 0 ? (
-          <Text style={styles.empty}>저장된 탭 그룹 없음</Text>
-        ) : null}
-        {groups.state.groups.map((group) => (
-          <SavedGroup key={group.id} group={group} />
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <>
+      {groups.state.groups.length === 0 ? (
+        <Text style={styles.empty}>저장된 탭 그룹 없음</Text>
+      ) : null}
+      {groups.state.groups.map((group) => (
+        <SavedGroup key={group.id} group={group} />
+      ))}
+    </>
   );
+}
+
+const savedTabGroupsPages: MenuPageDefinition[] = [
+  {
+    id: SAVED_TAB_GROUPS_PAGE,
+    title: "저장된 탭 그룹",
+    content: <SavedTabGroupsPage />,
+  },
+];
+
+export function useSavedTabGroupsMenuPages() {
+  const groups = useTabGroupRow();
+  return {
+    pages: groups ? savedTabGroupsPages : [],
+    trigger: groups ? (
+      <DropdownMenuSubTrigger
+        id={SAVED_TAB_GROUPS_PAGE}
+        testID="saved-tab-groups"
+        leading={<Folder size={16} color="#9aa0a6" />}
+      >
+        저장된 탭 그룹
+      </DropdownMenuSubTrigger>
+    ) : null,
+  };
 }
 const styles = StyleSheet.create((theme) => ({
   header: {

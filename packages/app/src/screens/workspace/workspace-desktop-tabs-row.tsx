@@ -4,7 +4,6 @@ import {
   TabGroupHeader,
   TabGroupItems,
   TabGroupUnderline,
-  SavedTabGroups,
 } from "@/workspace-tabs/tab-group-controls";
 import {
   useGroupedWorkspaceTabs,
@@ -552,6 +551,7 @@ function sameWidths(left: number[], right: number[]): boolean {
 }
 
 export interface WorkspaceDesktopTabsRowProps {
+  trailing?: React.ReactNode;
   globalDraftContext?: boolean;
   host?: PaneHost;
   launchPurpose?: WorkspaceTabLaunchPurpose;
@@ -1078,12 +1078,17 @@ export function WorkspaceDesktopTabsRow(props: WorkspaceDesktopTabsRowProps) {
   return (
     <>
       <TabGroupRowContext.Provider value={props.host === "explorer" ? null : grouping.context}>
-        <ResolvedWorkspaceDesktopTabsRow
-          {...props}
-          tabs={props.host === "explorer" ? resolvedTabs : grouping.rows}
-          onReorderTabs={grouping.context.reorder}
-          onCloseTab={grouping.context.closeTab}
-        />
+        <View style={styles.tabsWithTrailing}>
+          <View style={styles.tabsFill}>
+            <ResolvedWorkspaceDesktopTabsRow
+              {...props}
+              tabs={props.host === "explorer" ? resolvedTabs : grouping.rows}
+              onReorderTabs={grouping.context.reorder}
+              onCloseTab={grouping.context.closeTab}
+            />
+          </View>
+          {props.trailing}
+        </View>
       </TabGroupRowContext.Provider>
       {props.tabs.map(({ tab }) => (
         <WorkspaceDesktopTabPresentationSlot
@@ -1546,7 +1551,6 @@ function ResolvedWorkspaceDesktopTabsRow({
           rightStyle={tabScrollBoundary.rightShadeStyle}
         />
       </View>
-      {groups ? <SavedTabGroups /> : null}
       <WorkspacePaneToolbarActions
         panePanelKinds={panePanelKinds}
         host={host}
@@ -1702,6 +1706,15 @@ function ResolvedDesktopTabChip({
 }
 
 const styles = StyleSheet.create((theme) => ({
+  tabsWithTrailing: {
+    flexDirection: "row",
+    alignItems: "center",
+    minWidth: 0,
+  },
+  tabsFill: {
+    flex: 1,
+    minWidth: 0,
+  },
   tabsContainer: {
     minWidth: 0,
     height: WORKSPACE_SECONDARY_HEADER_HEIGHT,

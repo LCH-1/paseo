@@ -34,6 +34,7 @@ import {
 } from "@getpaseo/protocol/terminal-profiles";
 import { buildSettingsHostSectionRoute } from "@/utils/host-routes";
 import { usePanelStore } from "@/stores/panel-store";
+import { useSavedTabGroupsMenuPages } from "@/workspace-tabs/tab-group-controls";
 import type { Theme } from "@/styles/theme";
 import {
   useWorkspaceScriptsMenuPages,
@@ -203,6 +204,11 @@ export function WorkspaceHeaderMenuOverflow({
 }: WorkspaceHeaderMenuOverflowProps) {
   const { t } = useTranslation();
   const scriptsMenu = useWorkspaceScriptsMenuPages(scripts);
+  const savedTabGroupsMenu = useSavedTabGroupsMenuPages();
+  const pages = useMemo(
+    () => [...scriptsMenu.pages, ...savedTabGroupsMenu.pages],
+    [scriptsMenu.pages, savedTabGroupsMenu.pages],
+  );
   const toggleSidebar = usePanelStore((state) => state.toggleAgentListForLayout);
   const handleToggleSidebar = useCallback(
     () => toggleSidebar({ isCompact: false }),
@@ -226,15 +232,11 @@ export function WorkspaceHeaderMenuOverflow({
           <WorkspaceHeaderMenuTriggerIcon />
         )}
       </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="end"
-        width={260}
-        testID="workspace-header-menu"
-        pages={scriptsMenu.pages}
-      >
+      <DropdownMenuContent align="end" width={260} testID="workspace-header-menu" pages={pages}>
         <DropdownMenuLabel>{subtitle ? `${title} · ${subtitle}` : title}</DropdownMenuLabel>
         <View style={styles.overflowToolbar}>{toolbar}</View>
         <DropdownMenuSeparator />
+        {savedTabGroupsMenu.trigger}
         {scriptsMenu.trigger}
         <WorkspaceHeaderWorkspaceActionItems {...workspaceActions} />
         <DropdownMenuSeparator />

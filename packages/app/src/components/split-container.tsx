@@ -1272,6 +1272,14 @@ const SplitPaneView = memo(function SplitPaneView({
           <View style={styles.paneTabsRow}>
             <View style={styles.paneTabsFill}>
               <WorkspaceDesktopTabsRow
+                trailing={
+                  isFocused && !focusModeEnabled ? (
+                    <View style={styles.paneTrailing}>
+                      <View style={styles.paneTrailingDragSpace} />
+                      {paneTrailing}
+                    </View>
+                  ) : null
+                }
                 paneId={pane.id}
                 isFocused={isFocused && isWorkspaceFocused}
                 tabs={desktopTabRowItems}
@@ -1306,13 +1314,6 @@ const SplitPaneView = memo(function SplitPaneView({
                 onExitFocusMode={onExitFocusMode}
               />
             </View>
-            {isFocused && !focusModeEnabled ? (
-              <View style={styles.paneTrailing}>
-                {/* Empty strip left of the ⋯ so the window can still be grabbed and dragged. */}
-                <View style={styles.paneTrailingDragSpace} />
-                {paneTrailing}
-              </View>
-            ) : null}
           </View>
         </WindowChromeSafeArea>
 
