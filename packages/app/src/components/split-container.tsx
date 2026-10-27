@@ -1,6 +1,3 @@
-import { DropdownMenu, DropdownMenuContent } from "@/components/ui/dropdown-menu";
-import { ToolbarButton } from "@/components/ui/pane-content-toolbar";
-import { Ellipsis } from "lucide-react-native";
 import {
   createContext,
   Fragment,
@@ -98,7 +95,6 @@ import { recordRenderProfileReasons, RenderProfile } from "@/utils/render-profil
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { isNative } from "@/constants/platform";
 import { panelTargetSupportsHost } from "@/plugins/workspace-panels/locations";
-import { SidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
 
 // Workspace controls that sit at the trailing end of the focused pane's tab row.
 const PaneTrailingContext = createContext<ReactNode>(null);
@@ -1133,19 +1129,6 @@ function SplitNodeView({
   );
 }
 
-function WorkspaceTrailingOverflow({ children }: { children: ReactNode }) {
-  return (
-    <DropdownMenu>
-      <ToolbarButton kind="menu" label="워크스페이스 작업" testID="workspace-actions-overflow">
-        <Ellipsis size={16} color="#9aa0a6" />
-      </ToolbarButton>
-      <DropdownMenuContent width={300}>
-        <View style={styles.paneTrailing}>{children}</View>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
 const SplitPaneView = memo(function SplitPaneView({
   pane,
   uiTabs,
@@ -1185,11 +1168,6 @@ const SplitPaneView = memo(function SplitPaneView({
 }: SplitPaneViewProps) {
   recordRenderProfileReasons(`SplitPaneView:${pane.id}`, ["render"]);
   const paneTrailing = useContext(PaneTrailingContext);
-  const [paneWidth, setPaneWidth] = useState(0);
-  const measurePaneWidth = useCallback(
-    (event: LayoutChangeEvent) => setPaneWidth(event.nativeEvent.layout.width),
-    [],
-  );
   const paneRef = useRef<View | null>(null);
   const stableOnFocusPane = useStableEvent(onFocusPane);
   const paneState = useMemo(
@@ -1288,7 +1266,6 @@ const SplitPaneView = memo(function SplitPaneView({
         collapsable={false}
         style={styles.pane}
         testID={`workspace-pane-${pane.id}`}
-        onLayout={measurePaneWidth}
       >
         <WindowChromeSafeArea placement="inline" style={styles.paneTabs}>
           <TitlebarDragRegion />
@@ -1331,12 +1308,9 @@ const SplitPaneView = memo(function SplitPaneView({
             </View>
             {isFocused && !focusModeEnabled ? (
               <View style={styles.paneTrailing}>
-                {paneWidth > 0 && paneWidth < 900 ? (
-                  <WorkspaceTrailingOverflow>{paneTrailing}</WorkspaceTrailingOverflow>
-                ) : (
-                  paneTrailing
-                )}
-                <SidebarMenuToggle />
+                {/* Empty strip left of the ⋯ so the window can still be grabbed and dragged. */}
+                <View style={styles.paneTrailingDragSpace} />
+                {paneTrailing}
               </View>
             ) : null}
           </View>
@@ -1486,9 +1460,12 @@ const styles = StyleSheet.create((theme) => ({
   paneTrailing: {
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[1],
-    paddingHorizontal: theme.spacing[1],
+    paddingRight: theme.spacing[1],
     flexShrink: 0,
+  },
+  paneTrailingDragSpace: {
+    width: 64,
+    alignSelf: "stretch",
   },
   paneContent: {
     position: "relative",

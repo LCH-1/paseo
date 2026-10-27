@@ -3512,41 +3512,46 @@ function WorkspaceScreenContent({
   );
   const paneTrailing = useMemo(
     () => (
-      <>
-        <PluginHeaderButtons serverId={normalizedServerId} workspaceId={normalizedWorkspaceId} />
-        {workspaceDirectory ? (
+      <WorkspaceHeaderMenuOverflow
+        toolbar={
           <>
-            <WorkspaceOpenInEditorButton
+            <PluginHeaderButtons
               serverId={normalizedServerId}
-              cwd={workspaceDirectory}
-              activeFile={activeFileLocation}
-              hideLabels
+              workspaceId={normalizedWorkspaceId}
             />
-            <WorkspaceActions serverId={normalizedServerId} cwd={workspaceDirectory} />
-            <WorkspaceHeaderExplorerToggle
-              owner={explorerToggleOwner}
-              onPress={handleToggleExplorerSidebar}
-              label={explorerSidebarToggleLabel}
-              tooltipLabel={t("workspace.tabs.explorerSidebar.toggle")}
-              tooltipKeys={EXPLORER_TOGGLE_KEYS}
-              accessibilityState={explorerSidebarToggleAccessibilityState}
-            />
+            {workspaceDirectory ? (
+              <>
+                <WorkspaceOpenInEditorButton
+                  serverId={normalizedServerId}
+                  cwd={workspaceDirectory}
+                  activeFile={activeFileLocation}
+                  hideLabels
+                />
+                <WorkspaceActions serverId={normalizedServerId} cwd={workspaceDirectory} />
+                <WorkspaceHeaderExplorerToggle
+                  owner={explorerToggleOwner}
+                  onPress={handleToggleExplorerSidebar}
+                  label={explorerSidebarToggleLabel}
+                  tooltipLabel={t("workspace.tabs.explorerSidebar.toggle")}
+                  tooltipKeys={EXPLORER_TOGGLE_KEYS}
+                  accessibilityState={explorerSidebarToggleAccessibilityState}
+                />
+              </>
+            ) : null}
           </>
-        ) : null}
-        <WorkspaceHeaderMenuOverflow
-          title={workspaceHeaderTitle}
-          subtitle={workspaceHeaderSubtitle}
-          scripts={compactHeaderScripts}
-          currentBranchName={currentBranchName}
-          showWorkspaceSetup={showWorkspaceSetup}
-          importAgentDisabled={!canOpenImportSheet}
-          copyPathDisabled={!workspaceDirectory}
-          onOpenImportSheet={openImportSheet}
-          onCopyWorkspacePath={handleCopyWorkspacePath}
-          onCopyBranchName={handleCopyBranchName}
-          onOpenSetupTab={handleOpenSetupTab}
-        />
-      </>
+        }
+        title={workspaceHeaderTitle}
+        subtitle={workspaceHeaderSubtitle}
+        scripts={compactHeaderScripts}
+        currentBranchName={currentBranchName}
+        showWorkspaceSetup={showWorkspaceSetup}
+        importAgentDisabled={!canOpenImportSheet}
+        copyPathDisabled={!workspaceDirectory}
+        onOpenImportSheet={openImportSheet}
+        onCopyWorkspacePath={handleCopyWorkspacePath}
+        onCopyBranchName={handleCopyBranchName}
+        onOpenSetupTab={handleOpenSetupTab}
+      />
     ),
     [
       activeFileLocation,

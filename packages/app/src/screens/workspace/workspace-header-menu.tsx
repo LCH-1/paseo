@@ -1,8 +1,15 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useMemo, type ReactNode } from "react";
 import { View } from "react-native";
 import { useRouter, type Href } from "expo-router";
 import { useTranslation } from "react-i18next";
-import { Copy, Ellipsis, Globe, Import as ImportIcon, Settings } from "lucide-react-native";
+import {
+  Copy,
+  Ellipsis,
+  Globe,
+  Import as ImportIcon,
+  PanelLeft,
+  Settings,
+} from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { TerminalProfile } from "@getpaseo/protocol/messages";
 import {
@@ -26,6 +33,7 @@ import {
   resolveTerminalProfiles,
 } from "@getpaseo/protocol/terminal-profiles";
 import { buildSettingsHostSectionRoute } from "@/utils/host-routes";
+import { usePanelStore } from "@/stores/panel-store";
 import type { Theme } from "@/styles/theme";
 import {
   useWorkspaceScriptsMenuPages,
@@ -37,6 +45,7 @@ const ThemedCopy = withUnistyles(Copy);
 const ThemedGlobe = withUnistyles(Globe);
 const ThemedImport = withUnistyles(ImportIcon);
 const ThemedSettings = withUnistyles(Settings);
+const ThemedPanelLeft = withUnistyles(PanelLeft);
 
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
@@ -44,6 +53,7 @@ const MENU_NEW_BROWSER_ICON = <ThemedGlobe size={16} uniProps={mutedColorMapping
 const MENU_IMPORT_ICON = <ThemedImport size={16} uniProps={mutedColorMapping} />;
 const MENU_COPY_ICON = <ThemedCopy size={16} uniProps={mutedColorMapping} />;
 const MENU_SETTINGS_ICON = <ThemedSettings size={16} uniProps={mutedColorMapping} />;
+const MENU_SIDEBAR_ICON = <ThemedPanelLeft size={16} uniProps={mutedColorMapping} />;
 function WorkspaceHeaderMenuTriggerIcon() {
   return (
     <ThemedEllipsis
@@ -177,6 +187,7 @@ export interface WorkspaceHeaderMenuOverflowProps extends WorkspaceHeaderWorkspa
   title: string;
   subtitle: string;
   scripts: UseWorkspaceScriptsMenuPagesInput;
+  toolbar: ReactNode;
 }
 
 /**
@@ -187,10 +198,16 @@ export function WorkspaceHeaderMenuOverflow({
   title,
   subtitle,
   scripts,
+  toolbar,
   ...workspaceActions
 }: WorkspaceHeaderMenuOverflowProps) {
   const { t } = useTranslation();
   const scriptsMenu = useWorkspaceScriptsMenuPages(scripts);
+  const toggleSidebar = usePanelStore((state) => state.toggleAgentListForLayout);
+  const handleToggleSidebar = useCallback(
+    () => toggleSidebar({ isCompact: false }),
+    [toggleSidebar],
+  );
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -216,9 +233,18 @@ export function WorkspaceHeaderMenuOverflow({
         pages={scriptsMenu.pages}
       >
         <DropdownMenuLabel>{subtitle ? `${title} · ${subtitle}` : title}</DropdownMenuLabel>
+        <View style={styles.overflowToolbar}>{toolbar}</View>
         <DropdownMenuSeparator />
         {scriptsMenu.trigger}
         <WorkspaceHeaderWorkspaceActionItems {...workspaceActions} />
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          testID="workspace-header-toggle-sidebar"
+          leading={MENU_SIDEBAR_ICON}
+          onSelect={handleToggleSidebar}
+        >
+          {t("shell.menu.toggleSidebar")}
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -356,6 +382,14 @@ export function WorkspaceHeaderMenuMobile({
 const ATTENTION_DOT_SIZE = 6;
 
 const styles = StyleSheet.create((theme) => ({
+  overflowToolbar: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: theme.spacing[1],
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: theme.spacing[1],
+  },
   headerMenuProfileIconWrapper: {
     width: 16,
     height: 16,
