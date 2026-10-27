@@ -19,6 +19,9 @@ import { useImportSession } from "@/hooks/use-import-session";
 import { useHosts } from "@/runtime/host-runtime";
 import { buildOpenProjectRoute } from "@/utils/host-routes";
 import { NewWorkspaceTabsBar, useHistoryTabPresence } from "@/workspace-tabs/new-workspace-tabs";
+import { DesktopTopTabsBar } from "@/workspace-tabs/desktop-top-tabs-bar";
+import { useIsCompactFormFactor } from "@/constants/layout";
+import { getDesktopHost } from "@/desktop/host";
 
 /** Long enough that a typed word is one request, short enough to feel live. */
 const SEARCH_DEBOUNCE_MS = 200;
@@ -44,6 +47,18 @@ export function SessionsScreen() {
   }
 
   return <SessionsScreenContent />;
+}
+
+function SessionsTopBar({ title }: { title: string }) {
+  // Electron windows never take the compact header, matching the workspace screen.
+  const isCompact = useIsCompactFormFactor() && getDesktopHost() === null;
+  if (!isCompact) return <DesktopTopTabsBar />;
+  return (
+    <>
+      <MenuHeader title={title} />
+      <NewWorkspaceTabsBar />
+    </>
+  );
 }
 
 function SessionsScreenContent() {
@@ -131,8 +146,7 @@ function SessionsScreenContent() {
 
   return (
     <View style={styles.container}>
-      <MenuHeader title={t("sessions.title")} />
-      <NewWorkspaceTabsBar />
+      <SessionsTopBar title={t("sessions.title")} />
       {showFilterRow ? (
         <View style={styles.filterContainer}>
           {isSearchSupported ? (

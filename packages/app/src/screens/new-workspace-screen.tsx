@@ -13,7 +13,6 @@ import {
 import {
   completeNewWorkspaceLaunch,
   completeNewWorkspaceTab,
-  NewWorkspaceTabsBar,
   updateNewWorkspaceTabServer,
 } from "@/workspace-tabs/new-workspace-tabs";
 import type { ReactNode } from "react";
@@ -33,8 +32,7 @@ import {
 } from "@/composer/attachments/submit";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
 import { MenuHeader } from "@/components/headers/menu-header";
-import { SidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
-import { WindowChromeSafeArea } from "@/utils/desktop-window";
+import { DesktopTopTabsBar } from "@/workspace-tabs/desktop-top-tabs-bar";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { useToast } from "@/contexts/toast-context";
 import { useAgentInputDraft } from "@/composer/draft/input-draft";
@@ -1763,17 +1761,7 @@ function NewWorkspaceLayout({
       {fullscreen ? null : (
         <>
           {isCompact ? <MenuHeader borderless rightContent={importSessionButton} /> : null}
-          {isCompact ? null : (
-            // Desktop has no header: the tab row is the window top, like the workspace screen.
-            <WindowChromeSafeArea placement="inline" style={styles.desktopTabs}>
-              <TitlebarDragRegion />
-              <View style={styles.desktopTabsFill}>
-                <NewWorkspaceTabsBar />
-              </View>
-              <View style={styles.desktopTabsDragSpace} />
-              <SidebarMenuToggle />
-            </WindowChromeSafeArea>
-          )}
+          {isCompact ? null : <DesktopTopTabsBar />}
         </>
       )}
       <View style={styles.content}>
@@ -1799,20 +1787,6 @@ const styles = StyleSheet.create((theme) => ({
   content: {
     position: "relative",
     flex: 1,
-  },
-  desktopTabs: {
-    position: "relative",
-    flexDirection: "row",
-    alignItems: "center",
-    minWidth: 0,
-  },
-  desktopTabsFill: {
-    flex: 1,
-    minWidth: 0,
-  },
-  desktopTabsDragSpace: {
-    width: 46,
-    alignSelf: "stretch",
   },
   compactSetupSpace: {
     flex: 1,
