@@ -171,12 +171,23 @@ export function SortableInlineList<T>({
         activeKey: String(args.active.id),
         pointerX:
           args.pointerCoordinates?.x ?? args.collisionRect.left + args.collisionRect.width / 2,
+        dragged: { left: args.collisionRect.left, right: args.collisionRect.right },
         items,
       });
       latestDrop.current = drop;
-      return [{ id: drop.overKey }];
+      const reordered = reorderItemsOnDragEnd({
+        items: managedItems,
+        activeId: drop.activeKey,
+        overId: drop.overKey,
+        keyExtractor,
+        before: drop.before,
+      });
+      const index = (reordered ?? managedItems).findIndex(
+        (item, i) => keyExtractor(item, i) === drop.activeKey,
+      );
+      return [{ id: keyExtractor(managedItems[index], index) }];
     },
-    [resolveDrop],
+    [resolveDrop, managedItems, keyExtractor],
   );
   const handleDragMove = useCallback(() => onDragPreview?.(latestDrop.current), [onDragPreview]);
   const handleDragCancel = useCallback(() => {

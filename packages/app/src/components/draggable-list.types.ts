@@ -73,13 +73,16 @@ export interface InlineListDrop {
   before?: boolean;
 }
 
-export interface InlineListDragItem {
-  key: string;
+export interface InlineListDragBounds {
   left: number;
   right: number;
+}
+export interface InlineListDragItem extends InlineListDragBounds {
+  key: string;
 }
 export interface InlineListDragPosition {
   activeKey: string;
   pointerX: number;
+  dragged: InlineListDragBounds;
   items: InlineListDragItem[];
 }

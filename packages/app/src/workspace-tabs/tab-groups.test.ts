@@ -190,55 +190,85 @@ const dragItems = [
   { key: "b", left: 260, right: 360, groupId: "one", header: false },
   { key: "c", left: 360, right: 480, groupId: null, header: false },
 ];
-it("joins near a group edge before the dragged tab crosses the group's center", () => {
+for (const width of [64, 100, 160]) {
+  for (const grab of [0.1, 0.5, 0.9]) {
+    it(`joins with a 12px move regardless of ${width}px tab width and ${grab} grab point`, () => {
+      const outside = { ...dragItems[3], left: 364, right: 364 + width };
+      const drop = resolveTabGroupDrag({
+        activeKey: "c",
+        pointerX: outside.left + width * grab - 12,
+        dragged: { left: outside.left - 12, right: outside.right - 12 },
+        sourceGroupId: null,
+        items: [...dragItems.slice(0, 3), outside],
+      });
+      expect(drop).toMatchObject({ overKey: "b", groupId: "one", before: false });
+    });
+    it(`leaves right with a 12px move regardless of ${width}px tab width and ${grab} grab point`, () => {
+      const member = { ...dragItems[2], right: dragItems[2].left + width };
+      const drop = resolveTabGroupDrag({
+        activeKey: "b",
+        pointerX: member.left + width * grab + 12,
+        dragged: { left: member.left + 12, right: member.right + 12 },
+        sourceGroupId: "one",
+        items: [
+          ...dragItems.slice(0, 2),
+          member,
+          { ...dragItems[3], left: member.right + 4, right: member.right + 104 },
+        ],
+      });
+      expect(drop).toMatchObject({ overKey: "a", groupId: null, before: false });
+    });
+  }
+}
+it("leaves left when the first member edge passes the label without crossing its whole width", () => {
+  const drop = resolveTabGroupDrag({
+    activeKey: "a",
+    pointerX: 238,
+    dragged: { left: 148, right: 248 },
+    sourceGroupId: "one",
+    items: dragItems,
+  });
+  expect(drop).toMatchObject({ overKey: "header", groupId: null, before: true });
+});
+it("keeps a member grouped during small movement within the outer edge", () => {
+  const drop = resolveTabGroupDrag({
+    activeKey: "b",
+    pointerX: 327,
+    dragged: { left: 267, right: 367 },
+    sourceGroupId: "one",
+    items: dragItems,
+  });
+  expect(drop.groupId).toBe("one");
+});
+it("keeps an interior member grouped until it actually reaches an outer edge", () => {
+  const drop = resolveTabGroupDrag({
+    activeKey: "a",
+    pointerX: 222,
+    dragged: { left: 172, right: 272 },
+    sourceGroupId: "one",
+    items: dragItems,
+  });
+  expect(drop.groupId).toBe("one");
+});
+it("does not magnetize an outside tab moving away from a group", () => {
   const drop = resolveTabGroupDrag({
     activeKey: "c",
-    pointerX: 374,
+    pointerX: 430,
+    dragged: { left: 370, right: 490 },
     sourceGroupId: null,
     items: dragItems,
   });
-  expect(drop).toMatchObject({ overKey: "b", groupId: "one", before: false });
+  expect(drop.groupId).toBeNull();
 });
-it("joins at the left edge and places the new member after the header", () => {
+it("joins near a collapsed label based on the dragged edge while the pointer is still far outside", () => {
   const drop = resolveTabGroupDrag({
     activeKey: "c",
-    pointerX: 88,
+    pointerX: 220,
+    dragged: { left: 168, right: 288 },
     sourceGroupId: null,
-    items: dragItems,
+    items: [dragItems[0], dragItems[3]],
   });
   expect(drop).toMatchObject({ overKey: "header", groupId: "one", before: false });
-});
-it("leaves with a small pointer movement beyond the group edge while the dragged tab still overlaps", () => {
-  const inside = resolveTabGroupDrag({
-    activeKey: "b",
-    pointerX: 359,
-    sourceGroupId: "one",
-    items: dragItems,
-  });
-  const outside = resolveTabGroupDrag({
-    activeKey: "b",
-    pointerX: 364,
-    sourceGroupId: "one",
-    items: dragItems,
-  });
-  expect(inside.groupId).toBe("one");
-  expect(outside.groupId).toBeNull();
-});
-it("does not join a remote group", () => {
-  expect(
-    resolveTabGroupDrag({ activeKey: "c", pointerX: 400, sourceGroupId: null, items: dragItems })
-      .groupId,
-  ).toBeNull();
-});
-it("allows a drop near a collapsed header without visible members", () => {
-  expect(
-    resolveTabGroupDrag({
-      activeKey: "c",
-      pointerX: 172,
-      sourceGroupId: null,
-      items: [dragItems[0], dragItems[3]],
-    }).groupId,
-  ).toBe("one");
 });
 it("ungroups explicitly even if the nearest reorder target remains inside the group", () => {
   const next = reorderTabGroups(
