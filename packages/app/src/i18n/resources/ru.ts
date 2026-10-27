@@ -1166,6 +1166,7 @@ export const ru: TranslationResources = {
     },
   },
   sidebar: {
+    activity: en.sidebar.activity,
     terminal: {
       configureDirectory: "Настроить каталог терминала хоста",
       open: "Открыть терминал",

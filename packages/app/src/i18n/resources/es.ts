@@ -1185,6 +1185,7 @@ export const es: TranslationResources = {
     },
   },
   sidebar: {
+    activity: en.sidebar.activity,
     terminal: {
       configureDirectory: "Configurar directorio del terminal del host",
       open: "Abrir terminal",

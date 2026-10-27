@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "@/stores/session-store";
 import { pickAttentionAgent, shouldClearAgentAttention } from "@/utils/agent-attention";
+import { buildSidebarActivitySessions } from "@/components/sidebar/activity/model";
+import type { AggregatedAgent } from "@/hooks/use-aggregated-agents";
 
 function createAgent(input: Partial<Agent> & Pick<Agent, "id">): Agent {
   const { id, ...rest } = input;
@@ -37,6 +39,85 @@ function createAgent(input: Partial<Agent> & Pick<Agent, "id">): Agent {
     turn: rest.turn ?? { phase: "idle", cancellationRequestId: null },
   };
 }
+
+describe("sidebar activity sessions", () => {
+  const openTurn: Agent["turn"] = {
+    phase: "open",
+    turnId: "turn-1",
+    startedAt: null,
+    cancellationRequestId: null,
+  };
+  function session(input: Partial<Agent> & Pick<Agent, "id">): AggregatedAgent {
+    const agent = createAgent({ workspaceId: "shared-workspace", ...input });
+    return {
+      ...agent,
+      serverLabel: "Host",
+      pendingPermissionCount: agent.pendingPermissions.length,
+    };
+  }
+  function groups(agents: AggregatedAgent[], hostFilters: string[] = []) {
+    return buildSidebarActivitySessions({
+      agents,
+      serverIds: ["server-1", "server-2"],
+      hostFilters,
+    });
+  }
+  function finished(id: string) {
+    return session({ id, requiresAttention: true, attentionReason: "finished" });
+  }
+
+  it("lists sessions sharing a workspace independently and transitions from working to unreviewed", () => {
+    const running = session({ id: "first", turn: openTurn });
+    const completed = finished("second");
+    expect(groups([running, completed])).toEqual({ running: [running], unreviewed: [completed] });
+    const settled = finished("first");
+    expect(groups([settled, completed])).toEqual({ running: [], unreviewed: [settled, completed] });
+    const reviewed = { ...settled, requiresAttention: false };
+    expect(groups([reviewed, completed])).toEqual({ running: [], unreviewed: [completed] });
+  });
+
+  it("uses the open turn instead of stale lifecycle status", () => {
+    const working = session({ id: "working", status: "idle", turn: openTurn });
+    const stale = session({ id: "stale", status: "running" });
+    expect(groups([working, stale])).toEqual({ running: [working], unreviewed: [] });
+  });
+
+  it("excludes permission requests, errors, archived sessions and ordinary idle sessions", () => {
+    const agents = [
+      session({
+        id: "permission",
+        turn: openTurn,
+        requiresAttention: true,
+        attentionReason: "permission",
+      }),
+      session({ id: "error", requiresAttention: true, attentionReason: "error", status: "error" }),
+      session({ id: "archived", turn: openTurn, archivedAt: new Date("2026-10-27") }),
+      session({ id: "idle" }),
+      session({ id: "unknown-reason", requiresAttention: true }),
+    ];
+    expect(groups(agents)).toEqual({ running: [], unreviewed: [] });
+  });
+
+  it("honors host filters, falls back for removed filters and keeps host-qualified identities", () => {
+    const first = finished("same-id");
+    const second = { ...first, serverId: "server-2" };
+    const removed = { ...first, serverId: "removed" };
+    expect(groups([first, second, removed])).toEqual({ running: [], unreviewed: [first, second] });
+    expect(groups([first, second], ["server-2"])).toEqual({ running: [], unreviewed: [second] });
+    expect(groups([first, second], ["removed"])).toEqual({
+      running: [],
+      unreviewed: [first, second],
+    });
+  });
+
+  it("shows the most recently completed sessions first without changing the source", () => {
+    const older = { ...finished("older"), attentionTimestamp: new Date("2026-10-26") };
+    const newer = { ...finished("newer"), attentionTimestamp: new Date("2026-10-27") };
+    const agents = [older, newer];
+    expect(groups(agents).unreviewed).toEqual([newer, older]);
+    expect(agents).toEqual([older, newer]);
+  });
+});
 
 describe("shouldClearAgentAttention", () => {
   it("returns true only when the agent is connected and requires attention", () => {

@@ -1175,6 +1175,7 @@ export const ptBR: TranslationResources = {
     },
   },
   sidebar: {
+    activity: en.sidebar.activity,
     terminal: {
       configureDirectory: "Configurar diretório do terminal do host",
       open: "Abrir terminal",

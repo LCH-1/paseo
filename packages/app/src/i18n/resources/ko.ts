@@ -1156,6 +1156,15 @@ export const ko: TranslationResources = {
     },
   },
   sidebar: {
+    activity: {
+      all: "전체",
+      running: "작업 중",
+      unreviewed: "미확인",
+      emptyRunning: "작업 중인 세션이 없습니다.",
+      emptyUnreviewed: "완료 후 확인하지 않은 세션이 없습니다.",
+      loading: "세션을 불러오는 중…",
+      untitled: "제목 없는 세션",
+    },
     terminal: {
       configureDirectory: "호스트 터미널 경로 설정",
       open: "터미널 열기",

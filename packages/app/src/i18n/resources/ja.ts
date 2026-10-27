@@ -1162,6 +1162,7 @@ export const ja: TranslationResources = {
     },
   },
   sidebar: {
+    activity: en.sidebar.activity,
     terminal: {
       configureDirectory: "ホストのターミナルパスを設定",
       open: "ターミナルを開く",

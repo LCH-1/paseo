@@ -1149,6 +1149,7 @@ export const ar: TranslationResources = {
     },
   },
   sidebar: {
+    activity: en.sidebar.activity,
     terminal: {
       configureDirectory: "إعداد مجلد طرفية المضيف",
       open: "فتح الطرفية",

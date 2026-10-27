@@ -1157,6 +1157,15 @@ export const en = {
     },
   },
   sidebar: {
+    activity: {
+      all: "All",
+      running: "Working",
+      unreviewed: "Unreviewed",
+      emptyRunning: "No sessions are working.",
+      emptyUnreviewed: "No completed sessions to review.",
+      loading: "Loading sessions…",
+      untitled: "Untitled session",
+    },
     terminal: {
       configureDirectory: "Configure host terminal directory",
       open: "Open terminal",

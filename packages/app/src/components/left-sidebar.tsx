@@ -40,6 +40,7 @@ import { HostPicker } from "@/components/hosts/host-picker";
 import { SidebarDisplayPreferencesMenu } from "@/components/sidebar/display-preferences/menu";
 import { SidebarSeparator } from "@/components/sidebar/sidebar-separator";
 import { SidebarNavRows } from "@/components/sidebar/sidebar-nav-rows";
+import { SidebarActivityPanel } from "@/components/sidebar/activity/panel";
 import { SidebarFooterIconHighlight } from "@/components/sidebar/sidebar-footer-icon-highlight";
 import { SidebarHelpMenu } from "@/components/sidebar/sidebar-help-menu";
 import { SidebarResizeHandle } from "@/components/sidebar-resize-handle";
@@ -588,33 +589,34 @@ function MobileSidebar({
           firstRowTrailing={closeButton}
         />
 
-        {isInitialLoad && !hasActiveHostFilter ? (
-          <SidebarAgentListSkeleton />
-        ) : (
-          <SidebarWorkspaceList
-            collapsedProjectKeys={collapsedProjectKeys}
-            onToggleProjectCollapsed={toggleProjectCollapsed}
-            shortcutIndexByWorkspaceKey={shortcutIndexByWorkspaceKey}
-            groupMode={groupMode}
-            workspaceGroups={workspaceGroups}
-            hostGroups={hostGroups}
-            projectIconTargets={projectIconTargets}
-            pinnedGroups={pinnedGroups}
-            projects={projects}
-            hasProjectsBeforeFilter={hasProjectsBeforeFilter}
-            hasActiveProjectFilter={hasActiveProjectFilter}
-            workspaceEntriesByKey={workspaceEntriesByKey}
-            isRefreshing={isManualRefresh && isRevalidating}
-            onRefresh={handleRefresh}
-            onWorkspacePress={handleWorkspacePress}
-            onAddProject={handleOpenProject}
-            onImportSession={handleImportSession}
-            parentGestureRef={closeGestureRef}
-            dragGestureHostActive={active}
-            listHeaderComponent={workspacesSectionHeaderElement}
-          />
-        )}
-
+        <SidebarActivityPanel active={active} onSessionPress={handleWorkspacePress}>
+          {isInitialLoad && !hasActiveHostFilter ? (
+            <SidebarAgentListSkeleton />
+          ) : (
+            <SidebarWorkspaceList
+              collapsedProjectKeys={collapsedProjectKeys}
+              onToggleProjectCollapsed={toggleProjectCollapsed}
+              shortcutIndexByWorkspaceKey={shortcutIndexByWorkspaceKey}
+              groupMode={groupMode}
+              workspaceGroups={workspaceGroups}
+              hostGroups={hostGroups}
+              projectIconTargets={projectIconTargets}
+              pinnedGroups={pinnedGroups}
+              projects={projects}
+              hasProjectsBeforeFilter={hasProjectsBeforeFilter}
+              hasActiveProjectFilter={hasActiveProjectFilter}
+              workspaceEntriesByKey={workspaceEntriesByKey}
+              isRefreshing={isManualRefresh && isRevalidating}
+              onRefresh={handleRefresh}
+              onWorkspacePress={handleWorkspacePress}
+              onAddProject={handleOpenProject}
+              onImportSession={handleImportSession}
+              parentGestureRef={closeGestureRef}
+              dragGestureHostActive={active}
+              listHeaderComponent={workspacesSectionHeaderElement}
+            />
+          )}
+        </SidebarActivityPanel>
         <SidebarFooter
           handleOpenProject={handleOpenProject}
           handleSettings={handleSettings}
@@ -795,30 +797,31 @@ function DesktopSidebar({
           <SidebarNavRows style={sidebarHeaderGroupStyle} />
         </View>
 
-        {isInitialLoad && !hasActiveHostFilter ? (
-          <SidebarAgentListSkeleton />
-        ) : (
-          <SidebarWorkspaceList
-            collapsedProjectKeys={collapsedProjectKeys}
-            onToggleProjectCollapsed={toggleProjectCollapsed}
-            shortcutIndexByWorkspaceKey={shortcutIndexByWorkspaceKey}
-            groupMode={groupMode}
-            workspaceGroups={workspaceGroups}
-            hostGroups={hostGroups}
-            projectIconTargets={projectIconTargets}
-            pinnedGroups={pinnedGroups}
-            projects={projects}
-            hasProjectsBeforeFilter={hasProjectsBeforeFilter}
-            hasActiveProjectFilter={hasActiveProjectFilter}
-            workspaceEntriesByKey={workspaceEntriesByKey}
-            isRefreshing={isManualRefresh && isRevalidating}
-            onRefresh={handleRefresh}
-            onAddProject={handleOpenProject}
-            onImportSession={handleImportSession}
-            listHeaderComponent={workspacesSectionHeaderElement}
-          />
-        )}
-
+        <SidebarActivityPanel active={active}>
+          {isInitialLoad && !hasActiveHostFilter ? (
+            <SidebarAgentListSkeleton />
+          ) : (
+            <SidebarWorkspaceList
+              collapsedProjectKeys={collapsedProjectKeys}
+              onToggleProjectCollapsed={toggleProjectCollapsed}
+              shortcutIndexByWorkspaceKey={shortcutIndexByWorkspaceKey}
+              groupMode={groupMode}
+              workspaceGroups={workspaceGroups}
+              hostGroups={hostGroups}
+              projectIconTargets={projectIconTargets}
+              pinnedGroups={pinnedGroups}
+              projects={projects}
+              hasProjectsBeforeFilter={hasProjectsBeforeFilter}
+              hasActiveProjectFilter={hasActiveProjectFilter}
+              workspaceEntriesByKey={workspaceEntriesByKey}
+              isRefreshing={isManualRefresh && isRevalidating}
+              onRefresh={handleRefresh}
+              onAddProject={handleOpenProject}
+              onImportSession={handleImportSession}
+              listHeaderComponent={workspacesSectionHeaderElement}
+            />
+          )}
+        </SidebarActivityPanel>
         <SidebarCalloutSlot />
 
         <SidebarFooter
