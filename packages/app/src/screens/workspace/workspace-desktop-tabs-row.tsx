@@ -1320,8 +1320,8 @@ function ResolvedWorkspaceDesktopTabsRow({
       if (groups)
         groups.reorder(
           nextTabs.map((tab) => tab.tab),
-          drop.activeKey,
-          drop.overKey,
+          nextTabs.find((row) => tabKeyExtractor(row) === drop.activeKey)?.tab.key,
+          nextTabs.find((row) => tabKeyExtractor(row) === drop.overKey)?.tab.key,
         );
       else onReorderTabs(nextTabs.map((tab) => tab.tab));
     },
