@@ -158,6 +158,10 @@ import { HostStatusDot } from "@/components/host-status-dot";
 import { SidebarCollapseHostProjectsButton } from "@/components/sidebar/sidebar-collapse-actions";
 import { SidebarTerminalMenuItem } from "@/components/sidebar/terminal/menu-item";
 import {
+  HostTerminalDirectoryMenuItem,
+  HostTerminalDirectoryProvider,
+} from "@/components/sidebar/terminal/settings";
+import {
   sidebarHostGroupKey,
   sidebarHostProjectKey,
   type SidebarHostProjectGroup,
@@ -594,13 +598,20 @@ function ProjectMenuItems({
         </ProjectMenuItem>
       ) : null}
       {settingsTarget ? (
-        <SidebarTerminalMenuItem
-          surface={surface}
-          serverId={settingsTarget.serverId}
-          directory={settingsTarget.iconWorkingDir}
-          projectId={settingsTarget.projectId}
-          testID={`sidebar-project-menu-terminal-${projectViewKey}`}
-        />
+        <>
+          <SidebarTerminalMenuItem
+            surface={surface}
+            serverId={settingsTarget.serverId}
+            directory={settingsTarget.iconWorkingDir}
+            projectId={settingsTarget.projectId}
+            testID={`sidebar-project-menu-terminal-${projectViewKey}`}
+          />
+          <HostTerminalDirectoryMenuItem
+            surface={surface}
+            serverId={settingsTarget.serverId}
+            testID={`sidebar-project-menu-terminal-directory-${projectViewKey}`}
+          />
+        </>
       ) : null}
       <OpenInFileManagerMenuItem
         surface={surface}
@@ -1970,6 +1981,10 @@ function SidebarHostProjectSection({
             directory={directory}
             testID={`sidebar-host-menu-terminal-${group.serverId}`}
           />
+          <HostTerminalDirectoryMenuItem
+            serverId={group.serverId}
+            testID={`sidebar-host-menu-terminal-directory-${group.serverId}`}
+          />
         </ContextMenuContent>
       </ContextMenu>
       {collapsed ? null : <View style={styles.hostProjects}>{children}</View>}
@@ -2640,28 +2655,30 @@ function ProjectModeList({
   );
 
   return (
-    <View style={styles.container}>
-      {platformIsNative ? (
-        <NestableScrollContainer
-          {...nativeScrollGestureProps}
-          style={styles.list}
-          contentContainerStyle={styles.listContent}
-          showsVerticalScrollIndicator={false}
-          testID="sidebar-project-workspace-list-scroll"
-        >
-          {content}
-        </NestableScrollContainer>
-      ) : (
-        <ScrollView
-          style={styles.list}
-          contentContainerStyle={styles.listContent}
-          showsVerticalScrollIndicator={false}
-          testID="sidebar-project-workspace-list-scroll"
-        >
-          {content}
-        </ScrollView>
-      )}
-    </View>
+    <HostTerminalDirectoryProvider>
+      <View style={styles.container}>
+        {platformIsNative ? (
+          <NestableScrollContainer
+            {...nativeScrollGestureProps}
+            style={styles.list}
+            contentContainerStyle={styles.listContent}
+            showsVerticalScrollIndicator={false}
+            testID="sidebar-project-workspace-list-scroll"
+          >
+            {content}
+          </NestableScrollContainer>
+        ) : (
+          <ScrollView
+            style={styles.list}
+            contentContainerStyle={styles.listContent}
+            showsVerticalScrollIndicator={false}
+            testID="sidebar-project-workspace-list-scroll"
+          >
+            {content}
+          </ScrollView>
+        )}
+      </View>
+    </HostTerminalDirectoryProvider>
   );
 }
 

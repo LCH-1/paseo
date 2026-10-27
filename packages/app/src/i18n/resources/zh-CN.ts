@@ -1142,6 +1142,7 @@ export const zhCN: TranslationResources = {
   },
   sidebar: {
     terminal: {
+      configureDirectory: "设置主机终端目录",
       open: "打开终端",
       opening: "正在打开终端…",
       section: "终端",

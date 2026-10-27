@@ -1158,6 +1158,7 @@ export const en = {
   },
   sidebar: {
     terminal: {
+      configureDirectory: "Configure host terminal directory",
       open: "Open terminal",
       opening: "Opening terminal…",
       section: "Terminal",

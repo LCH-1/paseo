@@ -1157,6 +1157,7 @@ export const ko: TranslationResources = {
   },
   sidebar: {
     terminal: {
+      configureDirectory: "호스트 터미널 경로 설정",
       open: "터미널 열기",
       opening: "터미널 여는 중…",
       section: "터미널",
