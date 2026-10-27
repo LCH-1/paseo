@@ -1465,7 +1465,7 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 0,
   },
   paneTrailingDragSpace: {
-    width: 64,
+    width: 46,
     alignSelf: "stretch",
   },
   paneContent: {

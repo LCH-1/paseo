@@ -1811,7 +1811,7 @@ const styles = StyleSheet.create((theme) => ({
     minWidth: 0,
   },
   desktopTabsDragSpace: {
-    width: 64,
+    width: 46,
     alignSelf: "stretch",
   },
   compactSetupSpace: {
