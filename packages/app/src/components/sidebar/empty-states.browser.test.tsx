@@ -34,6 +34,10 @@ vi.mock("@/screens/session-history/use-history-conversations", () => ({
   }),
 }));
 
+vi.mock("@/plugins/agent-tab-titles/use-title", () => ({
+  useAgentTabTitle: () => ({ primaryLabel: "Paseo", secondaryLabel: "작업탭" }),
+}));
+
 // App sources compile against the classic JSX runtime, which expects React on the global.
 beforeEach(() => vi.stubGlobal("React", React));
 
@@ -177,7 +181,7 @@ describe("sidebar activity tabs", () => {
       "true",
     );
     expect(queryByRole(container, "button", { name: "workspace-list" })).toBeNull();
-    expect(getByRole(container, "button", { name: "working-session" })).toBeVisible();
+    expect(getByRole(container, "button", { name: "Paseo-작업탭, working-session" })).toBeVisible();
     expect(
       container
         .querySelector('[data-testid="sidebar-activity-requested-at"]')
@@ -188,6 +192,9 @@ describe("sidebar activity tabs", () => {
     ).toContain("진행");
     expect(container.textContent).not.toContain("codex · Shared workspace");
     expect(container.textContent).not.toContain("/repo");
+    expect(container.querySelector('[data-testid="sidebar-activity-tab-name"]')?.textContent).toBe(
+      "Paseo-작업탭",
+    );
     act(() => getByRole(container, "tab", { name: "미확인 1" }).click());
     expect(
       container
@@ -197,7 +204,7 @@ describe("sidebar activity tabs", () => {
     expect(container.querySelector('[data-testid="sidebar-activity-ages"]')?.textContent).toContain(
       "완료",
     );
-    act(() => getByRole(container, "button", { name: "completed-session" }).click());
+    act(() => getByRole(container, "button", { name: "Paseo-작업탭, completed-session" }).click());
     expect(navigateToAgent).toHaveBeenCalledWith({
       serverId: "activity-host",
       agentId: "completed-session",

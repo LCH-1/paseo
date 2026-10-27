@@ -15,6 +15,7 @@ import { RetainedPanel, useRetainedPanelActive } from "@/components/retained-pan
 import { PressHighlight } from "@/components/ui/press-highlight";
 import { useAggregatedAgents, type AggregatedAgent } from "@/hooks/use-aggregated-agents";
 import { useHosts } from "@/runtime/host-runtime";
+import { useAgentTabTitle } from "@/plugins/agent-tab-titles/use-title";
 import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { density } from "@/styles/density";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
@@ -189,6 +190,15 @@ const ActivitySessionRow = memo(function ActivitySessionRow({
     onSessionPress?.();
   }, [agent.serverId, agent.id, agent.workspaceId, onSessionPress]);
   const title = agent.title || t("sidebar.activity.untitled");
+  const tabTitle = useAgentTabTitle({
+    serverId: agent.serverId,
+    workspaceId: agent.workspaceId ?? "",
+    agentId: agent.id,
+    defaultLabel: title,
+  });
+  let tabName = title;
+  if (typeof tabTitle === "string") tabName = tabTitle;
+  else if (tabTitle) tabName = `${tabTitle.primaryLabel}-${tabTitle.secondaryLabel}`;
   const isRunning = agent.turn.phase === "open";
   const timing = activitySessionTiming({ isRunning, summary: row.summary });
   let unknownTime = "-";
@@ -199,11 +209,14 @@ const ActivitySessionRow = memo(function ActivitySessionRow({
       <PressHighlight
         testID={`sidebar-activity-session-${agent.serverId}-${agent.id}`}
         accessibilityRole="button"
-        accessibilityLabel={title}
+        accessibilityLabel={`${tabName}, ${title}`}
         onPress={open}
         style={[styles.row, hovered && styles.pressed]}
         highlightStyle={styles.pressed}
       >
+        <Text numberOfLines={1} style={styles.tabName} testID="sidebar-activity-tab-name">
+          {tabName}
+        </Text>
         <Text numberOfLines={1} style={styles.title}>
           {title}
         </Text>
@@ -305,6 +318,11 @@ const styles = StyleSheet.create((theme) => ({
   },
   pressed: { backgroundColor: theme.colors.surfaceSidebarHover },
   title: { color: theme.colors.foreground, fontSize: theme.fontSize.base },
+  tabName: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    fontWeight: "600",
+  },
   preview: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
   time: {
     color: theme.colors.foregroundMuted,
