@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "@/stores/session-store";
 import { pickAttentionAgent, shouldClearAgentAttention } from "@/utils/agent-attention";
-import { buildSidebarActivitySessions } from "@/components/sidebar/activity/model";
+import {
+  activitySessionTiming,
+  buildSidebarActivitySessions,
+  formatActivityDuration,
+} from "@/components/sidebar/activity/model";
 import type { AggregatedAgent } from "@/hooks/use-aggregated-agents";
+import { EMPTY_CONVERSATION } from "@/screens/session-history/conversation-summary";
+import { i18n } from "@/i18n/i18next";
 
 function createAgent(input: Partial<Agent> & Pick<Agent, "id">): Agent {
   const { id, ...rest } = input;
@@ -41,6 +47,44 @@ function createAgent(input: Partial<Agent> & Pick<Agent, "id">): Agent {
 }
 
 describe("sidebar activity sessions", () => {
+  it("shows the latest request without treating a previous response as current completion", () => {
+    const summary = { ...EMPTY_CONVERSATION, lastRequestAt: 2_000, lastResponseAt: 1_000 };
+    expect(activitySessionTiming({ isRunning: true, summary })).toEqual({
+      requestedAt: 2_000,
+      completedAt: null,
+    });
+    expect(activitySessionTiming({ isRunning: false, summary })).toEqual({
+      requestedAt: 2_000,
+      completedAt: null,
+    });
+    expect(
+      activitySessionTiming({ isRunning: false, summary: { ...summary, lastResponseAt: 3_000 } }),
+    ).toEqual({ requestedAt: 2_000, completedAt: 3_000 });
+  });
+
+  it("leaves unavailable conversation times empty", () => {
+    expect(activitySessionTiming({ isRunning: false, summary: EMPTY_CONVERSATION })).toEqual({
+      requestedAt: null,
+      completedAt: null,
+    });
+    expect(
+      activitySessionTiming({
+        isRunning: false,
+        summary: { ...EMPTY_CONVERSATION, lastResponseAt: 3_000 },
+      }),
+    ).toEqual({ requestedAt: null, completedAt: 3_000 });
+  });
+
+  it("formats elapsed and completed durations with bounded precision in the selected language", () => {
+    const t = i18n.getFixedT("ko");
+    expect(formatActivityDuration(-1_000, t)).toBe("0초");
+    expect(formatActivityDuration(59_999, t)).toBe("59초");
+    expect(formatActivityDuration(85_000, t)).toBe("1분 25초");
+    expect(formatActivityDuration(3_665_000, t)).toBe("1시간 1분");
+    expect(formatActivityDuration(90_000_000, t)).toBe("1일 1시간");
+    expect(formatActivityDuration(85_000, i18n.getFixedT("en"))).toBe("1m 25s");
+  });
+
   const openTurn: Agent["turn"] = {
     phase: "open",
     turnId: "turn-1",

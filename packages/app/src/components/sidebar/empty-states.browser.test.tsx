@@ -14,6 +14,25 @@ vi.mock("@/runtime/host-runtime", () => ({
   useHosts: () => [{ serverId: "activity-host", label: "Host" }],
 }));
 vi.mock("@/utils/navigate-to-agent", () => ({ navigateToAgent: vi.fn() }));
+vi.mock("@/screens/session-history/use-history-conversations", () => ({
+  useHistoryConversations: (agents: AggregatedAgent[]) => ({
+    isLoading: false,
+    rows: agents.map((agent) => ({
+      agent,
+      pathLabel: agent.cwd,
+      workspaceName: "Shared workspace",
+      isWorking: agent.turn.phase === "open",
+      isLoading: false,
+      isError: false,
+      summary: {
+        lastRequestAt: Date.parse("2026-10-27T03:00:00Z"),
+        lastResponseAt: Date.parse("2026-10-27T03:01:25Z"),
+        previewAt: Date.parse("2026-10-27T03:01:25Z"),
+        preview: "Recent conversation preview",
+      },
+    })),
+  }),
+}));
 
 // App sources compile against the classic JSX runtime, which expects React on the global.
 beforeEach(() => vi.stubGlobal("React", React));
@@ -159,7 +178,25 @@ describe("sidebar activity tabs", () => {
     );
     expect(queryByRole(container, "button", { name: "workspace-list" })).toBeNull();
     expect(getByRole(container, "button", { name: "working-session, Host, /repo" })).toBeVisible();
+    expect(
+      container
+        .querySelector('[data-testid="sidebar-activity-requested-at"]')
+        ?.getAttribute("data-timestamp"),
+    ).toBe("2026-10-27T03:00:00.000Z");
+    expect(
+      container.querySelector('[data-testid="sidebar-activity-completed-at"]')?.textContent,
+    ).toContain("진행 중");
+    expect(container.textContent).toContain("codex · Shared workspace");
+    expect(container.textContent).toContain("Recent conversation preview");
     act(() => getByRole(container, "tab", { name: "미확인 1" }).click());
+    expect(
+      container
+        .querySelector('[data-testid="sidebar-activity-completed-at"]')
+        ?.getAttribute("data-timestamp"),
+    ).toBe("2026-10-27T03:01:25.000Z");
+    expect(
+      container.querySelector('[data-testid="sidebar-activity-duration"]')?.textContent,
+    ).toContain("1분 25초");
     act(() => getByRole(container, "button", { name: "completed-session, Host, /repo" }).click());
     expect(navigateToAgent).toHaveBeenCalledWith({
       serverId: "activity-host",

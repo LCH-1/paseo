@@ -1,17 +1,34 @@
-import { memo, useCallback, useMemo, useState, type ReactNode } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { FlatList, Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { create } from "zustand";
-import { RetainedPanel } from "@/components/retained-panel";
+import { RetainedPanel, useRetainedPanelActive } from "@/components/retained-panel";
 import { PressHighlight } from "@/components/ui/press-highlight";
 import { useAggregatedAgents, type AggregatedAgent } from "@/hooks/use-aggregated-agents";
 import { useHosts } from "@/runtime/host-runtime";
 import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { density } from "@/styles/density";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
-import { shortenPath } from "@/utils/shorten-path";
-import { buildSidebarActivitySessions, type SidebarActivityView } from "./model";
+import { subscribeToRelativeTimeTick } from "@/utils/relative-time-ticker";
+import { useHistoryConversations } from "@/screens/session-history/use-history-conversations";
+import {
+  activitySessionTiming,
+  buildSidebarActivitySessions,
+  formatActivityDuration,
+  type SidebarActivityView,
+} from "./model";
+
+type ActivityRow = ReturnType<typeof useHistoryConversations>["rows"][number];
+const EMPTY_AGENTS: AggregatedAgent[] = [];
 
 interface SidebarActivityState {
   view: SidebarActivityView;
@@ -24,8 +41,8 @@ const useSidebarActivityStore = create<SidebarActivityState>((set) => ({
 }));
 const activityViews = ["all", "running", "unreviewed"] as const;
 
-function sessionKey(agent: AggregatedAgent) {
-  return `${agent.serverId}:${agent.id}`;
+function sessionKey(row: ActivityRow) {
+  return `${row.agent.serverId}:${row.agent.id}`;
 }
 
 export function SidebarActivityPanel({
@@ -49,12 +66,6 @@ export function SidebarActivityPanel({
   );
   const showingAll = view === "all";
   const sessions = showingAll ? [] : groups[view];
-  const renderSession = useCallback(
-    ({ item }: { item: AggregatedAgent }) => (
-      <ActivitySessionRow agent={item} onSessionPress={onSessionPress} />
-    ),
-    [onSessionPress],
-  );
   let emptyLabel = t("sidebar.activity.emptyUnreviewed");
   if (view === "running") emptyLabel = t("sidebar.activity.emptyRunning");
   if (isInitialLoad) emptyLabel = t("sidebar.activity.loading");
@@ -72,16 +83,46 @@ export function SidebarActivityPanel({
       </View>
       <RetainedPanel active={showingAll}>{children}</RetainedPanel>
       <RetainedPanel active={!showingAll}>
-        <FlatList
-          testID="sidebar-activity-sessions"
-          data={sessions}
-          keyExtractor={sessionKey}
-          renderItem={renderSession}
-          contentContainerStyle={styles.listContent}
-          ListEmptyComponent={emptyState}
-        />
+        {showingAll ? null : (
+          <ActivitySessionList
+            active={active}
+            agents={sessions}
+            emptyState={emptyState}
+            onSessionPress={onSessionPress}
+          />
+        )}
       </RetainedPanel>
     </View>
+  );
+}
+
+function ActivitySessionList({
+  active,
+  agents,
+  emptyState,
+  onSessionPress,
+}: {
+  active: boolean;
+  agents: AggregatedAgent[];
+  emptyState: ReactElement;
+  onSessionPress?: () => void;
+}) {
+  const { rows } = useHistoryConversations(active ? agents : EMPTY_AGENTS);
+  const renderSession = useCallback(
+    ({ item }: { item: ActivityRow }) => (
+      <ActivitySessionRow row={item} onSessionPress={onSessionPress} />
+    ),
+    [onSessionPress],
+  );
+  return (
+    <FlatList
+      testID="sidebar-activity-sessions"
+      data={rows}
+      keyExtractor={sessionKey}
+      renderItem={renderSession}
+      contentContainerStyle={styles.listContent}
+      ListEmptyComponent={emptyState}
+    />
   );
 }
 
@@ -116,13 +157,14 @@ const ActivityTab = memo(function ActivityTab({
 });
 
 const ActivitySessionRow = memo(function ActivitySessionRow({
-  agent,
+  row,
   onSessionPress,
 }: {
-  agent: AggregatedAgent;
+  row: ActivityRow;
   onSessionPress?: () => void;
 }) {
   const { t } = useTranslation();
+  const { agent } = row;
   const [hovered, setHovered] = useState(false);
   const hoverIn = useCallback(() => setHovered(true), []);
   const hoverOut = useCallback(() => setHovered(false), []);
@@ -136,6 +178,12 @@ const ActivitySessionRow = memo(function ActivitySessionRow({
     onSessionPress?.();
   }, [agent.serverId, agent.id, agent.workspaceId, onSessionPress]);
   const title = agent.title || t("sidebar.activity.untitled");
+  const isRunning = agent.turn.phase === "open";
+  const timing = activitySessionTiming({ isRunning, summary: row.summary });
+  let unknownTime = "-";
+  if (row.isLoading) unknownTime = t("sidebar.activity.loadingDetails");
+  if (row.isError) unknownTime = t("sidebar.activity.detailsFailed");
+  const completedText = isRunning ? t("sidebar.activity.inProgress") : unknownTime;
   return (
     <View onPointerEnter={hoverIn} onPointerLeave={hoverOut}>
       <PressHighlight
@@ -150,12 +198,107 @@ const ActivitySessionRow = memo(function ActivitySessionRow({
           {title}
         </Text>
         <Text numberOfLines={1} style={styles.metadata}>
-          {agent.serverLabel} · {shortenPath(agent.cwd)}
+          {agent.provider} · {row.workspaceName}
         </Text>
+        <Text numberOfLines={1} style={styles.metadata}>
+          {agent.serverLabel} · {row.pathLabel}
+        </Text>
+        {row.summary.preview ? (
+          <Text numberOfLines={2} style={styles.preview} testID="sidebar-activity-preview">
+            {row.summary.preview}
+          </Text>
+        ) : null}
+        <View style={styles.timing}>
+          <ActivityTimestamp
+            label={t("sidebar.activity.requestedAt")}
+            at={timing.requestedAt}
+            empty={unknownTime}
+            testID="sidebar-activity-requested-at"
+          />
+          <ActivityTimestamp
+            label={t("sidebar.activity.completedAt")}
+            at={timing.completedAt}
+            empty={completedText}
+            testID="sidebar-activity-completed-at"
+          />
+          <ActivityDuration
+            requestedAt={timing.requestedAt}
+            completedAt={timing.completedAt}
+            isRunning={isRunning}
+          />
+        </View>
       </PressHighlight>
     </View>
   );
 });
+
+function ActivityTimestamp({
+  label,
+  at,
+  empty,
+  testID,
+}: {
+  label: string;
+  at: number | null;
+  empty: string;
+  testID: string;
+}) {
+  const { i18n } = useTranslation();
+  const dataSet = useMemo(
+    () => (at === null ? undefined : { timestamp: new Date(at).toISOString() }),
+    [at],
+  );
+  let value = empty;
+  let description = label;
+  if (at !== null) {
+    const date = new Date(at);
+    value = date.toLocaleString(i18n.language, {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    description = `${label} ${date.toLocaleString(i18n.language)}`;
+  }
+  return (
+    <View style={styles.timeRow} testID={testID} dataSet={dataSet} accessibilityLabel={description}>
+      <Text style={styles.timeLabel}>{label}</Text>
+      <Text style={styles.timeValue}>{value}</Text>
+    </View>
+  );
+}
+
+function ActivityDuration({
+  requestedAt,
+  completedAt,
+  isRunning,
+}: {
+  requestedAt: number | null;
+  completedAt: number | null;
+  isRunning: boolean;
+}) {
+  const { t } = useTranslation();
+  const active = useRetainedPanelActive();
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!active || !isRunning || requestedAt === null) return;
+    const tick = () => setNow(Date.now());
+    tick();
+    return subscribeToRelativeTimeTick("second", tick);
+  }, [active, isRunning, requestedAt]);
+  const end = isRunning ? now : completedAt;
+  let value = "-";
+  if (requestedAt !== null && end !== null) value = formatActivityDuration(end - requestedAt, t);
+  const label = isRunning ? t("sidebar.activity.elapsed") : t("sidebar.activity.duration");
+  return (
+    <View style={styles.timeRow} testID="sidebar-activity-duration">
+      <Text style={styles.timeLabel}>{label}</Text>
+      <Text style={styles.timeValue}>{value}</Text>
+    </View>
+  );
+}
 
 const styles = StyleSheet.create((theme) => ({
   container: { flex: 1, minHeight: 0 },
@@ -186,6 +329,16 @@ const styles = StyleSheet.create((theme) => ({
   pressed: { backgroundColor: theme.colors.surfaceSidebarHover },
   title: { color: theme.colors.foreground, fontSize: theme.fontSize.base },
   metadata: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
+  preview: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
+  timing: { gap: theme.spacing[1], marginTop: theme.spacing[1] },
+  timeRow: { flexDirection: "row", alignItems: "baseline", gap: theme.spacing[2] },
+  timeLabel: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm, minWidth: 32 },
+  timeValue: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    flexShrink: 1,
+    fontVariant: ["tabular-nums"],
+  },
   empty: {
     padding: theme.spacing[3],
     color: theme.colors.foregroundMuted,
