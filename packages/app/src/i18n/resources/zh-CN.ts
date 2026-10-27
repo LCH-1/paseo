@@ -1141,6 +1141,12 @@ export const zhCN: TranslationResources = {
     },
   },
   sidebar: {
+    terminal: {
+      open: "打开终端",
+      opening: "正在打开终端…",
+      section: "终端",
+      directory: "默认终端目录",
+    },
     statusGroupAccessibility: "{{label}} 分组",
     statusBucket: {
       needsInput: "需要输入",

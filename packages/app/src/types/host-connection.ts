@@ -64,6 +64,7 @@ export interface HostProfile {
   serverId: string;
   password?: string;
   label: string;
+  terminalDirectory?: string;
   appearance: HostAppearance;
   lifecycle: HostLifecycle;
   connections: HostConnection[];
@@ -450,6 +451,7 @@ const StoredHostProfileSchema = z.strictObject({
   serverId: z.string().trim().min(1),
   password: z.string().optional(),
   label: z.string().optional(),
+  terminalDirectory: z.string().optional(),
   appearance: HostAppearanceSchema.optional(),
   lifecycle: z.strictObject({}).optional(),
   connections: z.array(StoredHostConnectionSchema).min(1),
@@ -549,6 +551,7 @@ export function normalizeStoredHostProfile(entry: unknown): HostProfile | null {
     serverId,
     ...(password ? { password } : {}),
     label,
+    ...(record.terminalDirectory ? { terminalDirectory: record.terminalDirectory } : {}),
     appearance: record.appearance ?? defaultHostAppearance(),
     lifecycle: defaultLifecycle(),
     connections,

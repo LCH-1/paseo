@@ -1149,6 +1149,12 @@ export const ar: TranslationResources = {
     },
   },
   sidebar: {
+    terminal: {
+      open: "فتح الطرفية",
+      opening: "جارٍ فتح الطرفية…",
+      section: "الطرفية",
+      directory: "مجلد الطرفية الافتراضي",
+    },
     statusGroupAccessibility: "مجموعة {{label}}",
     statusBucket: {
       needsInput: "تحتاج إدخالاً",

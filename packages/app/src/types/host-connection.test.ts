@@ -76,6 +76,17 @@ describe("reorderHostProfiles", () => {
 });
 
 describe("normalizeStoredHostProfile", () => {
+  it("preserves a saved terminal directory and accepts hosts without it", () => {
+    const stored = {
+      serverId: "terminal-host",
+      connections: [{ type: "directTcp", endpoint: "localhost:6767" }],
+    };
+    expect(
+      normalizeStoredHostProfile({ ...stored, terminalDirectory: "C:/projects" })
+        ?.terminalDirectory,
+    ).toBe("C:/projects");
+    expect(normalizeStoredHostProfile(stored)?.terminalDirectory).toBeUndefined();
+  });
   it("loads direct TCP connections stored before TLS and password fields existed", () => {
     const profile = normalizeStoredHostProfile({
       serverId: "srv_old",

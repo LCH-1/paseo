@@ -1948,6 +1948,49 @@ describe("HostRuntimeStore", () => {
     store.syncHosts([]);
   });
 
+  it("saves a terminal directory, reloads it, and resets an empty path to root", async () => {
+    const host = makeHost({ serverId: "srv_terminal" });
+    const storage = createMemoryHostRuntimeStorage();
+    await storage.setItem("@paseo:daemon-registry", JSON.stringify([host]));
+    await storage.setItem("@paseo:e2e", "1");
+    const store = createAppearanceStore(storage);
+    const loaded = onceHostListMatches(store, () => store.isHostRegistryLoaded());
+    store.boot();
+    await loaded;
+    const connections = store.getHosts()[0]?.connections;
+    await store.setHostTerminalDirectory(host.serverId, "  C:/projects  ");
+    expect(store.getHosts()[0]?.terminalDirectory).toBe("C:/projects");
+    expect(store.getHosts()[0]?.connections).toBe(connections);
+    store.syncHosts([]);
+    const restored = createAppearanceStore(storage);
+    const restoredLoaded = onceHostListMatches(restored, () => restored.isHostRegistryLoaded());
+    restored.boot();
+    await restoredLoaded;
+    expect(restored.getHosts()[0]?.terminalDirectory).toBe("C:/projects");
+    await restored.setHostTerminalDirectory(host.serverId, "  ");
+    expect(restored.getHosts()[0]?.terminalDirectory).toBe("/");
+    restored.syncHosts([]);
+  });
+
+  it("does not change the terminal directory when saving fails", async () => {
+    const host = makeHost({ serverId: "srv_terminal" });
+    const storage = createMemoryHostRuntimeStorage();
+    await storage.setItem("@paseo:daemon-registry", JSON.stringify([host]));
+    await storage.setItem("@paseo:e2e", "1");
+    const store = createAppearanceStore(storage);
+    const loaded = onceHostListMatches(store, () => store.isHostRegistryLoaded());
+    store.boot();
+    await loaded;
+    storage.setItem = async () => {
+      throw new Error("disk full");
+    };
+    await expect(store.setHostTerminalDirectory(host.serverId, "/repo")).rejects.toThrow(
+      "disk full",
+    );
+    expect(store.getHosts()[0]?.terminalDirectory).toBeUndefined();
+    store.syncHosts([]);
+  });
+
   it("records a chosen host color and writes it through to storage", async () => {
     const host = makeHost({ serverId: "srv_appearance", updatedAt: new Date(0).toISOString() });
     const storage = createMemoryHostRuntimeStorage();

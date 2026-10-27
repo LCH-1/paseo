@@ -1166,6 +1166,12 @@ export const ru: TranslationResources = {
     },
   },
   sidebar: {
+    terminal: {
+      open: "Открыть терминал",
+      opening: "Открытие терминала…",
+      section: "Терминал",
+      directory: "Каталог терминала по умолчанию",
+    },
     statusGroupAccessibility: "Группа «{{label}}»",
     statusBucket: {
       needsInput: "Ожидает ввода",

@@ -1156,6 +1156,12 @@ export const ko: TranslationResources = {
     },
   },
   sidebar: {
+    terminal: {
+      open: "터미널 열기",
+      opening: "터미널 여는 중…",
+      section: "터미널",
+      directory: "터미널 기본 경로",
+    },
     statusGroupAccessibility: "{{label}} 그룹",
     statusBucket: {
       needsInput: "입력 필요",

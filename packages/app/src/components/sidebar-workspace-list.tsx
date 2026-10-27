@@ -156,6 +156,7 @@ import { useSidebarRowItems } from "@/components/sidebar/display-preferences/mod
 import { PullRequestStateIcon } from "@/git/pull-request-state-icon";
 import { HostStatusDot } from "@/components/host-status-dot";
 import { SidebarCollapseHostProjectsButton } from "@/components/sidebar/sidebar-collapse-actions";
+import { SidebarTerminalMenuItem } from "@/components/sidebar/terminal/menu-item";
 import {
   sidebarHostGroupKey,
   sidebarHostProjectKey,
@@ -429,7 +430,7 @@ function ProjectRowTrailingActions({
   projectViewKey: string;
   displayName: string;
   worktreeTarget: SidebarProjectHostTarget | null;
-  settingsTarget: { serverId: string; projectId: string } | null;
+  settingsTarget: { serverId: string; projectId: string; iconWorkingDir: string } | null;
   projectPath: string;
   isHovered: boolean;
   isMobileBreakpoint: boolean;
@@ -491,7 +492,7 @@ function ProjectKebabMenu({
   removeProjectStatus,
 }: {
   projectViewKey: string;
-  settingsTarget: { serverId: string; projectId: string } | null;
+  settingsTarget: { serverId: string; projectId: string; iconWorkingDir: string } | null;
   projectPath: string;
   onRemoveProject: () => void;
   removeProjectStatus: "idle" | "pending" | "success";
@@ -547,7 +548,7 @@ function ProjectMenuItems({
 }: {
   surface: ProjectMenuSurface;
   projectViewKey: string;
-  settingsTarget: { serverId: string; projectId: string } | null;
+  settingsTarget: { serverId: string; projectId: string; iconWorkingDir: string } | null;
   projectPath: string;
   onRemoveProject: () => void;
   removeProjectStatus: "idle" | "pending" | "success";
@@ -591,6 +592,15 @@ function ProjectMenuItems({
         >
           {t("sidebar.project.actions.openNewWindow")}
         </ProjectMenuItem>
+      ) : null}
+      {settingsTarget ? (
+        <SidebarTerminalMenuItem
+          surface={surface}
+          serverId={settingsTarget.serverId}
+          directory={settingsTarget.iconWorkingDir}
+          projectId={settingsTarget.projectId}
+          testID={`sidebar-project-menu-terminal-${projectViewKey}`}
+        />
       ) : null}
       <OpenInFileManagerMenuItem
         surface={surface}
@@ -1917,6 +1927,9 @@ function SidebarHostProjectSection({
   dragHandleProps?: DraggableListDragHandleProps;
 }>) {
   const groupKey = sidebarHostGroupKey(group.serverId);
+  const hosts = useHosts();
+  const host = hosts.find((entry) => entry.serverId === group.serverId);
+  const directory = host?.terminalDirectory?.trim() || "/";
   const collapsed = useSidebarCollapsedSectionsStore((state) =>
     state.collapsedWorkspaceGroupKeys.has(groupKey),
   );
@@ -1927,23 +1940,38 @@ function SidebarHostProjectSection({
 
   return (
     <View testID={`sidebar-host-group-${group.serverId}`}>
-      <SidebarSectionHeader
-        title={label}
-        collapsed={collapsed}
-        onToggle={handleToggle}
-        fullRowToggle
-        drag={drag}
-        isDragging={isDragging}
-        dragHandleProps={dragHandleProps}
-        testID={`sidebar-host-header-${group.serverId}`}
-      >
-        <View pointerEvents="auto">
-          <SidebarCollapseHostProjectsButton group={group} />
-        </View>
-        <View pointerEvents="none">
-          <HostStatusDot serverId={group.serverId} />
-        </View>
-      </SidebarSectionHeader>
+      <ContextMenu>
+        <ContextMenuTrigger contextOnly enabledOnMobile={false}>
+          <SidebarSectionHeader
+            title={label}
+            collapsed={collapsed}
+            onToggle={handleToggle}
+            fullRowToggle
+            drag={drag}
+            isDragging={isDragging}
+            dragHandleProps={dragHandleProps}
+            testID={`sidebar-host-header-${group.serverId}`}
+          >
+            <View pointerEvents="auto">
+              <SidebarCollapseHostProjectsButton group={group} />
+            </View>
+            <View pointerEvents="none">
+              <HostStatusDot serverId={group.serverId} />
+            </View>
+          </SidebarSectionHeader>
+        </ContextMenuTrigger>
+        <ContextMenuContent
+          align="start"
+          width={220}
+          testID={`sidebar-host-context-menu-${group.serverId}`}
+        >
+          <SidebarTerminalMenuItem
+            serverId={group.serverId}
+            directory={directory}
+            testID={`sidebar-host-menu-terminal-${group.serverId}`}
+          />
+        </ContextMenuContent>
+      </ContextMenu>
       {collapsed ? null : <View style={styles.hostProjects}>{children}</View>}
     </View>
   );

@@ -1,4 +1,6 @@
-import type { normalizeWorkspaceDescriptor } from "@/stores/session-store";
+import { normalizeWorkspaceDescriptor, type WorkspaceDescriptor } from "@/stores/session-store";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { normalizeWorkspacePath } from "@/utils/workspace-identity";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
 import type { WorkspaceTabTarget } from "@/workspace-tabs/model";
 import {
@@ -84,5 +86,55 @@ export async function runCreateTerminalWorkspace(
   navigate(serverId, ensuredWorkspace.id, {
     kind: "terminal",
     terminalId: createdTerminal.terminalId,
+  });
+}
+
+interface OpenDirectoryTerminalInput {
+  serverId: string;
+  directory: string;
+  projectId?: string;
+  client: Pick<DaemonClient, "createWorkspace" | "createTerminal">;
+  workspaces: Iterable<WorkspaceDescriptor>;
+  acceptWorkspace: (workspace: WorkspaceDescriptor) => void;
+  onTerminalCreated: (
+    workspace: WorkspaceDescriptor,
+    terminal: NonNullable<Awaited<ReturnType<DaemonClient["createTerminal"]>>["terminal"]>,
+  ) => void;
+  navigate: CreateTerminalWorkspaceInput["navigate"];
+}
+
+export async function openDirectoryTerminal(input: OpenDirectoryTerminalInput): Promise<void> {
+  const directory = input.directory.trim() || "/";
+  const normalizedDirectory = normalizeWorkspacePath(directory);
+  let workspace = Array.from(input.workspaces).find((entry) => {
+    const matchesProject = !input.projectId || entry.projectId === input.projectId;
+    return (
+      matchesProject &&
+      !entry.archivingAt &&
+      !entry.background &&
+      normalizeWorkspacePath(entry.workspaceDirectory) === normalizedDirectory
+    );
+  });
+  if (!workspace) {
+    const created = await input.client.createWorkspace({
+      source: { kind: "directory", path: directory, projectId: input.projectId },
+    });
+    if (!created.workspace) throw new Error(created.error ?? "Unable to open workspace");
+    workspace = normalizeWorkspaceDescriptor(created.workspace);
+    input.acceptWorkspace(workspace);
+  }
+  const created = await input.client.createTerminal(
+    workspace.workspaceDirectory,
+    undefined,
+    undefined,
+    {
+      workspaceId: workspace.id,
+    },
+  );
+  if (!created.terminal) throw new Error(created.error ?? "Unable to open terminal");
+  input.onTerminalCreated(workspace, created.terminal);
+  input.navigate(input.serverId, workspace.id, {
+    kind: "terminal",
+    terminalId: created.terminal.id,
   });
 }

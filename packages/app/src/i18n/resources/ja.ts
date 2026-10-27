@@ -1162,6 +1162,12 @@ export const ja: TranslationResources = {
     },
   },
   sidebar: {
+    terminal: {
+      open: "ターミナルを開く",
+      opening: "ターミナルを開いています…",
+      section: "ターミナル",
+      directory: "ターミナルの既定のパス",
+    },
     statusGroupAccessibility: "{{label}} グループ",
     statusBucket: {
       needsInput: "入力待ち",

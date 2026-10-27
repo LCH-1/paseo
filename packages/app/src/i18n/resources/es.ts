@@ -1185,6 +1185,12 @@ export const es: TranslationResources = {
     },
   },
   sidebar: {
+    terminal: {
+      open: "Abrir terminal",
+      opening: "Abriendo terminal…",
+      section: "Terminal",
+      directory: "Directorio predeterminado del terminal",
+    },
     statusGroupAccessibility: "Grupo {{label}}",
     statusBucket: {
       needsInput: "Necesita datos",

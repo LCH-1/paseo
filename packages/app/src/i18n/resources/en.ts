@@ -1157,6 +1157,12 @@ export const en = {
     },
   },
   sidebar: {
+    terminal: {
+      open: "Open terminal",
+      opening: "Opening terminal…",
+      section: "Terminal",
+      directory: "Default terminal directory",
+    },
     statusGroupAccessibility: "{{label}} group",
     statusBucket: {
       needsInput: "Needs input",

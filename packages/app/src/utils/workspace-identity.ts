@@ -17,6 +17,9 @@ export function normalizeWorkspacePath(value: string | null | undefined): string
     return null;
   }
   const withUnixSeparators = value.replace(/\\/g, "/");
+  if (/^[a-zA-Z]:\/+$/u.test(withUnixSeparators)) {
+    return withUnixSeparators.slice(0, 3);
+  }
   if (withUnixSeparators === "/") {
     return withUnixSeparators;
   }

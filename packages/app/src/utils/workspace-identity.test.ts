@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceDescriptor } from "@/stores/session-store";
-import { resolveWorkspaceMapKeyByIdentity, resolveWorkspaceRouteId } from "./workspace-identity";
+import {
+  normalizeWorkspacePath,
+  resolveWorkspaceMapKeyByIdentity,
+  resolveWorkspaceRouteId,
+} from "./workspace-identity";
 
 function createWorkspace(
   input: Partial<WorkspaceDescriptor> & Pick<WorkspaceDescriptor, "id">,
@@ -21,6 +25,12 @@ function createWorkspace(
     scripts: input.scripts ?? [],
   };
 }
+
+describe("normalizeWorkspacePath", () => {
+  it.each(["C:/", "C:\\", "C:////"])("preserves an absolute drive root: %s", (path) => {
+    expect(normalizeWorkspacePath(path)).toBe("C:/");
+  });
+});
 
 describe("resolveWorkspaceRouteId", () => {
   it("trims route workspace ids without path normalization", () => {

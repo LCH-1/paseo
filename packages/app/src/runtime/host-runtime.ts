@@ -2108,6 +2108,13 @@ export class HostRuntimeStore {
     await this.updateHost(serverId, (host) => ({ ...host, label }));
   }
 
+  async setHostTerminalDirectory(serverId: string, directory: string): Promise<void> {
+    await this.updateHostAppearance(serverId, (host) => ({
+      ...host,
+      terminalDirectory: directory.trim() || "/",
+    }));
+  }
+
   async setHostPassword(serverId: string, password: string): Promise<void> {
     await this.updateHost(serverId, (host) => {
       const { password: _previous, ...rest } = host;
@@ -2877,6 +2884,7 @@ export interface HostMutations {
   }) => Promise<{ profile: HostProfile; serverId: string; hostname: string | null }>;
   beginLinkPairing: () => LinkPairing;
   renameHost: (serverId: string, label: string) => Promise<void>;
+  setHostTerminalDirectory: (serverId: string, directory: string) => Promise<void>;
   setHostColor: (serverId: string, color: HostColor) => Promise<void>;
   setHostBadgeDisplay: (serverId: string, badgeDisplay: HostBadgeDisplay) => Promise<void>;
   removeHost: (serverId: string) => Promise<void>;
@@ -2892,6 +2900,8 @@ export function useHostMutations(): HostMutations {
       probeAndUpsertRemoteSshConnection: (input) => store.probeAndUpsertRemoteSshConnection(input),
       beginLinkPairing: () => store.beginLinkPairing(),
       renameHost: (serverId, label) => store.renameHost(serverId, label),
+      setHostTerminalDirectory: (serverId, directory) =>
+        store.setHostTerminalDirectory(serverId, directory),
       setHostColor: (serverId, color) => store.setHostColor(serverId, color),
       setHostBadgeDisplay: (serverId, badgeDisplay) =>
         store.setHostBadgeDisplay(serverId, badgeDisplay),

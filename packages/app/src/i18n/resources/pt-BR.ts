@@ -1175,6 +1175,12 @@ export const ptBR: TranslationResources = {
     },
   },
   sidebar: {
+    terminal: {
+      open: "Abrir terminal",
+      opening: "Abrindo terminal…",
+      section: "Terminal",
+      directory: "Diretório padrão do terminal",
+    },
     statusGroupAccessibility: "Grupo {{label}}",
     statusBucket: {
       needsInput: "Precisa de resposta",
