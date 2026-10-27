@@ -102,6 +102,7 @@ const ActivityTab = memo(function ActivityTab({
       testID={`sidebar-activity-${tab}`}
       accessibilityRole="tab"
       accessibilityState={accessibilityState}
+      aria-selected={selected}
       accessibilityLabel={label}
       onPress={select}
       style={[styles.tab, selected && styles.selectedTab]}
