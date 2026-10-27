@@ -287,30 +287,21 @@ export function useGroupedWorkspaceTabs(
         anchor.current = key;
         return false;
       },
-      reorder(next: WorkspaceTabDescriptor[], movedKey?: string) {
+      reorder(next: WorkspaceTabDescriptor[], movedKey?: string, overKey?: string) {
         const all = new Map(props.tabs.map((row) => [row.tab.key, row.tab]));
-        const dragging = next.find((tab) => tab.key === movedKey);
-        let current = state;
-        if (
-          dragging &&
-          !movedKey?.startsWith(GROUP_HEADER_PREFIX) &&
-          !groupForTab(current, dragging.key)
-        ) {
-          const index = next.findIndex((tab) => tab.key === movedKey),
-            prev = next[index - 1];
-          const destination = prev?.key.startsWith(GROUP_HEADER_PREFIX)
-            ? current.groups.find((group) => GROUP_HEADER_PREFIX + group.id === prev.key)
-            : groupForTab(current, prev?.key ?? "");
-          if (destination) {
-            pin(dragging);
-            current = assignToTabGroup(current, destination.id, [capture(dragging)]);
-          }
-        }
+        const dragging = all.get(movedKey ?? "");
+        const drop = dragging && overKey ? { overKey, tab: capture(dragging) } : undefined;
         const reordered = reorderTabGroups(
-          current,
+          state,
           next.map((tab) => tab.key),
           movedKey,
+          drop,
         );
+        if (
+          dragging &&
+          groupForTab(reordered, dragging.key)?.id !== groupForTab(state, dragging.key)?.id
+        )
+          pin(dragging);
         update(() => reordered);
         props.onReorderTabs([
           ...reordered.order.filter((key) => all.has(key)).map((key) => all.get(key)!),

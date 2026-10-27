@@ -1,5 +1,5 @@
 import type { ReactElement } from "react";
-import type { DraggableRenderItemInfo } from "./draggable-list.types";
+import type { InlineListDrop, DraggableRenderItemInfo } from "./draggable-list.types";
 
 export function SortableInlineList<T>({
   data,
@@ -9,7 +9,7 @@ export function SortableInlineList<T>({
   data: T[];
   keyExtractor: (item: T, index: number) => string;
   renderItem: (info: DraggableRenderItemInfo<T>) => ReactElement;
-  onDragEnd?: (data: T[]) => void;
+  onDragEnd?: (data: T[], drop: InlineListDrop) => void;
   onDragStartKey?: (key: string) => void;
   useDragHandle?: boolean;
   disabled?: boolean;

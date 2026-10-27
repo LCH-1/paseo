@@ -15,7 +15,7 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { DraggableRenderItemInfo } from "./draggable-list.types";
+import type { InlineListDrop, DraggableRenderItemInfo } from "./draggable-list.types";
 import { useDragReorderState } from "./drag-reorder";
 
 const restrictToHorizontalAxis: Modifier = ({ transform }) => ({
@@ -128,7 +128,7 @@ export function SortableInlineList<T>({
   data: T[];
   keyExtractor: (item: T, index: number) => string;
   renderItem: (info: DraggableRenderItemInfo<T>) => ReactElement;
-  onDragEnd?: (data: T[]) => void;
+  onDragEnd?: (data: T[], drop: InlineListDrop) => void;
   onDragStartKey?: (key: string) => void;
   useDragHandle?: boolean;
   disabled?: boolean;

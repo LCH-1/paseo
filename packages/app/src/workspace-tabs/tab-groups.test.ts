@@ -64,7 +64,8 @@ describe("tab groups", () => {
   });
   it("moves a tab between groups with a single membership", () => {
     const s = assignToTabGroup(initial(), "two", [tab("b")]);
-    expect(s.groups.map((g) => g.tabs.map((t) => t.key))).toEqual([["a"], ["d", "b"]]);
+    expect(s.groups[0].tabs.map((t) => t.key)).toEqual(["a"]);
+    expect(s.groups[1].tabs.map((t) => t.key)).toEqual(["d", "b"]);
   });
   it("removes empty groups when the last member leaves", () => {
     const s = removeFromTabGroups(initial(), ["a", "b"]);
@@ -131,4 +132,53 @@ it("moving a group to another window hides it only in the source and keeps its m
       "group" in item ? item.group.id : item.row.tab.key,
     ),
   ).toEqual(["one", "a", "b"]);
+});
+
+for (const collapsed of [false, true]) {
+  it(`adds an ungrouped tab dropped on a ${collapsed ? "collapsed" : "expanded"} header from the right`, () => {
+    const state = initial();
+    state.groups[0].collapsed = collapsed;
+    const visible = [
+      "e",
+      GROUP_HEADER_PREFIX + "one",
+      ...(collapsed ? [] : ["a", "b"]),
+      "c",
+      GROUP_HEADER_PREFIX + "two",
+      "d",
+    ];
+    const next = reorderTabGroups(state, visible, "e", {
+      overKey: GROUP_HEADER_PREFIX + "one",
+      tab: tab("e"),
+    });
+    expect(next.groups[0].tabs.map((t) => t.key)).toEqual(["e", "a", "b"]);
+    expect(next.groups[0].collapsed).toBe(collapsed);
+    expect(projected(next)[0]).toBe(GROUP_HEADER_PREFIX + "one");
+  });
+}
+it("adds an outside tab dropped on the first group member from the right", () => {
+  const next = reorderTabGroups(
+    initial(),
+    [GROUP_HEADER_PREFIX + "one", "e", "a", "b", "c", GROUP_HEADER_PREFIX + "two", "d"],
+    "e",
+    { overKey: "a", tab: tab("e") },
+  );
+  expect(next.groups[0].tabs.map((t) => t.key)).toEqual(["e", "a", "b"]);
+});
+it("moves a member directly onto another group header without retaining old membership", () => {
+  const next = reorderTabGroups(
+    initial(),
+    [GROUP_HEADER_PREFIX + "one", "a", "c", GROUP_HEADER_PREFIX + "two", "b", "d", "e"],
+    "b",
+    { overKey: GROUP_HEADER_PREFIX + "two", tab: tab("b") },
+  );
+  expect(next.groups.map((g) => g.tabs.map((t) => t.key))).toEqual([["a"], ["b", "d"]]);
+});
+it("dropping outside a group removes membership even when the previous tab is grouped", () => {
+  const next = reorderTabGroups(
+    initial(),
+    [GROUP_HEADER_PREFIX + "one", "a", "b", "c", GROUP_HEADER_PREFIX + "two", "d", "e"],
+    "b",
+    { overKey: "c", tab: tab("b") },
+  );
+  expect(next.groups[0].tabs.map((t) => t.key)).toEqual(["a"]);
 });

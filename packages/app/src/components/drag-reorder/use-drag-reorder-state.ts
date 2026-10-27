@@ -1,3 +1,4 @@
+import type { InlineListDrop } from "../draggable-list.types";
 import { useCallback, useReducer } from "react";
 import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core";
 import { dragStateInitial, dragStateReducer } from "./drag-reducer";
@@ -24,7 +25,7 @@ export function useDragReorderState<T>({
 }: {
   data: T[];
   keyExtractor: (item: T, index: number) => string;
-  onDragEnd?: (items: T[]) => void;
+  onDragEnd?: (items: T[], drop: InlineListDrop) => void;
   onDragBegin?: () => void;
   disabled?: boolean;
 }): DragReorderState<T> {
@@ -56,7 +57,8 @@ export function useDragReorderState<T>({
         overId: over ? String(over.id) : null,
         keyExtractor,
       });
-      if (reordered) onDragEnd?.(reordered);
+      if (reordered && over)
+        onDragEnd?.(reordered, { activeKey: String(active.id), overKey: String(over.id) });
     },
     [data, disabled, keyExtractor, onDragEnd, state.dragItems],
   );

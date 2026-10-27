@@ -65,3 +65,8 @@ export interface DraggableListProps<T> {
    */
   nestable?: boolean;
 }
+
+export interface InlineListDrop {
+  activeKey: string;
+  overKey: string;
+}

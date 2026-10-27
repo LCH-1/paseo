@@ -37,6 +37,7 @@ import Animated from "react-native-reanimated";
 import { useTranslation } from "react-i18next";
 import { SortableInlineList } from "@/components/sortable-inline-list";
 import type {
+  InlineListDrop,
   DraggableListDragHandleProps,
   DraggableRenderItemInfo,
 } from "@/components/draggable-list.types";
@@ -204,6 +205,7 @@ function TabLabelMeasurement({
   titleLines,
   isPreview,
   signature,
+  isGroup,
   onMeasure,
 }: {
   tabKey: string;
@@ -211,6 +213,7 @@ function TabLabelMeasurement({
   titleLines?: WorkspaceTabPresentation["titleLines"];
   isPreview: boolean;
   signature: string;
+  isGroup: boolean;
   onMeasure: (tabKey: string, label: string, event: LayoutChangeEvent) => void;
 }) {
   const handleLayout = useCallback(
@@ -218,6 +221,12 @@ function TabLabelMeasurement({
     [signature, onMeasure, tabKey],
   );
 
+  if (isGroup)
+    return (
+      <Text style={styles.groupLabelMeasurement} onLayout={handleLayout}>
+        {label}
+      </Text>
+    );
   return (
     <WorkspaceTabTitle
       label={label}
@@ -1115,7 +1124,6 @@ function ResolvedWorkspaceDesktopTabsRow({
   onExitFocusMode,
 }: ResolvedWorkspaceDesktopTabsRowProps) {
   const groups = useTabGroupRow();
-  const movedKey = useRef<string | undefined>(undefined);
   const { t } = useTranslation();
   const newTabKeys = useShortcutKeys("workspace-tab-new");
   const [tabsContainerWidth, setTabsContainerWidth] = useState<number>(0);
@@ -1288,24 +1296,34 @@ function ResolvedWorkspaceDesktopTabsRow({
     });
   }, [tabLabels, tabs, trackSnapshot]);
 
+  const fixedTabWidths = useMemo(
+    () =>
+      displayedTabs.map((row, index) =>
+        row.groupHeader
+          ? Math.min(
+              150,
+              (trackSnapshot?.labelWidths[index] ?? 0) - TAB_LABEL_LAYOUT_ALLOWANCE + 16,
+            ) + 8
+          : null,
+      ),
+    [displayedTabs, trackSnapshot],
+  );
   const { layout } = useWorkspaceTabLayout({
     tabLabelWidths: trackSnapshot?.labelWidths ?? [],
+    fixedTabWidths,
     viewportWidthOverride: tabsContainerWidth > 0 ? tabsContainerWidth : null,
     metrics: layoutMetrics,
   });
 
-  const handleDragStartKey = useCallback((key: string) => {
-    movedKey.current = key;
-  }, []);
   const handleDragEnd = useCallback(
-    (nextTabs: ResolvedWorkspaceDesktopTabRowItem[]) => {
+    (nextTabs: ResolvedWorkspaceDesktopTabRowItem[], drop: InlineListDrop) => {
       if (groups)
         groups.reorder(
           nextTabs.map((tab) => tab.tab),
-          movedKey.current,
+          drop.activeKey,
+          drop.overKey,
         );
       else onReorderTabs(nextTabs.map((tab) => tab.tab));
-      movedKey.current = undefined;
     },
     [onReorderTabs, groups],
   );
@@ -1460,6 +1478,7 @@ function ResolvedWorkspaceDesktopTabsRow({
             titleLines={titleLines}
             isPreview={isPreview}
             signature={signature}
+            isGroup={key.startsWith("workspace-tab-group:")}
             onMeasure={handleTabLabelLayout}
           />
         ))}
@@ -1487,7 +1506,6 @@ function ResolvedWorkspaceDesktopTabsRow({
             keyExtractor={tabKeyExtractor}
             useDragHandle
             disabled={!externalDndContext && displayedTabs.length < 2}
-            onDragStartKey={handleDragStartKey}
             onDragEnd={handleDragEnd}
             externalDndContext={externalDndContext}
             activeId={activeDragTabId}
@@ -1790,6 +1808,7 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: theme.fontWeight.normal,
     userSelect: "none",
   },
+  groupLabelMeasurement: { fontSize: 12, fontWeight: "600" },
   tabLabelMeasurements: {
     position: "absolute",
     top: 0,

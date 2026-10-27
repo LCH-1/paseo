@@ -16,6 +16,7 @@ export interface WorkspaceTabLayoutMetrics {
 export interface WorkspaceTabLayoutInput {
   viewportWidth: number;
   tabLabelWidths: number[];
+  fixedTabWidths?: (number | null)[];
   metrics: WorkspaceTabLayoutMetrics;
 }
 
@@ -74,27 +75,35 @@ export function computeWorkspaceTabLayout(
     input.metrics.tabContentGap +
     input.metrics.tabHorizontalPadding * 2 +
     input.metrics.closeButtonWidth;
-  const naturalWidths = input.tabLabelWidths.map((labelWidth) =>
-    clamp(tabChromeWidth + labelWidth, input.metrics.minTabWidth, input.metrics.maxTabWidth),
+  const minimumWidths = input.tabLabelWidths.map(
+    (_, index) => input.fixedTabWidths?.[index] ?? input.metrics.minTabWidth,
+  );
+  const naturalWidths = input.tabLabelWidths.map(
+    (labelWidth, index) =>
+      input.fixedTabWidths?.[index] ??
+      clamp(tabChromeWidth + labelWidth, input.metrics.minTabWidth, input.metrics.maxTabWidth),
   );
   const naturalTotalWidth = naturalWidths.reduce((total, width) => total + width, 0);
-  const minimumTotalWidth = input.metrics.minTabWidth * tabCount;
+  const minimumTotalWidth = minimumWidths.reduce((total, width) => total + width, 0);
   const requiresHorizontalScrollFallback = availableTabsWidth < minimumTotalWidth;
 
   let resolvedWidths = naturalWidths;
   if (requiresHorizontalScrollFallback) {
-    resolvedWidths = Array.from({ length: tabCount }, () => input.metrics.minTabWidth);
+    resolvedWidths = minimumWidths;
   } else if (naturalTotalWidth > availableTabsWidth) {
     const widthToRemove = naturalTotalWidth - availableTabsWidth;
     const shrinkCapacity = naturalTotalWidth - minimumTotalWidth;
     const shrinkRatio = widthToRemove / shrinkCapacity;
     resolvedWidths = naturalWidths.map(
-      (width) => width - (width - input.metrics.minTabWidth) * shrinkRatio,
+      (width, index) => width - (width - minimumWidths[index]) * shrinkRatio,
     );
   }
 
-  const roundedWidths = resolvedWidths.map((width) =>
-    Math.round(clamp(width, input.metrics.minTabWidth, input.metrics.maxTabWidth)),
+  const roundedWidths = resolvedWidths.map((width, index) =>
+    Math.round(
+      input.fixedTabWidths?.[index] ??
+        clamp(width, input.metrics.minTabWidth, input.metrics.maxTabWidth),
+    ),
   );
 
   return {

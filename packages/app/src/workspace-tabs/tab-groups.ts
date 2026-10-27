@@ -94,28 +94,37 @@ export function projectTabGroups<T extends { tab: WorkspaceTabDescriptor }>(
   }
   return result;
 }
+interface TabGroupDrop {
+  overKey: string;
+  tab: WorkspaceTabDescriptor;
+}
+function applyTabGroupDrop(
+  state: TabGroupsState,
+  visibleKeys: string[],
+  movedKey: string,
+  drop?: TabGroupDrop,
+): TabGroupsState {
+  const destinationKey = drop?.overKey ?? visibleKeys[visibleKeys.indexOf(movedKey) - 1];
+  const destination = destinationKey?.startsWith(GROUP_HEADER_PREFIX)
+    ? state.groups.find((group) => GROUP_HEADER_PREFIX + group.id === destinationKey)
+    : groupForTab(state, destinationKey ?? "");
+  const source = groupForTab(state, movedKey);
+  const moving = drop?.tab ?? source?.tabs.find((tab) => tab.key === movedKey);
+  if (!moving || destination?.id === source?.id) return state;
+  return destination
+    ? assignToTabGroup(state, destination.id, [moving])
+    : removeFromTabGroups(state, [movedKey]);
+}
 /** A header moves its whole block; an individual tab follows its drop destination. */
 export function reorderTabGroups(
   state: TabGroupsState,
   visibleKeys: string[],
   movedKey?: string,
+  drop?: TabGroupDrop,
 ): TabGroupsState {
-  let next = state;
-  const movingGroup = movedKey?.startsWith(GROUP_HEADER_PREFIX)
-    ? state.groups.find((group) => GROUP_HEADER_PREFIX + group.id === movedKey)
-    : null;
-  if (movedKey && !movingGroup) {
-    const index = visibleKeys.indexOf(movedKey);
-    const previous = visibleKeys[index - 1];
-    const destination = previous?.startsWith(GROUP_HEADER_PREFIX)
-      ? state.groups.find((group) => GROUP_HEADER_PREFIX + group.id === previous)
-      : groupForTab(state, previous ?? "");
-    const moving = groupForTab(state, movedKey)?.tabs.find((tab) => tab.key === movedKey);
-    if (moving && destination?.id !== groupForTab(state, movedKey)?.id)
-      next = destination
-        ? assignToTabGroup(state, destination.id, [moving])
-        : removeFromTabGroups(state, [movedKey]);
-  }
+  const movingGroup = state.groups.find((group) => GROUP_HEADER_PREFIX + group.id === movedKey);
+  const next =
+    movedKey && !movingGroup ? applyTabGroupDrop(state, visibleKeys, movedKey, drop) : state;
   const expanded: string[] = [];
   for (const key of visibleKeys) {
     const group = key.startsWith(GROUP_HEADER_PREFIX)

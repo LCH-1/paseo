@@ -144,3 +144,29 @@ describe("retainWorkspaceTabMeasuredWidth", () => {
     expect(retainWorkspaceTabMeasuredWidth(720, 640)).toBe(640);
   });
 });
+
+it("keeps group headers at their label width without tab icon and close-button space", () => {
+  for (const viewportWidth of [1200, 300, 200]) {
+    const result = computeWorkspaceTabLayout({
+      viewportWidth,
+      tabLabelWidths: [36, 100, 100],
+      fixedTabWidths: [60, null, null],
+      metrics,
+    });
+    expect(result.items[0].width).toBe(60);
+    expect(result.items.slice(1).every((item) => item.width >= metrics.minTabWidth)).toBe(true);
+  }
+});
+it("counts fixed group widths at the exact horizontal scrolling boundary", () => {
+  const input = {
+    tabLabelWidths: [20, 100],
+    fixedTabWidths: [44, null],
+    metrics: { ...metrics, actionsReservedWidth: 0, rowPaddingHorizontal: 0, tabGap: 0 },
+  };
+  expect(
+    computeWorkspaceTabLayout({ ...input, viewportWidth: 108 }).requiresHorizontalScrollFallback,
+  ).toBe(false);
+  expect(
+    computeWorkspaceTabLayout({ ...input, viewportWidth: 107 }).requiresHorizontalScrollFallback,
+  ).toBe(true);
+});
