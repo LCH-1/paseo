@@ -15,6 +15,41 @@ function createAgentTab(): WorkspaceTabDescriptor {
 }
 
 describe("buildWorkspaceTabMenuEntries", () => {
+  it("passes the clicked tab source to agent actions when hosts share an agent id", () => {
+    const tab = {
+      ...createAgentTab(),
+      groupSource: { serverId: "other-host", workspaceId: "other-workspace", tabId: "agent_123" },
+    };
+    const onCopyResumeCommand = vi.fn();
+    const onCopyAgentId = vi.fn();
+    const onReloadAgent = vi.fn();
+    const entries = buildWorkspaceDesktopTabActions({
+      tab,
+      index: 0,
+      tabCount: 2,
+      onCopyResumeCommand,
+      onCopyAgentId,
+      onReloadAgent,
+      onCopyTerminalId: vi.fn(),
+      onCopyFilePath: vi.fn(),
+      onRenameTab: vi.fn(),
+      onCloseTab: vi.fn(),
+      onCloseTabsToLeft: vi.fn(),
+      onCloseTabsToRight: vi.fn(),
+      onCloseOtherTabs: vi.fn(),
+    }).menuEntries;
+    for (const entry of entries) {
+      if (
+        entry.kind === "item" &&
+        ["copy-resume-command", "copy-agent-id", "reload-agent"].includes(entry.key)
+      )
+        entry.onSelect();
+    }
+    expect(onCopyResumeCommand).toHaveBeenCalledWith("agent-123", tab);
+    expect(onCopyAgentId).toHaveBeenCalledWith("agent-123", tab);
+    expect(onReloadAgent).toHaveBeenCalledWith("agent-123", tab);
+  });
+
   it("uses desktop tab ordering labels for desktop menus", () => {
     const onCopyResumeCommand = vi.fn();
     const onCopyAgentId = vi.fn();

@@ -68,11 +68,11 @@ interface BuildWorkspaceTabMenuEntriesInput {
   index: number;
   tabCount: number;
   menuTestIDBase: string;
-  onCopyResumeCommand: (agentId: string) => Promise<void> | void;
-  onCopyAgentId: (agentId: string) => Promise<void> | void;
+  onCopyResumeCommand: (agentId: string, tab?: WorkspaceTabDescriptor) => Promise<void> | void;
+  onCopyAgentId: (agentId: string, tab?: WorkspaceTabDescriptor) => Promise<void> | void;
   onCopyTerminalId: (terminalId: string) => Promise<void> | void;
   onCopyFilePath: (path: string) => Promise<void> | void;
-  onReloadAgent: (agentId: string) => Promise<void> | void;
+  onReloadAgent: (agentId: string, tab?: WorkspaceTabDescriptor) => Promise<void> | void;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsBefore: (tabId: string) => Promise<void> | void;
@@ -85,11 +85,11 @@ interface BuildWorkspaceDesktopTabActionsInput {
   tab: WorkspaceTabDescriptor;
   index: number;
   tabCount: number;
-  onCopyResumeCommand: (agentId: string) => Promise<void> | void;
-  onCopyAgentId: (agentId: string) => Promise<void> | void;
+  onCopyResumeCommand: (agentId: string, tab?: WorkspaceTabDescriptor) => Promise<void> | void;
+  onCopyAgentId: (agentId: string, tab?: WorkspaceTabDescriptor) => Promise<void> | void;
   onCopyTerminalId: (terminalId: string) => Promise<void> | void;
   onCopyFilePath: (path: string) => Promise<void> | void;
-  onReloadAgent: (agentId: string) => Promise<void> | void;
+  onReloadAgent: (agentId: string, tab?: WorkspaceTabDescriptor) => Promise<void> | void;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsToLeft: (tabId: string) => Promise<void> | void;
@@ -198,7 +198,7 @@ export function buildWorkspaceTabMenuEntries(
       icon: "copy",
       testID: `${menuTestIDBase}-copy-resume-command`,
       onSelect: () => {
-        void onCopyResumeCommand(agentId);
+        void onCopyResumeCommand(agentId, tab);
       },
     });
     entries.push({
@@ -209,7 +209,7 @@ export function buildWorkspaceTabMenuEntries(
       hint: agentId.slice(0, 7),
       testID: `${menuTestIDBase}-copy-agent-id`,
       onSelect: () => {
-        void onCopyAgentId(agentId);
+        void onCopyAgentId(agentId, tab);
       },
     });
   }
@@ -303,7 +303,7 @@ export function buildWorkspaceTabMenuEntries(
       tooltip: labels.reloadAgentTooltip,
       testID: `${menuTestIDBase}-reload-agent`,
       onSelect: () => {
-        void onReloadAgent(agentId);
+        void onReloadAgent(agentId, tab);
       },
     });
   }
