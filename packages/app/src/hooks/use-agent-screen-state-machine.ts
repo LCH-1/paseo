@@ -62,12 +62,18 @@ function hasOptimisticCreateContinuity(input: AgentScreenMachineInput): boolean 
   return input.continuity.kind === "optimistic-create";
 }
 
-function shouldBlockInitialAuthoritativeReadyState(input: AgentScreenMachineInput): boolean {
+function shouldBlockInitialAuthoritativeReadyState(
+  input: AgentScreenMachineInput,
+  memory: AgentScreenMachineMemory,
+): boolean {
   return (
     !input.isArchived &&
     !hasOptimisticCreateContinuity(input) &&
+    !memory.hasRenderedReady &&
     !input.hasHydratedHistoryBefore &&
-    (input.needsAuthoritativeSync || input.isHistorySyncing)
+    (input.needsAuthoritativeSync ||
+      input.isHistorySyncing ||
+      input.visibilityCatchUpStatus === "pending")
   );
 }
 
@@ -159,12 +165,14 @@ function resolveAgentScreenSource(args: {
 
 function resolveCatchingUpUi(args: {
   hasOptimisticCreateContinuity: boolean;
+  hasRenderedReady: boolean;
   isVisibilityCatchUpPending: boolean;
   hasHydratedHistoryBefore: boolean;
   hadInitialSyncFailure: boolean;
 }): "overlay" | "status" | "silent" {
   if (args.hasOptimisticCreateContinuity) return "silent";
   if (args.hasHydratedHistoryBefore) return "status";
+  if (args.hasRenderedReady) return args.hadInitialSyncFailure ? "silent" : "status";
   if (args.isVisibilityCatchUpPending) return "overlay";
   if (args.hadInitialSyncFailure) return "silent";
   return "overlay";
@@ -172,6 +180,7 @@ function resolveCatchingUpUi(args: {
 
 function resolveAgentScreenSync(args: {
   input: AgentScreenMachineInput;
+  hasRenderedReady: boolean;
   hadInitialSyncFailure: boolean;
 }): AgentScreenReadySyncState {
   const { input, hadInitialSyncFailure } = args;
@@ -196,6 +205,7 @@ function resolveAgentScreenSync(args: {
       status: "catching_up",
       ui: resolveCatchingUpUi({
         hasOptimisticCreateContinuity: hasOptimisticCreateContinuity(input),
+        hasRenderedReady: args.hasRenderedReady,
         isVisibilityCatchUpPending: input.visibilityCatchUpStatus === "pending",
         hasHydratedHistoryBefore: input.hasHydratedHistoryBefore,
         hadInitialSyncFailure,
@@ -222,7 +232,7 @@ export function deriveAgentScreenViewState({
 
   const useOptimisticCreateFlowAgent = shouldUseOptimisticCreateFlowAgent(input);
   const candidateAgent = resolveCandidateAgent({ input, useOptimisticCreateFlowAgent });
-  const shouldBlockReadyState = shouldBlockInitialAuthoritativeReadyState(input);
+  const shouldBlockReadyState = shouldBlockInitialAuthoritativeReadyState(input, memory);
 
   if (input.missingAgentState.kind === "not_found") {
     return {
@@ -296,6 +306,7 @@ export function deriveAgentScreenViewState({
 
   const sync = resolveAgentScreenSync({
     input,
+    hasRenderedReady: memory.hasRenderedReady,
     hadInitialSyncFailure: nextMemory.hadInitialSyncFailure,
   });
 

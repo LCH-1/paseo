@@ -158,7 +158,7 @@ describe("deriveAgentScreenViewState", () => {
     expect(ready.sync.status).toBe("reconnecting");
   });
 
-  it("shows overlay catching-up state for first open while loading history", () => {
+  it("keeps catch-up non-blocking after the screen has rendered", () => {
     const memory = createBaseMemory({
       hasRenderedReady: true,
       lastReadyAgent: createAgent("agent-1"),
@@ -172,7 +172,52 @@ describe("deriveAgentScreenViewState", () => {
     const ready = expectReadyState(result.state);
     const sync = expectCatchingUpSync(ready);
 
-    expect(sync.ui).toBe("overlay");
+    expect(sync.ui).toBe("status");
+  });
+
+  it("keeps a restored chat mounted when history initialization starts after first paint", () => {
+    const agent = createAgent("agent-1");
+    const first = deriveAgentScreenViewState({
+      input: { ...createBaseInput(), agent },
+      memory: createBaseMemory(),
+    });
+    expectReadyState(first.state);
+
+    const refreshing = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent,
+        needsAuthoritativeSync: true,
+        isHistorySyncing: true,
+        visibilityCatchUpStatus: "pending",
+      },
+      memory: first.memory,
+    });
+    const ready = expectReadyState(refreshing.state);
+    expect(ready.agent).toBe(agent);
+    expect(ready.sync).toEqual({ status: "catching_up", ui: "status" });
+
+    const settled = deriveAgentScreenViewState({
+      input: { ...createBaseInput(), agent, hasHydratedHistoryBefore: true },
+      memory: refreshing.memory,
+    });
+    expect(expectReadyState(settled.state).sync).toEqual({ status: "idle" });
+  });
+
+  it("waits for the first visibility catch-up before mounting an uncached chat", () => {
+    const agent = createAgent("agent-1");
+    const pending = deriveAgentScreenViewState({
+      input: { ...createBaseInput(), agent, visibilityCatchUpStatus: "pending" },
+      memory: createBaseMemory(),
+    });
+    expect(pending.state).toEqual({ tag: "boot", reason: "loading", source: "none" });
+    expect(pending.memory.hasRenderedReady).toBe(false);
+
+    const loaded = deriveAgentScreenViewState({
+      input: { ...createBaseInput(), agent, hasHydratedHistoryBefore: true },
+      memory: pending.memory,
+    });
+    expect(expectReadyState(loaded.state).sync).toEqual({ status: "idle" });
   });
 
   it("shows updating status for already-hydrated agents", () => {
