@@ -12,7 +12,6 @@ import {
   useHostRuntimeIsConnected,
 } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
-import { useSidebarRevealStore } from "@/stores/sidebar-reveal-store";
 import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
 import { openDirectoryTerminal } from "@/screens/new-workspace-terminal";
 import {
@@ -73,10 +72,8 @@ export function SidebarTerminalMenuItem({
             }),
           );
         },
-        navigate: (targetServerId, workspaceId, target) => {
-          navigateToWorkspace({ serverId: targetServerId, workspaceId, target });
-          useSidebarRevealStore.getState().reveal({ serverId: targetServerId, workspaceId });
-        },
+        navigate: (targetServerId, workspaceId, target) =>
+          navigateToWorkspace({ serverId: targetServerId, workspaceId, target }),
       });
     },
     onError: (error: Error) => toast.error(error.message),
