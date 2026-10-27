@@ -33,6 +33,8 @@ import {
 } from "@/composer/attachments/submit";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
 import { MenuHeader } from "@/components/headers/menu-header";
+import { SidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
+import { WindowChromeSafeArea } from "@/utils/desktop-window";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { useToast } from "@/contexts/toast-context";
 import { useAgentInputDraft } from "@/composer/draft/input-draft";
@@ -1737,7 +1739,10 @@ function NewWorkspaceLayout({
   children: ReactNode;
 }) {
   // In the header on compact layouts, under the composer otherwise.
-  const importSessionButton = <ImportSessionButton compact={isCompact} onPress={onImportSession} />;
+  const importSessionButton = useMemo(
+    () => <ImportSessionButton compact={isCompact} onPress={onImportSession} />,
+    [isCompact, onImportSession],
+  );
   // Compact has no title: the fields name themselves. The free space above pushes them down onto
   // the composer, where the thumb is.
   const setupFields = isCompact ? (
@@ -1757,8 +1762,18 @@ function NewWorkspaceLayout({
     <>
       {fullscreen ? null : (
         <>
-          <MenuHeader borderless rightContent={isCompact ? importSessionButton : undefined} />
-          {isCompact ? null : <NewWorkspaceTabsBar />}
+          {isCompact ? <MenuHeader borderless rightContent={importSessionButton} /> : null}
+          {isCompact ? null : (
+            // Desktop has no header: the tab row is the window top, like the workspace screen.
+            <WindowChromeSafeArea placement="inline" style={styles.desktopTabs}>
+              <TitlebarDragRegion />
+              <View style={styles.desktopTabsFill}>
+                <NewWorkspaceTabsBar />
+              </View>
+              <View style={styles.desktopTabsDragSpace} />
+              <SidebarMenuToggle />
+            </WindowChromeSafeArea>
+          )}
         </>
       )}
       <View style={styles.content}>
@@ -1784,6 +1799,20 @@ const styles = StyleSheet.create((theme) => ({
   content: {
     position: "relative",
     flex: 1,
+  },
+  desktopTabs: {
+    position: "relative",
+    flexDirection: "row",
+    alignItems: "center",
+    minWidth: 0,
+  },
+  desktopTabsFill: {
+    flex: 1,
+    minWidth: 0,
+  },
+  desktopTabsDragSpace: {
+    width: 64,
+    alignSelf: "stretch",
   },
   compactSetupSpace: {
     flex: 1,

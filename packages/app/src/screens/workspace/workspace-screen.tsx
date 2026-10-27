@@ -746,9 +746,11 @@ function shouldInspectWorkspaceRecovery(
 }
 
 function WorkspaceScreenGateFrame({ children }: { children: ReactNode }) {
+  // Desktop never shows the workspace header, so the loading gate must not flash one either.
+  const isCompact = useWorkspaceCompactLayout();
   return (
     <>
-      <MenuHeader />
+      {isCompact ? <MenuHeader /> : null}
       <View style={styles.centerContent}>{children}</View>
     </>
   );
@@ -3652,7 +3654,6 @@ function WorkspaceScreenContent({
     handleReorderTabsInPane,
   ]);
   const desktopContent = desktopSplitContent ?? content;
-  const rendersDesktopSplitContent = !isMobile && desktopSplitContent !== null;
 
   const workspacePanelTabIds = useMemo(
     () => [...uiTabs.map((tab) => tab.tabId), ...sheets.map((sheet) => sheet.tab.tabId)],
@@ -3696,7 +3697,8 @@ function WorkspaceScreenContent({
     </WorkspacePanelProviders>
   ) : (
     <View style={styles.centerColumn}>
-      {rendersDesktopSplitContent ? null : renderWorkspaceScreenHeader()}
+      {/* Split layouts carry the header in the tab row; skip it while the layout is still loading. */}
+      {canRenderDesktopPaneSplits ? null : renderWorkspaceScreenHeader()}
 
       {shouldRenderDesktopPaneFallback ? (
         <NewTabLauncherProvider value={newTabLauncher}>
