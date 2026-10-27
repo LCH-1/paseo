@@ -1948,7 +1948,7 @@ describe("HostRuntimeStore", () => {
     store.syncHosts([]);
   });
 
-  it("saves a terminal directory, reloads it, and resets an empty path to root", async () => {
+  it("saves a terminal directory, reloads it, and resets an empty path to home", async () => {
     const host = makeHost({ serverId: "srv_terminal" });
     const storage = createMemoryHostRuntimeStorage();
     await storage.setItem("@paseo:daemon-registry", JSON.stringify([host]));
@@ -1968,7 +1968,7 @@ describe("HostRuntimeStore", () => {
     await restoredLoaded;
     expect(restored.getHosts()[0]?.terminalDirectory).toBe("C:/projects");
     await restored.setHostTerminalDirectory(host.serverId, "  ");
-    expect(restored.getHosts()[0]?.terminalDirectory).toBe("/");
+    expect(restored.getHosts()[0]?.terminalDirectory).toBe("~");
     restored.syncHosts([]);
   });
 

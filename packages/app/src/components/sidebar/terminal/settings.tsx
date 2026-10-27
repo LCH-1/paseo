@@ -27,7 +27,7 @@ export function HostTerminalDirectoryProvider({ children }: PropsWithChildren) {
 function HostTerminalDirectoryModal({ host, onClose }: { host: HostProfile; onClose: () => void }) {
   const { t } = useTranslation();
   const { setHostTerminalDirectory } = useHostMutations();
-  const directory = host.terminalDirectory?.trim() || "/";
+  const directory = host.terminalDirectory?.trim() || "~";
   const saveDirectory = useCallback(
     (value: string) => setHostTerminalDirectory(host.serverId, value),
     [host.serverId, setHostTerminalDirectory],
@@ -37,7 +37,7 @@ function HostTerminalDirectoryModal({ host, onClose }: { host: HostProfile; onCl
       visible
       title={t("sidebar.terminal.directory")}
       initialValue={directory}
-      placeholder="/"
+      placeholder="~"
       onClose={onClose}
       onSubmit={saveDirectory}
       testID="host-terminal-directory-modal"

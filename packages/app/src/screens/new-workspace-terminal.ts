@@ -1,6 +1,5 @@
 import { normalizeWorkspaceDescriptor, type WorkspaceDescriptor } from "@/stores/session-store";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { normalizeWorkspacePath } from "@/utils/workspace-identity";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
 import type { WorkspaceTabTarget } from "@/workspace-tabs/model";
 import {
@@ -92,9 +91,9 @@ export async function runCreateTerminalWorkspace(
 interface OpenDirectoryTerminalInput {
   serverId: string;
   directory: string;
+  title: string;
   projectId?: string;
   client: Pick<DaemonClient, "createWorkspace" | "createTerminal">;
-  workspaces: Iterable<WorkspaceDescriptor>;
   acceptWorkspace: (workspace: WorkspaceDescriptor) => void;
   onTerminalCreated: (
     workspace: WorkspaceDescriptor,
@@ -104,25 +103,14 @@ interface OpenDirectoryTerminalInput {
 }
 
 export async function openDirectoryTerminal(input: OpenDirectoryTerminalInput): Promise<void> {
-  const directory = input.directory.trim() || "/";
-  const normalizedDirectory = normalizeWorkspacePath(directory);
-  let workspace = Array.from(input.workspaces).find((entry) => {
-    const matchesProject = !input.projectId || entry.projectId === input.projectId;
-    return (
-      matchesProject &&
-      !entry.archivingAt &&
-      !entry.background &&
-      normalizeWorkspacePath(entry.workspaceDirectory) === normalizedDirectory
-    );
+  const directory = input.directory.trim() || "~";
+  const result = await input.client.createWorkspace({
+    source: { kind: "directory", path: directory, projectId: input.projectId },
+    title: input.title,
   });
-  if (!workspace) {
-    const created = await input.client.createWorkspace({
-      source: { kind: "directory", path: directory, projectId: input.projectId },
-    });
-    if (!created.workspace) throw new Error(created.error ?? "Unable to open workspace");
-    workspace = normalizeWorkspaceDescriptor(created.workspace);
-    input.acceptWorkspace(workspace);
-  }
+  if (!result.workspace) throw new Error(result.error ?? "Unable to open workspace");
+  const workspace = normalizeWorkspaceDescriptor(result.workspace);
+  input.acceptWorkspace(workspace);
   const created = await input.client.createTerminal(
     workspace.workspaceDirectory,
     undefined,

@@ -1940,7 +1940,7 @@ function SidebarHostProjectSection({
   const groupKey = sidebarHostGroupKey(group.serverId);
   const hosts = useHosts();
   const host = hosts.find((entry) => entry.serverId === group.serverId);
-  const directory = host?.terminalDirectory?.trim() || "/";
+  const directory = host?.terminalDirectory?.trim() || "~";
   const collapsed = useSidebarCollapsedSectionsStore((state) =>
     state.collapsedWorkspaceGroupKeys.has(groupKey),
   );

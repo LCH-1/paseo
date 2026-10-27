@@ -266,12 +266,12 @@ function directoryWorkspace(overrides: Partial<WorkspaceDescriptor> = {}): Works
   };
 }
 
-function directoryTerminalInput(workspaces: WorkspaceDescriptor[] = []) {
+function directoryTerminalInput() {
   const workspace = directoryWorkspace();
   return {
     serverId: "remote-host",
     directory: "/repo",
-    workspaces,
+    title: "Terminal",
     client: {
       createWorkspace: vi.fn().mockResolvedValue({ workspace, error: null }),
       createTerminal: vi.fn().mockResolvedValue({ terminal: { id: "terminal-new" }, error: null }),
@@ -283,14 +283,16 @@ function directoryTerminalInput(workspaces: WorkspaceDescriptor[] = []) {
 }
 
 describe("openDirectoryTerminal", () => {
-  it("opens the project's directory rather than a worktree or the active workspace", async () => {
-    const main = directoryWorkspace();
-    const input = directoryTerminalInput([
-      directoryWorkspace({ id: "worktree", workspaceDirectory: "/repo/.worktrees/topic" }),
-      main,
-    ]);
+  it("creates a separate terminal workspace under the selected project", async () => {
+    const input = directoryTerminalInput();
     await openDirectoryTerminal({ ...input, projectId: "project-a" });
-    expect(input.client.createWorkspace).not.toHaveBeenCalled();
+    expect(input.client.createWorkspace).toHaveBeenCalledWith({
+      source: { kind: "directory", path: "/repo", projectId: "project-a" },
+      title: "Terminal",
+    });
+    expect(input.acceptWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "workspace-main", projectId: "project-a" }),
+    );
     expect(input.client.createTerminal).toHaveBeenCalledWith("/repo", undefined, undefined, {
       workspaceId: "workspace-main",
     });
@@ -298,59 +300,66 @@ describe("openDirectoryTerminal", () => {
       kind: "terminal",
       terminalId: "terminal-new",
     });
-    expect(input.onTerminalCreated).toHaveBeenCalledWith(main, { id: "terminal-new" });
   });
 
-  it("creates a directory workspace without an agent when the project has no workspace", async () => {
+  it("creates a new workspace on each open instead of adding terminals to an existing task", async () => {
     const input = directoryTerminalInput();
-    await openDirectoryTerminal({ ...input, projectId: "project-a" });
-    expect(input.client.createWorkspace).toHaveBeenCalledWith({
-      source: { kind: "directory", path: "/repo", projectId: "project-a" },
+    input.client.createWorkspace
+      .mockResolvedValueOnce({ workspace: directoryWorkspace({ id: "first" }), error: null })
+      .mockResolvedValueOnce({ workspace: directoryWorkspace({ id: "second" }), error: null });
+    await openDirectoryTerminal(input);
+    await openDirectoryTerminal(input);
+    expect(input.client.createWorkspace).toHaveBeenCalledTimes(2);
+    expect(input.client.createTerminal).toHaveBeenNthCalledWith(1, "/repo", undefined, undefined, {
+      workspaceId: "first",
     });
-    expect(input.acceptWorkspace).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "workspace-main" }),
-    );
-    expect(input.client.createTerminal).toHaveBeenCalledWith("/repo", undefined, undefined, {
-      workspaceId: "workspace-main",
+    expect(input.client.createTerminal).toHaveBeenNthCalledWith(2, "/repo", undefined, undefined, {
+      workspaceId: "second",
     });
   });
 
-  it("uses root when the host path is unset", async () => {
-    const input = directoryTerminalInput([directoryWorkspace({ workspaceDirectory: "/" })]);
+  it("resolves an unset host path through the remote host and uses its absolute home path", async () => {
+    const input = directoryTerminalInput();
+    input.client.createWorkspace.mockResolvedValue({
+      workspace: directoryWorkspace({ workspaceDirectory: "/home/remote" }),
+      error: null,
+    });
     await openDirectoryTerminal({ ...input, directory: "  " });
-    expect(input.client.createWorkspace).not.toHaveBeenCalled();
-    expect(input.client.createTerminal).toHaveBeenCalledWith("/", undefined, undefined, {
+    expect(input.client.createWorkspace).toHaveBeenCalledWith({
+      source: { kind: "directory", path: "~", projectId: undefined },
+      title: "Terminal",
+    });
+    expect(input.client.createTerminal).toHaveBeenCalledWith("/home/remote", undefined, undefined, {
       workspaceId: "workspace-main",
     });
   });
 
-  it("opens the Windows drive root resolved by the host for /", async () => {
+  it.each(["~", "~/projects"])(
+    "passes %s to the host without resolving it against the client",
+    async (directory) => {
+      const input = directoryTerminalInput();
+      await openDirectoryTerminal({ ...input, directory });
+      expect(input.client.createWorkspace).toHaveBeenCalledWith({
+        source: { kind: "directory", path: directory, projectId: undefined },
+        title: "Terminal",
+      });
+    },
+  );
+
+  it("keeps an explicitly configured root path", async () => {
     const input = directoryTerminalInput();
     input.client.createWorkspace.mockResolvedValue({
       workspace: directoryWorkspace({ workspaceDirectory: "C:\\" }),
       error: null,
     });
     await openDirectoryTerminal({ ...input, directory: "/" });
+    expect(input.client.createWorkspace).toHaveBeenCalledWith({
+      source: { kind: "directory", path: "/", projectId: undefined },
+      title: "Terminal",
+    });
     expect(input.client.createTerminal).toHaveBeenCalledWith("C:/", undefined, undefined, {
       workspaceId: "workspace-main",
     });
-  });
-
-  it("matches Windows separators and trailing slashes", async () => {
-    const input = directoryTerminalInput([
-      directoryWorkspace({ workspaceDirectory: "C:/projects/repo" }),
-    ]);
-    await openDirectoryTerminal({ ...input, directory: " C:\\projects\\repo\\ " });
-    expect(input.client.createWorkspace).not.toHaveBeenCalled();
-  });
-
-  it("does not reuse an archiving workspace or one from another project", async () => {
-    const input = directoryTerminalInput([
-      directoryWorkspace({ archivingAt: "2026-10-27T00:00:00.000Z" }),
-      directoryWorkspace({ projectId: "other-project" }),
-    ]);
-    await openDirectoryTerminal({ ...input, projectId: "project-a" });
-    expect(input.client.createWorkspace).toHaveBeenCalledOnce();
   });
 
   it("surfaces workspace creation errors without starting a terminal or navigating", async () => {
@@ -365,7 +374,7 @@ describe("openDirectoryTerminal", () => {
   });
 
   it("surfaces terminal creation errors and keeps the current tab", async () => {
-    const input = directoryTerminalInput([directoryWorkspace()]);
+    const input = directoryTerminalInput();
     input.client.createTerminal.mockResolvedValue({ terminal: null, error: "Shell failed" });
     await expect(openDirectoryTerminal(input)).rejects.toThrow("Shell failed");
     expect(input.onTerminalCreated).not.toHaveBeenCalled();

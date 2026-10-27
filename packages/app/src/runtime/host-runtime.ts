@@ -2111,7 +2111,7 @@ export class HostRuntimeStore {
   async setHostTerminalDirectory(serverId: string, directory: string): Promise<void> {
     await this.updateHostAppearance(serverId, (host) => ({
       ...host,
-      terminalDirectory: directory.trim() || "/",
+      terminalDirectory: directory.trim() || "~",
     }));
   }
 
