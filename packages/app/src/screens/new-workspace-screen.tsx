@@ -1737,10 +1737,7 @@ function NewWorkspaceLayout({
   children: ReactNode;
 }) {
   // In the header on compact layouts, under the composer otherwise.
-  const importSessionButton = useMemo(
-    () => <ImportSessionButton compact={isCompact} onPress={onImportSession} />,
-    [isCompact, onImportSession],
-  );
+  const importSessionButton = <ImportSessionButton compact={isCompact} onPress={onImportSession} />;
   // Compact has no title: the fields name themselves. The free space above pushes them down onto
   // the composer, where the thumb is.
   const setupFields = isCompact ? (
@@ -1760,7 +1757,7 @@ function NewWorkspaceLayout({
     <>
       {fullscreen ? null : (
         <>
-          {isCompact ? <MenuHeader borderless rightContent={importSessionButton} /> : null}
+          <MenuHeader borderless rightContent={isCompact ? importSessionButton : undefined} />
           {isCompact ? null : <NewWorkspaceTabsBar />}
         </>
       )}
