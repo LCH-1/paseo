@@ -17,6 +17,7 @@ interface UseAgentAttentionClearParams {
   requiresAttention: boolean | null | undefined;
   attentionReason: AttentionReason;
   isScreenFocused: boolean;
+  isContentReady: boolean;
 }
 
 interface AgentAttentionClearController {
@@ -32,6 +33,7 @@ export function useAgentAttentionClear({
   requiresAttention,
   attentionReason,
   isScreenFocused,
+  isContentReady,
 }: UseAgentAttentionClearParams): AgentAttentionClearController {
   const [isAppVisible, setIsAppVisible] = useState<boolean>(() => getIsAppActivelyVisible());
   const deferredFocusEntryClearRef = useRef(false);
@@ -113,13 +115,19 @@ export function useAgentAttentionClear({
     const enteredScreenFocus = !prevScreenFocusedRef.current && isScreenFocused && isAppVisible;
     const resumedIntoFocusedAgent = !prevAppVisibleRef.current && isAppVisible && isScreenFocused;
 
-    if (enteredScreenFocus || resumedIntoFocusedAgent) {
+    if ((enteredScreenFocus || resumedIntoFocusedAgent) && attentionReason !== "finished") {
       clearAttention("focus-entry");
     }
 
     prevScreenFocusedRef.current = isScreenFocused;
     prevAppVisibleRef.current = isAppVisible;
-  }, [clearAttention, isAppVisible, isScreenFocused]);
+  }, [attentionReason, clearAttention, isAppVisible, isScreenFocused]);
+
+  useEffect(() => {
+    if (isScreenFocused && isAppVisible && isContentReady && attentionReason === "finished") {
+      clearAttention("viewed-completion");
+    }
+  }, [attentionReason, clearAttention, isAppVisible, isContentReady, isScreenFocused]);
 
   return {
     clearOnInputFocus: useCallback(() => {

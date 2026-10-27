@@ -10,6 +10,7 @@ interface ShouldClearAgentAttentionInput {
 }
 
 export type AgentAttentionClearTrigger =
+  | "viewed-completion"
   | "focus-entry"
   | "input-focus"
   | "prompt-send"

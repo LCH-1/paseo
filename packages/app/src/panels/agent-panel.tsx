@@ -839,34 +839,7 @@ function ChatAgentContent({
   const hasHydratedHistoryBefore =
     hasAppliedAuthoritativeHistory || replicaTimelineStatus === "painted";
 
-  const attentionController = useAgentAttentionClear({
-    agentId,
-    client,
-    isConnected,
-    requiresAttention: agentState.requiresAttention,
-    attentionReason: agentState.attentionReason,
-    isScreenFocused: isPaneFocused,
-  });
-  useEffect(() => {
-    clearOnAgentBlurRef.current = attentionController.clearOnAgentBlur;
-  }, [attentionController.clearOnAgentBlur]);
-
   const isArchivingCurrentAgent = Boolean(agentId && isArchivingAgent({ serverId, agentId }));
-
-  useEffect(() => {
-    if (wasPaneFocusedRef.current && !isPaneFocused) {
-      clearOnAgentBlurRef.current();
-    }
-    wasPaneFocusedRef.current = isPaneFocused;
-  }, [isPaneFocused]);
-
-  useEffect(() => {
-    return () => {
-      if (wasPaneFocusedRef.current) {
-        clearOnAgentBlurRef.current();
-      }
-    };
-  }, []);
 
   const isInitializing = agentId ? isInitializingFromMap : false;
   const isHistorySyncing = useMemo(() => {
@@ -919,6 +892,35 @@ function ChatAgentContent({
       hasHydratedHistoryBefore,
     },
   });
+
+  const attentionController = useAgentAttentionClear({
+    agentId,
+    client,
+    isConnected,
+    requiresAttention: agentState.requiresAttention,
+    attentionReason: agentState.attentionReason,
+    isScreenFocused: isPaneFocused,
+    isContentReady:
+      isPaneVisible && viewState.tag === "ready" && visibilityCatchUpStatus === "ready",
+  });
+  useEffect(() => {
+    clearOnAgentBlurRef.current = attentionController.clearOnAgentBlur;
+  }, [attentionController.clearOnAgentBlur]);
+
+  useEffect(() => {
+    if (wasPaneFocusedRef.current && !isPaneFocused) {
+      clearOnAgentBlurRef.current();
+    }
+    wasPaneFocusedRef.current = isPaneFocused;
+  }, [isPaneFocused]);
+
+  useEffect(() => {
+    return () => {
+      if (wasPaneFocusedRef.current) {
+        clearOnAgentBlurRef.current();
+      }
+    };
+  }, []);
 
   const effectiveAgent = viewState.tag === "ready" ? viewState.agent : null;
   const routeEntryKey = agentId ? `${serverId}:${agentId}` : null;
