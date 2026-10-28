@@ -23,6 +23,8 @@ import { createViewedTimelineSync } from "@/timeline/viewed-timeline-sync";
 import { buildWorkspaceTabPersistenceKey, type WorkspaceTab } from "@/workspace-tabs/model";
 import { defaultChangesState, type ChangesState } from "@/panels/changes/state";
 import { defaultFileState, type FileState } from "@/panels/file/state";
+import { reopenLastClosedWorkspaceTab } from "@/workspace-tabs/reopen";
+import { useBrowserStore } from "@/desktop/browser/store";
 import {
   canDismissPaneInLayout,
   collectAllPanes,
@@ -42,6 +44,7 @@ import {
   removePaneFromTree,
   removeTabFromTree,
   stripEphemeralTabsFromLayout,
+  useWorkspaceLayoutStore,
   type SplitNode,
   type SplitPane,
 } from "@/stores/workspace-layout-store";
@@ -78,6 +81,139 @@ function createDeterministicWorkspaceLayoutIds() {
 
 const workspaceLayoutIds = createDeterministicWorkspaceLayoutIds();
 const workspaceLayoutStore = createWorkspaceLayoutStore(workspaceLayoutIds);
+
+describe("closed tab history", () => {
+  it("reopens the same conversation and keeps an archived conversation visible", () => {
+    const workspaceKey = "server-1:reopen-conversation";
+    const store = useWorkspaceLayoutStore.getState();
+    const target = { kind: "agent" as const, agentId: "closed-agent" };
+    const tabId = store.openTab({ workspaceKey, target, intent: "reveal" })!;
+    store.closeTab(workspaceKey, tabId);
+    const reopened = reopenLastClosedWorkspaceTab({ workspaceKey, createTerminal: vi.fn() });
+    const state = useWorkspaceLayoutStore.getState();
+    const layout = state.layoutByWorkspace[workspaceKey];
+    expect(collectAllTabs(layout.root).find((tab) => tab.tabId === reopened)?.target).toEqual(
+      target,
+    );
+    expect(findPaneById(layout.root, layout.focusedPaneId)?.focusedTabId).toBe(reopened);
+    expect(state.pinnedAgentIdsByWorkspace[workspaceKey].has("closed-agent")).toBe(true);
+    expect(reopenLastClosedWorkspaceTab({ workspaceKey, createTerminal: vi.fn() })).toBeNull();
+  });
+
+  it("recreates a closed browser at its last URL", () => {
+    const workspaceKey = "server-1:reopen-browser";
+    const store = useWorkspaceLayoutStore.getState();
+    const browserId = useBrowserStore
+      .getState()
+      .createBrowser({ initialUrl: "https://example.com/last" });
+    const tabId = store.openTab({
+      workspaceKey,
+      target: { kind: "browser", browserId },
+      intent: "new",
+    })!;
+    store.closeTab(workspaceKey, tabId, "https://example.com/last");
+    useBrowserStore.getState().removeBrowser(browserId);
+    const reopened = reopenLastClosedWorkspaceTab({ workspaceKey, createTerminal: vi.fn() });
+    const layout = useWorkspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+    const target = collectAllTabs(layout.root).find((tab) => tab.tabId === reopened)!.target;
+    expect(target.kind).toBe("browser");
+    if (target.kind !== "browser") throw new Error("Expected restored browser");
+    expect(target.browserId).not.toBe(browserId);
+    expect(useBrowserStore.getState().browsersById[target.browserId].url).toBe(
+      "https://example.com/last",
+    );
+  });
+
+  it("creates a new terminal session instead of revealing a dead terminal id", () => {
+    const workspaceKey = "server-1:reopen-terminal";
+    const store = useWorkspaceLayoutStore.getState();
+    const tabId = store.openTab({
+      workspaceKey,
+      target: { kind: "terminal", terminalId: "dead-terminal" },
+      intent: "reveal",
+    })!;
+    store.closeTab(workspaceKey, tabId);
+    const createTerminal = vi.fn();
+    expect(reopenLastClosedWorkspaceTab({ workspaceKey, createTerminal })).toBeNull();
+    expect(createTerminal).toHaveBeenCalledOnce();
+    expect(
+      collectAllTabs(useWorkspaceLayoutStore.getState().layoutByWorkspace[workspaceKey].root).map(
+        (tab) => tab.target,
+      ),
+    ).not.toContainEqual({ kind: "terminal", terminalId: "dead-terminal" });
+  });
+  it("returns tabs in reverse closing order and isolates workspaces", () => {
+    const store = createWorkspaceLayoutStore(workspaceLayoutIds);
+    const workspaceKey = "server-1:closed-tabs";
+    const first = store.getState().openTab({
+      workspaceKey,
+      target: { kind: "agent", agentId: "first" },
+      intent: "reveal",
+    })!;
+    const second = store.getState().openTab({
+      workspaceKey,
+      target: { kind: "agent", agentId: "second" },
+      intent: "reveal",
+    })!;
+    store.getState().closeTab(workspaceKey, first);
+    store.getState().closeTab(workspaceKey, second);
+    expect(store.getState().takeLastClosedTab("other:workspace")).toBeNull();
+    expect(store.getState().takeLastClosedTab(workspaceKey)?.tab.target).toEqual({
+      kind: "agent",
+      agentId: "second",
+    });
+    expect(store.getState().takeLastClosedTab(workspaceKey)?.tab.target).toEqual({
+      kind: "agent",
+      agentId: "first",
+    });
+    expect(store.getState().takeLastClosedTab(workspaceKey)).toBeNull();
+  });
+
+  it("retains panel state, pane and last browser URL without recording invalid closes", () => {
+    const store = createWorkspaceLayoutStore(workspaceLayoutIds);
+    const workspaceKey = "server-1:closed-browser";
+    const tabId = store.getState().openTab({
+      workspaceKey,
+      target: { kind: "browser", browserId: "browser-1" },
+      intent: "new",
+      state: { scrollTop: 120 },
+    })!;
+    const paneId = findPaneContainingTab(
+      store.getState().layoutByWorkspace[workspaceKey].root,
+      tabId,
+    )!.id;
+    store.getState().closeTab(workspaceKey, "missing");
+    store.getState().closeTab(workspaceKey, tabId, "https://example.com/last");
+    expect(store.getState().takeLastClosedTab(workspaceKey)).toMatchObject({
+      tab: {
+        tabId,
+        target: { kind: "browser", browserId: "browser-1" },
+        state: { scrollTop: 120 },
+      },
+      paneId,
+      browserUrl: "https://example.com/last",
+    });
+    expect(store.getState().takeLastClosedTab(workspaceKey)).toBeNull();
+  });
+
+  it("bounds history and clears it when the workspace is purged", () => {
+    const store = createWorkspaceLayoutStore(workspaceLayoutIds);
+    const workspaceKey = "server-1:bounded-history";
+    for (let index = 0; index < 35; index++) {
+      const tabId = store
+        .getState()
+        .openTab({
+          workspaceKey,
+          target: { kind: "agent", agentId: `agent-${index}` },
+          intent: "reveal",
+        })!;
+      store.getState().closeTab(workspaceKey, tabId);
+    }
+    expect(store.getState().closedTabsByWorkspace[workspaceKey]).toHaveLength(30);
+    store.getState().purgeWorkspace(workspaceKey);
+    expect(store.getState().takeLastClosedTab(workspaceKey)).toBeNull();
+  });
+});
 
 it("observes open chats across unmounted workspaces until their tabs close", () => {
   const store = createWorkspaceLayoutStore(workspaceLayoutIds);

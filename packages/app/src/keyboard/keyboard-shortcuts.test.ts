@@ -132,6 +132,40 @@ interface HelpSectionCase {
 }
 
 describe("keyboard-shortcuts", () => {
+  it.each(["other", "editable", "message-input", "terminal", "browser"] as const)(
+    "reopens a closed tab with Ctrl+Shift+T from %s on desktop",
+    (focusScope) => {
+      expectShortcutResolution({
+        event: { key: "T", code: "KeyT", ctrlKey: true, shiftKey: true },
+        context: { isDesktop: true, focusScope },
+        action: "workspace.tab.reopen",
+      });
+    },
+  );
+
+  it("keeps browser tab restoration with the browser outside Electron", () => {
+    const result = resolveShortcut({
+      event: { key: "T", code: "KeyT", ctrlKey: true, shiftKey: true },
+      context: { isDesktop: false },
+    });
+    expect(result.match).toBeNull();
+  });
+
+  it("uses Cmd+Shift+T to reopen tabs on mac desktop", () => {
+    expectShortcutResolution({
+      event: { key: "T", code: "KeyT", metaKey: true, shiftKey: true },
+      context: { isDesktop: true, isMac: true },
+      action: "workspace.tab.reopen",
+    });
+  });
+
+  it("moves new terminal off the reopen and theme shortcuts", () => {
+    expectShortcutResolution({
+      event: { key: "T", code: "KeyT", ctrlKey: true, altKey: true, shiftKey: true },
+      context: { isDesktop: true },
+      action: "workspace.terminal.new",
+    });
+  });
   const matchingCases: MatchingShortcutCase[] = [
     {
       name: "matches Cmd+O to open project",
@@ -1128,7 +1162,7 @@ describe("unassigned shortcuts", () => {
       const bindings = buildEffectiveBindings({ [TAB_NEW_BINDING]: UNASSIGNED_COMBO });
 
       const result = resolveShortcut({
-        event: { key: "t", code: "KeyT", ctrlKey: true, shiftKey: true },
+        event: { key: "t", code: "KeyT", ctrlKey: true, altKey: true, shiftKey: true },
         context: desktopNonMac,
         bindings,
       });

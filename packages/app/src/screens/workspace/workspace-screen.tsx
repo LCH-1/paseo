@@ -4,6 +4,7 @@ import {
   type InlinePathTarget,
 } from "@/assistant-file-links";
 import { useFileExplorerActions } from "@/hooks/use-file-explorer-actions";
+import { reopenLastClosedWorkspaceTab } from "@/workspace-tabs/reopen";
 import {
   WorkspaceComposerEditingSessionsProvider,
   useComposerTabFullscreen,
@@ -1396,6 +1397,10 @@ function WorkspaceScreenContent({
         return;
       }
 
+      const browserUrl =
+        input.target?.kind === "browser"
+          ? useBrowserStore.getState().browsersById[input.target.browserId]?.url
+          : undefined;
       if (input.target?.kind === "agent") {
         unpinWorkspaceAgent(persistenceKey, input.target.agentId);
         hideWorkspaceAgent(persistenceKey, input.target.agentId);
@@ -1406,7 +1411,7 @@ function WorkspaceScreenContent({
         removeResidentBrowserWebview(browserId);
         void getDesktopHost()?.browser?.unregisterWorkspaceBrowser?.(browserId);
       }
-      closeWorkspaceTab(persistenceKey, normalizedTabId);
+      closeWorkspaceTab(persistenceKey, normalizedTabId, browserUrl);
     },
     [closeWorkspaceTab, hideWorkspaceAgent, persistenceKey, unpinWorkspaceAgent],
   );
@@ -2596,6 +2601,15 @@ function WorkspaceScreenContent({
     [activeTabId, handleCloseOtherTabs, handleCloseTabsToLeft, handleCloseTabsToRight],
   );
 
+  const handleReopenClosedTab = useCallback(() => {
+    if (!persistenceKey) return;
+    const tabId = reopenLastClosedWorkspaceTab({
+      workspaceKey: persistenceKey,
+      createTerminal: handleCreateTerminal,
+    });
+    if (tabId) navigateToTabId(tabId);
+  }, [persistenceKey, handleCreateTerminal, navigateToTabId]);
+
   const handleWorkspaceTabAction = useCallback(
     (action: KeyboardActionDefinition): boolean => {
       switch (action.id) {
@@ -2615,6 +2629,9 @@ function WorkspaceScreenContent({
           if (activeTabId) {
             void handleCloseTabById(activeTabId);
           }
+          return true;
+        case "workspace.tab.reopen":
+          handleReopenClosedTab();
           return true;
         case "workspace.tab.navigate-index": {
           const next = tabs[action.index - 1] ?? null;
@@ -2648,6 +2665,7 @@ function WorkspaceScreenContent({
       handleCreateTerminal,
       focusedPaneTabState.pane?.id,
       navigateToTabId,
+      handleReopenClosedTab,
       tabs,
     ],
   );
@@ -2817,6 +2835,7 @@ function WorkspaceScreenContent({
     actions: [
       "workspace.agent.new",
       "workspace.tab.close-current",
+      "workspace.tab.reopen",
       "workspace.tab.navigate-index",
       "workspace.tab.navigate-relative",
       "workspace.terminal.new",

@@ -2399,6 +2399,7 @@ export const ko: TranslationResources = {
         archiveWorkspace: "워크스페이스 보관",
         newTab: "새 탭",
         closeCurrentTab: "현재 탭 닫기",
+        reopenClosedTab: "닫은 탭 다시 열기",
         jumpToWorkspace: "워크스페이스로 이동",
         jumpToTab: "탭으로 이동",
         previousWorkspace: "이전 워크스페이스",

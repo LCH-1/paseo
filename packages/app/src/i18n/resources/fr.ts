@@ -2425,6 +2425,7 @@ export const fr: TranslationResources = {
         archiveWorkspace: "Archiver l’espace de travail",
         newTab: "Nouvel onglet",
         closeCurrentTab: "Fermer l’onglet actuel",
+        reopenClosedTab: "Rouvrir l’onglet fermé",
         jumpToWorkspace: "Aller à l’espace de travail",
         jumpToTab: "Aller à l’onglet",
         previousWorkspace: "Espace de travail précédent",

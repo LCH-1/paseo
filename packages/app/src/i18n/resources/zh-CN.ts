@@ -2343,6 +2343,7 @@ export const zhCN: TranslationResources = {
         archiveWorkspace: "归档工作区",
         newTab: "新建标签",
         closeCurrentTab: "关闭当前标签",
+        reopenClosedTab: "重新打开关闭的标签页",
         jumpToWorkspace: "跳转到 workspace",
         jumpToTab: "跳转到标签",
         previousWorkspace: "上一个 workspace",

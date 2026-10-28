@@ -2512,6 +2512,7 @@ export const en = {
         archiveWorkspace: "Archive workspace",
         newTab: "New tab",
         closeCurrentTab: "Close current tab",
+        reopenClosedTab: "Reopen closed tab",
         jumpToWorkspace: "Jump to workspace",
         jumpToTab: "Jump to tab",
         previousWorkspace: "Previous workspace",

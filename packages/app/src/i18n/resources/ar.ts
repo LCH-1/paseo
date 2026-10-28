@@ -2371,6 +2371,7 @@ export const ar: TranslationResources = {
         archiveWorkspace: "أرشفة مساحة العمل",
         newTab: "علامة تبويب جديدة",
         closeCurrentTab: "إغلاق علامة التبويب الحالية",
+        reopenClosedTab: "إعادة فتح علامة التبويب المغلقة",
         jumpToWorkspace: "انتقل إلى مساحة العمل",
         jumpToTab: "انتقل إلى علامة التبويب",
         previousWorkspace: "مساحة العمل السابقة",

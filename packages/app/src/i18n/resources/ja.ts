@@ -2392,6 +2392,7 @@ export const ja: TranslationResources = {
         archiveWorkspace: "ワークスペースをアーカイブ",
         newTab: "新しいタブ",
         closeCurrentTab: "現在のタブを閉じる",
+        reopenClosedTab: "閉じたタブを開き直す",
         jumpToWorkspace: "ワークスペースにジャンプ",
         jumpToTab: "タブにジャンプ",
         previousWorkspace: "前のワークスペース",

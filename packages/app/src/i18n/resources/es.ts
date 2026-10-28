@@ -2425,6 +2425,7 @@ export const es: TranslationResources = {
         archiveWorkspace: "Archivar espacio de trabajo",
         newTab: "Nueva pestaña",
         closeCurrentTab: "Cerrar pestaña actual",
+        reopenClosedTab: "Volver a abrir la pestaña cerrada",
         jumpToWorkspace: "Saltar al espacio de trabajo",
         jumpToTab: "Saltar a la pestaña",
         previousWorkspace: "Espacio de trabajo anterior",

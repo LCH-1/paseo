@@ -123,7 +123,15 @@ export interface SheetTab {
   parentTabId: string | null;
 }
 
+export interface ClosedWorkspaceTab {
+  tab: WorkspaceTab;
+  paneId: string | null;
+  browserUrl: string | null;
+}
+
 interface WorkspaceLayoutStore {
+  closedTabsByWorkspace: Record<string, readonly ClosedWorkspaceTab[]>;
+  takeLastClosedTab: (workspaceKey: string) => ClosedWorkspaceTab | null;
   /** Published once by the app shell; callers never pass a form factor to open a tab. */
   layoutMode: WorkspaceLayoutMode;
   /**
@@ -165,7 +173,7 @@ interface WorkspaceLayoutStore {
   hideExplorerSidebar: (workspaceKey: string) => void;
   /** Returns the ordinary right-side workspace pane, creating it when absent. */
   ensureSidePane: (workspaceKey: string, options?: { focus: boolean }) => string | null;
-  closeTab: (workspaceKey: string, tabId: string) => void;
+  closeTab: (workspaceKey: string, tabId: string, browserUrl?: string) => void;
   focusTab: (workspaceKey: string, tabId: string) => void;
   selectTabInPane: (workspaceKey: string, paneId: string, tabId: string) => void;
   replaceTab: (
@@ -221,6 +229,22 @@ interface WorkspaceFocusRestorationState {
 // The persisted tree includes the Explorer shell; the renderer docks it outside workspace splits.
 // Preserve four user-created split levels beneath that bookkeeping node.
 const MAX_TREE_DEPTH = 5;
+const MAX_CLOSED_TABS = 30;
+
+function rememberClosedTab(
+  state: WorkspaceLayoutStore,
+  workspaceKey: string,
+  entry: ClosedWorkspaceTab,
+): Partial<WorkspaceLayoutStore> {
+  if (entry.tab.target.kind === "new_tab") return {};
+  const previous = state.closedTabsByWorkspace[workspaceKey] ?? [];
+  return {
+    closedTabsByWorkspace: {
+      ...state.closedTabsByWorkspace,
+      [workspaceKey]: [...previous.slice(-(MAX_CLOSED_TABS - 1)), entry],
+    },
+  };
+}
 
 const LEGACY_EXPLORER_SIDEBAR_REFERENCE_WIDTH = 1440;
 const WORKSPACE_LAYOUT_PERSIST_VERSION = 2;
@@ -964,6 +988,19 @@ export function createWorkspaceLayoutStore(
           }
           return tabId;
         },
+        closedTabsByWorkspace: {},
+        takeLastClosedTab: (workspaceKey) => {
+          const entries = get().closedTabsByWorkspace[workspaceKey] ?? [];
+          const entry = entries.at(-1);
+          if (!entry) return null;
+          set((state) => ({
+            closedTabsByWorkspace: {
+              ...state.closedTabsByWorkspace,
+              [workspaceKey]: entries.slice(0, -1),
+            },
+          }));
+          return entry;
+        },
         layoutMode: "split-panes",
         sheetsByWorkspace: {},
         layoutByWorkspace: {},
@@ -1236,7 +1273,7 @@ export function createWorkspaceLayoutStore(
           }));
           return result.paneId;
         },
-        closeTab: (workspaceKey, tabId) => {
+        closeTab: (workspaceKey, tabId, browserUrl) => {
           const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
           const normalizedTabId = trimNonEmpty(tabId);
           if (!normalizedWorkspaceKey || !normalizedTabId) {
@@ -1244,8 +1281,16 @@ export function createWorkspaceLayoutStore(
           }
 
           set((state) => {
-            if (findSheet(state, normalizedWorkspaceKey, normalizedTabId)) {
-              return withoutSheet(state, normalizedWorkspaceKey, normalizedTabId);
+            const sheet = findSheet(state, normalizedWorkspaceKey, normalizedTabId);
+            if (sheet) {
+              return {
+                ...withoutSheet(state, normalizedWorkspaceKey, normalizedTabId),
+                ...rememberClosedTab(state, normalizedWorkspaceKey, {
+                  tab: sheet.tab,
+                  paneId: null,
+                  browserUrl: browserUrl ?? null,
+                }),
+              };
             }
             const layout = getWorkspaceLayout(state.layoutByWorkspace, normalizedWorkspaceKey);
             const explorerSidebarPaneId = resolveExplorerSidebarPaneId(
@@ -1310,6 +1355,13 @@ export function createWorkspaceLayoutStore(
             return {
               ...withoutFocusRestoration(state, normalizedWorkspaceKey),
               ...reconcileRememberedSidePane(state, normalizedWorkspaceKey, nextLayout),
+              ...(closingTab
+                ? rememberClosedTab(state, normalizedWorkspaceKey, {
+                    tab: closingTab,
+                    paneId: closingPane?.id ?? null,
+                    browserUrl: browserUrl ?? null,
+                  })
+                : {}),
               layoutByWorkspace: {
                 ...state.layoutByWorkspace,
                 [normalizedWorkspaceKey]: nextLayout,
@@ -2062,6 +2114,7 @@ export function createWorkspaceLayoutStore(
 
           set((state) => {
             const hasAny =
+              normalizedWorkspaceKey in state.closedTabsByWorkspace ||
               normalizedWorkspaceKey in state.layoutByWorkspace ||
               normalizedWorkspaceKey in state.splitSizesByWorkspace ||
               normalizedWorkspaceKey in state.explorerSidebarWidthByWorkspace ||
@@ -2075,6 +2128,8 @@ export function createWorkspaceLayoutStore(
             if (!hasAny) {
               return state;
             }
+            const { [normalizedWorkspaceKey]: _closedTabs, ...closedTabsByWorkspace } =
+              state.closedTabsByWorkspace;
             const {
               [normalizedWorkspaceKey]: _autoOpened,
               ...pullRequestTabAutoOpenedByWorkspace
@@ -2101,6 +2156,7 @@ export function createWorkspaceLayoutStore(
               state.sidePaneIdByWorkspace;
             return {
               ...withSheets(state, normalizedWorkspaceKey, NO_SHEETS),
+              closedTabsByWorkspace,
               pullRequestTabAutoOpenedByWorkspace,
               layoutByWorkspace,
               splitSizesByWorkspace,

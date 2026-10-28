@@ -178,6 +178,7 @@ export const SHORTCUT_HELP_ROW_ORDER: Record<ShortcutSectionId, readonly string[
     "workspace-tab-target-changes",
     "workspace-tab-target-files",
     "workspace-tab-close-current",
+    "workspace-tab-reopen",
     "workspace-tab-jump-index",
     "workspace-tab-prev",
     "workspace-tab-next",
@@ -215,6 +216,7 @@ const SHORTCUT_HELP_LABEL_KEYS: Record<string, string> = {
   "workspace-tab-target-changes": "workspace.tabs.actions.changes",
   "workspace-tab-target-files": "workspace.tabs.actions.files",
   "workspace-tab-close-current": "settings.shortcuts.help.closeCurrentTab",
+  "workspace-tab-reopen": "settings.shortcuts.help.reopenClosedTab",
   "workspace-jump-index": "settings.shortcuts.help.jumpToWorkspace",
   "workspace-tab-jump-index": "settings.shortcuts.help.jumpToTab",
   "workspace-prev": "settings.shortcuts.help.previousWorkspace",
@@ -836,11 +838,27 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       label: "Close pane",
     },
   },
+  {
+    id: "workspace-tab-reopen-cmd-shift-t-mac",
+    action: "workspace.tab.reopen",
+    combo: "Cmd+Shift+T",
+    repeat: false,
+    when: { mac: true, desktop: true, commandCenter: false },
+    help: { id: "workspace-tab-reopen", section: "tabs-panes", label: "Reopen closed tab" },
+  },
+  {
+    id: "workspace-tab-reopen-ctrl-shift-t-non-mac",
+    action: "workspace.tab.reopen",
+    combo: "Ctrl+Shift+T",
+    repeat: false,
+    when: { mac: false, desktop: true, commandCenter: false },
+    help: { id: "workspace-tab-reopen", section: "tabs-panes", label: "Reopen closed tab" },
+  },
   // --- New terminal ---
   {
     id: "workspace-terminal-new-cmd-shift-t-mac",
     action: "workspace.terminal.new",
-    combo: "Cmd+Shift+T",
+    combo: "Cmd+Alt+Shift+T",
     when: { mac: true, commandCenter: false },
     help: {
       id: "workspace-terminal-new",
@@ -851,7 +869,7 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
   {
     id: "workspace-terminal-new-ctrl-shift-t-non-mac",
     action: "workspace.terminal.new",
-    combo: "Ctrl+Shift+T",
+    combo: "Ctrl+Alt+Shift+T",
     when: { mac: false, commandCenter: false, terminal: false },
     help: {
       id: "workspace-terminal-new",
