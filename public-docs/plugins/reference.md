@@ -2,7 +2,7 @@
 title: Plugin reference
 description: Local plugin files, client and server runtimes, platform limits, contributions, RPCs, lifecycle, hosts, and CLI commands.
 nav: Reference
-order: 48
+order: 49
 category: Plugins
 ---
 

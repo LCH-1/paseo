@@ -6,7 +6,7 @@ nav: 钩子
 
 # 插件钩子 {#plugin-hooks}
 
-在 `index.server.ts` 中使用 `server.addHook(name, handler)`。钩子在插件启用时运行，即使没有连接的应用。设置 `requirements.paseo` 为 `>=0.14.0-beta.1`，并使用 `@getpaseo/plugin` 0.15.0-beta.1 或更高版本。
+在 `index.server.ts` 中使用 `server.addHook(name, handler)`。钩子在插件启用时运行，即使没有连接的应用。`addHook` 从 Paseo 0.14 起可用；将 `requirements.paseo` 设置为你开发插件时使用的版本。
 
 ```ts
 import type { PluginServerContext } from "@getpaseo/plugin/server";
@@ -111,8 +111,6 @@ server.addHook("workspace.create.prepare", async ({ request }) => {
 
 工作区记录创建且目录可用后触发，收到 `{ workspace }`。
 
-此通知不修改载荷，Paseo 不等待处理函数；错误会记录在插件名下，原操作继续。
-
 ```ts
 server.addHook("workspace.create.completed", async ({ workspace }) => {
   console.log(workspace);
@@ -122,8 +120,6 @@ server.addHook("workspace.create.completed", async ({ workspace }) => {
 ## workspace.archive.completed {#workspacearchivecompleted}
 
 归档状态保存后触发，收到 `{ workspace }`；worktree 清理可能尚未完成。
-
-此通知不修改载荷，Paseo 不等待处理函数；错误会记录在插件名下，原操作继续。
 
 ```ts
 server.addHook("workspace.archive.completed", async ({ workspace }) => {
@@ -180,8 +176,6 @@ server.addHook("agent.create.prepare", async ({ request }) => {
 ## agent.create.completed {#agentcreatecompleted}
 
 常规创建完成后触发，收到 `{ agent }`；导入和恢复不会触发。
-
-此通知不修改载荷，Paseo 不等待处理函数；错误会记录在插件名下，原操作继续。
 
 ```ts
 server.addHook("agent.create.completed", async ({ agent }) => {
@@ -382,8 +376,6 @@ Paseo 通过 Agent 工具传输提供附加的工具，按 Provider 的支持情
 
 运行中的 Agent 实例关闭后触发，收到 `{ agent }`。
 
-此通知不修改载荷，Paseo 不等待处理函数；错误会记录在插件名下，原操作继续。
-
 ```ts
 server.addHook("agent.close.completed", async ({ agent }) => {
   console.log(agent);
@@ -393,8 +385,6 @@ server.addHook("agent.close.completed", async ({ agent }) => {
 ## agent.archive.completed {#agentarchivecompleted}
 
 归档状态保存后触发，收到 `{ agent, archivedAt }`；运行时清理可能尚未完成。
-
-此通知不修改载荷，Paseo 不等待处理函数；错误会记录在插件名下，原操作继续。
 
 ```ts
 server.addHook("agent.archive.completed", async ({ agent, archivedAt }) => {
@@ -406,8 +396,6 @@ server.addHook("agent.archive.completed", async ({ agent, archivedAt }) => {
 
 实时轮次开始后触发，收到 `{ agent, turnId }`。历史重放不会触发。
 
-此通知不修改载荷，Paseo 不等待处理函数；错误会记录在插件名下，原操作继续。
-
 ```ts
 server.addHook("agent.turn.started", async ({ agent, turnId }) => {
   console.log(agent, turnId);
@@ -417,8 +405,6 @@ server.addHook("agent.turn.started", async ({ agent, turnId }) => {
 ## agent.turn.completed {#agentturncompleted}
 
 实时轮次完成、失败或取消后触发，收到 `{ agent, turnId, outcome, timeline }`。`outcome.kind` 为 `completed`、`failed` 或 `canceled`。`timeline` 已弃用且始终为空；请按下面的示例通过 SDK 获取历史。
-
-此通知不修改载荷，Paseo 不等待处理函数；错误会记录在插件名下，原操作继续。
 
 ### 在轮次结束时发送后续消息 {#send-a-follow-up-when-a-turn-ends}
 
@@ -459,8 +445,6 @@ Turn ends: "out of credits"
 ## agent.permission.started {#agentpermissionstarted}
 
 权限或问题进入待处理状态后触发，收到 `{ agent, request }`；`request` 为 `AgentPermissionRequest`。通过 SDK 回应。
-
-此通知不修改载荷，Paseo 不等待处理函数；错误会记录在插件名下，原操作继续。
 
 ### 回应权限请求 {#answer-a-permission-request}
 
@@ -510,8 +494,6 @@ export default function contribute(server: PluginServerContext) {
 ## agent.permission.completed {#agentpermissioncompleted}
 
 待处理请求得到回应或清除后触发，收到 `{ agent, requestId, resolution }`；`resolution` 为 `AgentPermissionResponse`。
-
-此通知不修改载荷，Paseo 不等待处理函数；错误会记录在插件名下，原操作继续。
 
 ```ts
 server.addHook("agent.permission.completed", async ({ agent, requestId, resolution }) => {

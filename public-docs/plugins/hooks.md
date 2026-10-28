@@ -2,13 +2,13 @@
 title: Plugin hooks
 description: Register hooks to change requests or observe agent and workspace operations.
 nav: Hooks
-order: 47.5
+order: 48
 category: Plugins
 ---
 
 # Plugin hooks
 
-Use `server.addHook(name, handler)` in `index.server.ts`. Hooks run while the plugin is enabled, even with no app connected. Set `requirements.paseo` to `>=0.14.0-beta.1` and use `@getpaseo/plugin` 0.15.0-beta.1 or later.
+Use `server.addHook(name, handler)` in `index.server.ts`. Hooks run while the plugin is enabled, even with no app connected. `addHook` is available from Paseo 0.14; set `requirements.paseo` to the release you build against.
 
 ```ts
 import type { PluginServerContext } from "@getpaseo/plugin/server";
@@ -114,8 +114,6 @@ and directory lookup/import operations are unaffected.
 
 Fires after the workspace record is created and its directory is available. Receives `{ workspace }`.
 
-This notification does not change its payload. Paseo does not wait for the handler; errors are logged against the plugin and the operation continues.
-
 ```ts
 server.addHook("workspace.create.completed", async ({ workspace }) => {
   console.log(workspace);
@@ -125,8 +123,6 @@ server.addHook("workspace.create.completed", async ({ workspace }) => {
 ## workspace.archive.completed
 
 Fires after archive state is saved. Receives `{ workspace }`; worktree cleanup can still be pending.
-
-This notification does not change its payload. Paseo does not wait for the handler; errors are logged against the plugin and the operation continues.
 
 ```ts
 server.addHook("workspace.archive.completed", async ({ workspace }) => {
@@ -184,8 +180,6 @@ override its mode presets.
 ## agent.create.completed
 
 Ordinary creation finishes. Receives `{ agent }`; import and resume do not fire it.
-
-This notification does not change its payload. Paseo does not wait for the handler; errors are logged against the plugin and the operation continues.
 
 ```ts
 server.addHook("agent.create.completed", async ({ agent }) => {
@@ -393,8 +387,6 @@ If an automatic reopen fails, the triggering prompt fails with that error. See t
 
 A live agent runtime closes. Receives `{ agent }`.
 
-This notification does not change its payload. Paseo does not wait for the handler; errors are logged against the plugin and the operation continues.
-
 ```ts
 server.addHook("agent.close.completed", async ({ agent }) => {
   console.log(agent);
@@ -404,8 +396,6 @@ server.addHook("agent.close.completed", async ({ agent }) => {
 ## agent.archive.completed
 
 Archive state is saved. Receives `{ agent, archivedAt }`; runtime cleanup can still be pending.
-
-This notification does not change its payload. Paseo does not wait for the handler; errors are logged against the plugin and the operation continues.
 
 ```ts
 server.addHook("agent.archive.completed", async ({ agent, archivedAt }) => {
@@ -417,8 +407,6 @@ server.addHook("agent.archive.completed", async ({ agent, archivedAt }) => {
 
 A live turn starts. Receives `{ agent, turnId }`. History replay does not fire it.
 
-This notification does not change its payload. Paseo does not wait for the handler; errors are logged against the plugin and the operation continues.
-
 ```ts
 server.addHook("agent.turn.started", async ({ agent, turnId }) => {
   console.log(agent, turnId);
@@ -428,8 +416,6 @@ server.addHook("agent.turn.started", async ({ agent, turnId }) => {
 ## agent.turn.completed
 
 A live turn completes, fails, or is canceled. Receives `{ agent, turnId, outcome, timeline }`. `outcome.kind` is `completed`, `failed`, or `canceled`. `timeline` is deprecated and always empty; fetch history through the SDK as below.
-
-This notification does not change its payload. Paseo does not wait for the handler; errors are logged against the plugin and the operation continues.
 
 ### Send a follow-up when a turn ends
 
@@ -475,8 +461,6 @@ add limits or delays in your plugin when needed. Attachments and tool effects ar
 ## agent.permission.started
 
 A permission or question becomes pending. Receives `{ agent, request }`; `request` is an `AgentPermissionRequest`. Send the answer through the SDK.
-
-This notification does not change its payload. Paseo does not wait for the handler; errors are logged against the plugin and the operation continues.
 
 ### Answer a permission request
 
@@ -527,8 +511,6 @@ plans, and mode changes; requesting permission does not end the turn.
 ## agent.permission.completed
 
 A pending request is answered or cleared. Receives `{ agent, requestId, resolution }`; `resolution` is an `AgentPermissionResponse`.
-
-This notification does not change its payload. Paseo does not wait for the handler; errors are logged against the plugin and the operation continues.
 
 ```ts
 server.addHook("agent.permission.completed", async ({ agent, requestId, resolution }) => {

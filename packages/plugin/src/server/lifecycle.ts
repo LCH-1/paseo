@@ -87,14 +87,14 @@ export type PluginHooks = {
   };
 } & { [Name in keyof PluginHookEvents]: { payload: PluginHookEvents[Name] } };
 
-export type HookPayload<Name extends keyof PluginHooks> = {
+export type PluginHookPayload<Name extends keyof PluginHooks> = {
   [Key in keyof PluginHooks]: PluginHooks[Key] extends { request: infer Request }
     ? { request: Request }
     : PluginHooks[Key] extends { payload: infer Payload }
       ? Payload
       : never;
 }[Name];
-export type HookResult<Name extends keyof PluginHooks> = {
+export type PluginHookResult<Name extends keyof PluginHooks> = {
   [Key in keyof PluginHooks]: PluginHooks[Key] extends { result: infer Result }
     ? Result | void
     : void;
@@ -102,9 +102,9 @@ export type HookResult<Name extends keyof PluginHooks> = {
 
 type HookHandlers = {
   [Name in keyof PluginHooks]: (
-    payload: HookPayload<Name>,
+    payload: PluginHookPayload<Name>,
     context: PluginHookContext,
-  ) => Promise<HookResult<Name>>;
+  ) => Promise<PluginHookResult<Name>>;
 };
 
 export interface PluginLifecycleRegistration {

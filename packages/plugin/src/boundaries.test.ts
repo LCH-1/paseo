@@ -253,7 +253,7 @@ describe("lifecycle hook SDK types", () => {
   it("infers payloads and replacement requests and requires async handlers and new names", () => {
     expect(
       typeErrors(`
-      import type { PluginServerContext, PluginHooks, HookPayload, HookResult } from "@getpaseo/plugin/server";
+      import type { PluginServerContext, PluginHooks, PluginHookPayload, PluginHookResult } from "@getpaseo/plugin/server";
       export default function contribute(server: PluginServerContext) {
         server.addHook("workspace.create.prepare", async ({ request }) => ({ ...request, title: "Changed" }));
         server.addHook("workspace.create.prepare", async () => {});
