@@ -1,11 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Changed
-
-- Plugin lifecycle hooks use `server.addHook` and `subject.operation.step` names. The step states whether Paseo waits: `prepare` waits; `started` and `completed` notify. Existing registrations remain supported and are deprecated for removal after 2027-04-30. See [plugin hooks](https://paseo.sh/docs/plugins/hooks#renamed-hooks).
-
 ## 0.14.0-beta.1 - 2026-10-27
 
 Plugins can now add tools to individual agents and configure their MCP servers when sessions open.
@@ -26,6 +20,8 @@ Voice settings now let you configure speech providers and download local models 
 - Added project-specific editor choices, including Xcode on macOS ([#7898](https://github.com/getpaseo/paseo/pull/7898) by [@kinoroy](https://github.com/kinoroy))
 
 ### Improved
+
+- Added `server.addHook` with `subject.operation.step` names and deprecated the previous plugin hook registration methods without changing their behavior ([#8081](https://github.com/getpaseo/paseo/pull/8081))
 
 - Release eligible agent runtimes after one idle hour, resuming the saved session on the next prompt ([#7782](https://github.com/getpaseo/paseo/pull/7782))
 - Added a link back to the parent in subagent panes ([#7784](https://github.com/getpaseo/paseo/pull/7784))
