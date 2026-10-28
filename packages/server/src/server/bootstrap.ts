@@ -957,7 +957,7 @@ export async function createPaseoDaemon(
       if (!hasActiveWorkspace) workspaceRuntimeStore.remove(cwd);
     }
     if (mutation.kind === "archive" && mutation.workspace) {
-      pluginRuntime.emit("workspace.archived", {
+      pluginRuntime.emit("workspace.archive.completed", {
         workspace: describeHookWorkspace(mutation.workspace),
       });
     }

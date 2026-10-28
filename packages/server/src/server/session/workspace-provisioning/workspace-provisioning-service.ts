@@ -307,7 +307,9 @@ export function createWorkspaceProvisioningService(deps: {
   }
 
   function emitWorkspaceCreated(workspace: PersistedWorkspaceRecord): void {
-    deps.lifecycle?.emit("workspace.created", { workspace: describeHookWorkspace(workspace) });
+    deps.lifecycle?.emit("workspace.create.completed", {
+      workspace: describeHookWorkspace(workspace),
+    });
   }
 
   async function resolveSourceProjectForWorktree(input: {

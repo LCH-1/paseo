@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Plugin lifecycle hooks use `server.addHook` and `subject.operation.step` names. The step states whether Paseo waits: `prepare` waits; `started` and `completed` notify. Existing registrations remain supported and are deprecated for removal after 2027-04-30. See [plugin hooks](https://paseo.sh/docs/plugins/hooks#renamed-hooks).
+
 ## 0.14.0-beta.1 - 2026-10-27
 
 Plugins can now add tools to individual agents and configure their MCP servers when sessions open.

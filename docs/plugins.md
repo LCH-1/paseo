@@ -437,21 +437,16 @@ The [public reference](../public-docs/plugins/reference.md#icons) owns the autho
 
 ## Lifecycle hooks
 
-Server entries register lifecycle observers with `server.on()` and request transforms with
-`server.before()`. The [public reference](../public-docs/plugins/reference.md#lifecycle-hooks)
-owns callback shapes, ordering, and failure behavior. `agent.create` edits the agent's saved
-configuration; `agent.session_open` contributes launch-only `env`, `tools`, and `mcpServers`,
-re-derived on each open and following the plugin's lifecycle. See
-[Inject MCP servers](../public-docs/plugins/reference.md#inject-mcp-servers) for choosing the hook.
-`plugin-examples/lifecycle-logger` registers all
-eleven hooks; `plugin-examples/lifecycle-actions` demonstrates common automation callbacks.
-Session-open hooks also [attach tools to individual agents](../public-docs/plugins/reference.md#attach-tools-to-agents),
-as shown in `plugin-examples/agent-tools`. The agent manager stamps their metadata per session;
-executable definitions stay in the plugin process.
+Server entries register async handlers with `server.addHook(name, handler)`, returning a cleanup
+function. Names follow `subject.operation.step`: `prepare` waits and may replace `{ request }`;
+`started` and `completed` notify without delaying the operation. The [hooks reference](../public-docs/plugins/hooks.md)
+owns payloads, ordering, failure behavior, and examples. `agent.create.prepare` edits saved
+configuration; `agent.open.prepare` contributes launch-only `env`, `tools`, and `mcpServers` on
+every open. Executable tool definitions stay in the plugin process; only metadata crosses the boundary.
 
 Emit from the operation owner, not a client subscription. Provider history replay must not trigger
-live hooks. Observers must not be awaited inside agent mutations: a callback can send a prompt or
-answer a permission through its own daemon session. Awaiting it there deadlocks that command.
+live hooks. Notifications must not be awaited inside agent mutations: a handler can send a prompt
+or answer a permission through its own daemon session. Awaiting it there deadlocks that command.
 
 ## Contribute a provider
 

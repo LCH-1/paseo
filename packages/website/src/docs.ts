@@ -118,7 +118,7 @@ function loadDocs(locale: Locale): Doc[] {
     const structure = parseFrontmatter(group.sources.en).data;
     const slug = pathToSlug(group.path);
     const href = slug === "" ? "/docs" : `/docs/${slug}`;
-    const order = Number.parseInt(structure.order ?? "999", 10);
+    const order = Number.parseFloat(structure.order ?? "999");
     const sourcePath = pathToSourcePath(group.path);
 
     docs.push({
