@@ -266,7 +266,7 @@ emit({
 ```
 
 Paseo renders these controls in the composer. A user change arrives as `session.configure`; apply it
-and publish the committed `session.config` before the request completion response. The provider may change the
+and publish the committed `session.config` before `request.completed`. The provider may change the
 available controls at runtime, including after a model change.
 
 `settings` are user-facing controls. `providerOptions` is opaque JSON supplied at session creation
@@ -342,7 +342,7 @@ case "session.can_stop_runtime": {
 `true` only when releasing the runtime loses no background shells, monitors, native children,
 queued completion reports, or pending autonomous replies. This query must not stop or mutate the
 session. Return `false` while work remains. A rejected query, invalid response, or timeout also
-keeps the runtime alive. Do not send a request completion response for this query.
+keeps the runtime alive. Never respond with `request.completed` for this query.
 
 Paseo always checks foreground work, permissions, queued deliveries, lifecycle operations,
 working managed/native descendants, and outstanding local or remote finish subscriptions for the
