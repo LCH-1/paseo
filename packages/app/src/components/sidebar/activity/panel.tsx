@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactElement,
   type ReactNode,
@@ -13,8 +14,10 @@ import { StyleSheet } from "react-native-unistyles";
 import { create } from "zustand";
 import { RetainedPanel, useRetainedPanelActive } from "@/components/retained-panel";
 import { PressHighlight } from "@/components/ui/press-highlight";
+import { Button } from "@/components/ui/button";
 import { useAggregatedAgents, type AggregatedAgent } from "@/hooks/use-aggregated-agents";
-import { useHosts } from "@/runtime/host-runtime";
+import { getHostRuntimeStore, useHosts } from "@/runtime/host-runtime";
+import { markActivitySessionsRead } from "./mark-all-read";
 import { useAgentTabTitle } from "@/plugins/agent-tab-titles/use-title";
 import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { density } from "@/styles/density";
@@ -85,6 +88,7 @@ export function SidebarActivityPanel({
       </View>
       <RetainedPanel active={showingAll}>{children}</RetainedPanel>
       <RetainedPanel active={!showingAll}>
+        {view === "unreviewed" ? <ActivityMarkAllRead agents={sessions} /> : null}
         {showingAll ? null : (
           <ActivitySessionList
             active={active}
@@ -94,6 +98,45 @@ export function SidebarActivityPanel({
           />
         )}
       </RetainedPanel>
+    </View>
+  );
+}
+
+function ActivityMarkAllRead({ agents }: { agents: AggregatedAgent[] }) {
+  const { t } = useTranslation();
+  const busy = useRef(false);
+  const [pending, setPending] = useState(false);
+  const [failed, setFailed] = useState(0);
+  const markAllRead = useCallback(async () => {
+    if (busy.current || agents.length === 0) return;
+    busy.current = true;
+    setPending(true);
+    setFailed(0);
+    try {
+      const runtime = getHostRuntimeStore();
+      setFailed(await markActivitySessionsRead(agents, (serverId) => runtime.getClient(serverId)));
+    } finally {
+      busy.current = false;
+      setPending(false);
+    }
+  }, [agents]);
+  return (
+    <View style={styles.readActions}>
+      <Button
+        testID="sidebar-activity-mark-all-read"
+        variant="ghost"
+        size="xs"
+        loading={pending}
+        disabled={pending || agents.length === 0}
+        onPress={markAllRead}
+      >
+        {t(pending ? "sidebar.activity.markingAllRead" : "sidebar.activity.markAllRead")}
+      </Button>
+      {failed > 0 ? (
+        <Text accessibilityRole="alert" style={styles.readError}>
+          {t("sidebar.activity.markAllReadFailed", { count: failed })}
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -292,6 +335,12 @@ function ActivityAges({
 
 const styles = StyleSheet.create((theme) => ({
   container: { flex: 1, minHeight: 0 },
+  readActions: { alignItems: "flex-end", paddingHorizontal: theme.spacing[2] },
+  readError: {
+    color: theme.colors.destructive,
+    fontSize: theme.fontSize.sm,
+    padding: theme.spacing[2],
+  },
   tabs: {
     flexDirection: "row",
     gap: theme.spacing[1],

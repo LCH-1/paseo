@@ -11,6 +11,9 @@ import { navigateToAgent } from "@/utils/navigate-to-agent";
 
 vi.mock("@/hooks/use-aggregated-agents", () => ({ useAggregatedAgents: vi.fn() }));
 vi.mock("@/runtime/host-runtime", () => ({
+  getHostRuntimeStore: () => ({
+    getClient: () => ({ clearAgentAttention: vi.fn().mockResolvedValue(undefined) }),
+  }),
   useHosts: () => [{ serverId: "activity-host", label: "Host" }],
 }));
 vi.mock("@/utils/navigate-to-agent", () => ({ navigateToAgent: vi.fn() }));
