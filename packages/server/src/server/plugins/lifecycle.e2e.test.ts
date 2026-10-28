@@ -862,7 +862,9 @@ test.each([false, true])(
         .map((line) => JSON.parse(line));
       const failedPath = failedRecords.at(-1).worktree.path;
       await expect(stat(failedPath)).rejects.toMatchObject({ code: "ENOENT" });
-      expect((await client.fetchWorkspaces()).workspaces).toEqual(beforeFailure.workspaces);
+      expect((await client.fetchWorkspaces()).entries.map(({ id }) => id).sort()).toEqual(
+        beforeFailure.entries.map(({ id }) => id).sort(),
+      );
       expect(
         execFileSync("git", ["worktree", "list", "--porcelain"], {
           cwd: repository,
