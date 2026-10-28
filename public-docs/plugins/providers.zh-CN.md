@@ -242,7 +242,7 @@ emit({
 });
 ```
 
-Paseo 会在 Composer 中渲染这些控件。用户的修改会以 `session.configure` 的形式到达；应用它，并在 `request.completed` 之前发布已确定的 `session.config`。Provider 可以在运行时改变可用的控件，包括在模型变化之后。
+Paseo 会在 Composer 中渲染这些控件。用户的修改会以 `session.configure` 的形式到达；应用它，并在请求完成响应之前发布已确定的 `session.config`。Provider 可以在运行时改变可用的控件，包括在模型变化之后。
 
 `settings` 是面向用户的控件。`providerOptions` 是在创建会话时提供的不透明 JSON，用于 Paseo 不会渲染的 Provider 专属配置。Provider 专属的 token 预算应放在这两处之一；它不是一个专门的提示词字段。
 
@@ -297,7 +297,7 @@ case "session.can_stop_runtime": {
 }
 ```
 
-`canStopRuntime(): Promise<boolean>` 由你的 Provider 会话实现。只有释放运行时不会丢失后台 shell、监控任务、原生子 Agent、排队的完成报告或待处理的自主回复时，才返回 `true`。此查询不得停止或修改会话。仍有工作时返回 `false`。查询拒绝、响应无效或超时也会保留运行时。不要用 `request.completed` 响应此查询。
+`canStopRuntime(): Promise<boolean>` 由你的 Provider 会话实现。只有释放运行时不会丢失后台 shell、监控任务、原生子 Agent、排队的完成报告或待处理的自主回复时，才返回 `true`。此查询不得停止或修改会话。仍有工作时返回 `false`。查询拒绝、响应无效或超时也会保留运行时。不要用请求完成响应回应此查询。
 
 Paseo 始终检查前台工作、权限、排队投递、生命周期操作、工作中的托管或原生后代 Agent，以及调用方尚未完成的本地或远程完成通知订阅。订阅保护覆盖注册、恢复，直到通知投递获确认。Provider 返回 `true` 也不能绕过这些阻止条件。Paseo 会在调用现有的 `session.close` 操作之前重新检查活动。受保护的工作完成后，会重新开始一小时的空闲期。保存的 Provider 持久化数据必须能恢复同一个会话。主机设置 `agents.idleRuntimeCleanup: false` 会禁用所有 Provider 的清理。
 

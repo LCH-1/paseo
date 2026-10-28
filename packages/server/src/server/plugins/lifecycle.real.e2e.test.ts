@@ -39,11 +39,9 @@ async function readHooks(client: DaemonClient): Promise<RecordedHook[]> {
 
 async function endedTurns(client: DaemonClient, agentId: string) {
   const events = await readHooks(client);
-  return events.filter(
-    (event): event is Extract<RecordedHook, { hook: "agent.turn.completed" }> => {
-      return event.hook === "agent.turn.completed" && event.data.agent.id === agentId;
-    },
-  );
+  return events.filter((event): event is Extract<RecordedHook, { hook: "agent.turn.after" }> => {
+    return event.hook === "agent.turn.after" && event.data.agent.id === agentId;
+  });
 }
 
 async function waitForTurns(client: DaemonClient, agentId: string, count: number): Promise<void> {
@@ -65,7 +63,7 @@ async function waitForPermission(client: DaemonClient, agentId: string, command:
         const events = await readHooks(client);
         for (const event of events) {
           if (
-            event.hook === "agent.permission.started" &&
+            event.hook === "agent.permission.before" &&
             event.data.agent.id === agentId &&
             event.data.request.input?.command === command
           ) {
@@ -171,7 +169,7 @@ test.skipIf(process.platform !== "linux")(
       const approvalId = await waitForPermission(client, agent.id, "git status");
       expect(await readHooks(client)).toContainEqual(
         expect.objectContaining({
-          hook: "agent.permission.completed",
+          hook: "agent.permission.after",
           data: expect.objectContaining({
             requestId: approvalId,
             resolution: expect.objectContaining({ behavior: "allow" }),
@@ -188,7 +186,7 @@ test.skipIf(process.platform !== "linux")(
       const deniedId = await waitForPermission(client, agent.id, "rm -rf canary.txt");
       expect(await readHooks(client)).toContainEqual(
         expect.objectContaining({
-          hook: "agent.permission.completed",
+          hook: "agent.permission.after",
           data: expect.objectContaining({
             requestId: deniedId,
             resolution: expect.objectContaining({ behavior: "deny" }),
@@ -226,7 +224,7 @@ test.skipIf(process.platform !== "linux")(
         .poll(
           async () => {
             return (await readHooks(client)).filter((event) => {
-              return event.hook === "agent.turn.started" && event.data.agent.id === agent.id;
+              return event.hook === "agent.turn.before" && event.data.agent.id === agent.id;
             }).length;
           },
           { timeout: 30_000 },
@@ -282,23 +280,24 @@ test.skipIf(process.platform !== "linux")(
         })
         .toEqual(
           [
-            "agent.archive.completed",
-            "agent.close.completed",
-            "agent.create.completed",
-            "agent.permission.started",
-            "agent.permission.completed",
-            "agent.turn.completed",
-            "agent.turn.started",
-            "agent.create.prepare",
-            "agent.open.prepare",
-            "workspace.create.prepare",
-            "workspace.archive.completed",
-            "workspace.create.completed",
+            "agent.archive.after",
+            "agent.close.after",
+            "agent.create.after",
+            "agent.permission.before",
+            "agent.permission.after",
+            "agent.turn.after",
+            "agent.turn.before",
+            "agent.create.before",
+            "agent.open.before",
+            "worktree.create.after",
+            "workspace.create.before",
+            "workspace.archive.after",
+            "workspace.create.after",
           ].sort(),
         );
       const openReasons = (await readHooks(client))
         .filter((event) => {
-          return event.hook === "agent.open.prepare";
+          return event.hook === "agent.open.before";
         })
         .map((event) => {
           return event.data.request.reason;

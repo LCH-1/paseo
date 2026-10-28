@@ -97,6 +97,8 @@ paseo workspace create \
 
 ## Setup 与 teardown {#setup-and-teardown}
 
+插件可以通过 [`worktree.create.after`](/docs/plugins/hooks#worktreecreateafter) 在 setup、终端和第一个 Agent 运行之前写入文件。
+
 `setup` 在 worktree 创建后运行一次。新的 worktree 没有安装依赖，也没有被忽略的文件（例如 `.env`），因此请用 setup 安装和复制你需要的内容。`teardown` 在归档期间、目录被删除之前运行。
 
 ```json

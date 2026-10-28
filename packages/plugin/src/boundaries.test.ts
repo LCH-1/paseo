@@ -231,7 +231,7 @@ describe("plugin agent tools SDK boundary", () => {
         },
       });
       export default function contribute(server: PluginServerContext) {
-        server.addHook("agent.open.prepare", async ({ request }) => {
+        server.addHook("agent.open.before", async ({ request }) => {
           const title: string | null = request.title;
           // @ts-expect-error labels are read-only
           request.labels.x = "changed";
@@ -255,22 +255,29 @@ describe("lifecycle hook SDK types", () => {
       typeErrors(`
       import type { PluginServerContext, PluginHooks, PluginHookPayload, PluginHookResult } from "@getpaseo/plugin/server";
       export default function contribute(server: PluginServerContext) {
-        server.addHook("workspace.create.prepare", async ({ request }) => ({ ...request, title: "Changed" }));
-        server.addHook("workspace.create.prepare", async () => {});
-        server.addHook("agent.open.prepare", async () => {});
-        server.addHook("agent.turn.completed", async ({ agent, outcome, timeline }, { paseo, signal }) => {
+        server.addHook("worktree.create.after", async ({ worktree }) => {
+          const path: string = worktree.path;
+          const branch: string = worktree.branch;
+          const source: string = worktree.sourceCheckout;
+          // @ts-expect-error Worktree facts have no workspace identity.
+          worktree.workspaceId;
+        });
+        server.addHook("workspace.create.before", async ({ request }) => ({ ...request, title: "Changed" }));
+        server.addHook("workspace.create.before", async () => {});
+        server.addHook("agent.open.before", async () => {});
+        server.addHook("agent.turn.after", async ({ agent, outcome, timeline }, { paseo, signal }) => {
           const kind: "completed" | "failed" | "canceled" = outcome.kind;
           // @ts-expect-error Notification payloads have no creation request.
           outcome.request;
         });
         // @ts-expect-error Async handlers are required even for notifications.
-        server.addHook("agent.turn.started", () => {});
+        server.addHook("agent.turn.before", () => {});
         // @ts-expect-error Legacy names are only accepted by deprecated registration methods.
         server.addHook("agent.session_open", async () => {});
         // @ts-expect-error Unknown names fail typechecking.
         server.addHook("nonsense", async () => {});
         // @ts-expect-error A prepare handler must return the whole request or undefined.
-        server.addHook("agent.create.prepare", async () => ({ invalid: true }));
+        server.addHook("agent.create.before", async () => ({ invalid: true }));
         server.before("agent.session_open", ({ request }) => request);
         server.on("agent.turn_ended", () => {});
         return () => {};

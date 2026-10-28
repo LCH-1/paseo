@@ -1,3 +1,4 @@
+import type { PluginHookPayload } from "@getpaseo/plugin/server";
 import type { PluginWireBeforeRequests, PluginBeforeResults } from "./lifecycle/index.js";
 import type { SessionOpenWireRequest, AttachedAgentTool } from "./agent-tools.js";
 import type { UsageScope } from "@getpaseo/plugin/server/usage";
@@ -307,7 +308,7 @@ export class PluginRuntime {
   }
 
   private notifySessionOpenChange(loaded: LoadedPlugin): void {
-    if (!loaded.hooks.includes("agent.open.prepare")) return;
+    if (!loaded.hooks.includes("agent.open.before")) return;
     for (const listener of this.sessionOpenListeners) listener();
   }
 
@@ -540,6 +541,25 @@ export class PluginRuntime {
     await Promise.all(this.pendingEvents);
   }
 
+  async wait(
+    name: "worktree.create.after",
+    payload: PluginHookPayload<"worktree.create.after">,
+  ): Promise<void> {
+    const plugins = [...this.plugins.values()].sort((left, right) =>
+      left.id.localeCompare(right.id),
+    );
+    for (const loaded of plugins) {
+      if (!loaded.hooks.includes(name)) continue;
+      try {
+        await this.request(loaded, { type: "hook", requestId: randomUUID(), name, input: payload });
+      } catch (error) {
+        throw new Error(`Plugin ${loaded.id} ${name} failed: ${describeError(error)}`, {
+          cause: error,
+        });
+      }
+    }
+  }
+
   async before<Name extends keyof PluginWireBeforeRequests>(
     name: Name,
     input: PluginWireBeforeRequests[Name],
@@ -560,24 +580,23 @@ export class PluginRuntime {
           type: "hook",
           requestId: randomUUID(),
           name,
-          input:
-            name === "agent.open.prepare" ? { ...request, tools: [], mcpServers: {} } : request,
+          input: name === "agent.open.before" ? { ...request, tools: [], mcpServers: {} } : request,
         });
         request = validateBeforeResult(name, request, output);
-        if (name === "agent.open.prepare") {
+        if (name === "agent.open.before") {
           const opened = request as SessionOpenWireRequest;
           this.collectMcpServers(mcpServers, mcpServerOwners, loaded, opened.mcpServers);
           this.collectAgentTools(attached, loaded, opened.tools);
         }
       } catch (error) {
-        if (name === "agent.open.prepare")
+        if (name === "agent.open.before")
           this.detachTools((request as SessionOpenWireRequest).agentId);
         throw new Error(`Plugin ${loaded.id} ${name} failed: ${describeError(error)}`, {
           cause: error,
         });
       }
     }
-    if (name === "agent.open.prepare") {
+    if (name === "agent.open.before") {
       return {
         ...request,
         tools: attached,
@@ -964,11 +983,11 @@ export class PluginRuntime {
 
   private handleChildMessage(loaded: LoadedPlugin, message: PluginProcessMessage): void {
     if (message.type === "hooks.changed") {
-      const hadSessionOpen = loaded.hooks.includes("agent.open.prepare");
+      const hadSessionOpen = loaded.hooks.includes("agent.open.before");
       loaded.hooks = message.hooks;
       if (
         this.plugins.get(loaded.id) === loaded &&
-        hadSessionOpen !== loaded.hooks.includes("agent.open.prepare")
+        hadSessionOpen !== loaded.hooks.includes("agent.open.before")
       ) {
         for (const listener of this.sessionOpenListeners) listener();
       }

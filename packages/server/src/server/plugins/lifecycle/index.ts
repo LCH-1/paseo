@@ -1,4 +1,7 @@
-import { createLifecycleRegistration } from "@getpaseo/plugin/internal/lifecycle";
+import {
+  createLifecycleRegistration,
+  pluginHookRegistry,
+} from "@getpaseo/plugin/internal/lifecycle";
 import { isDeepStrictEqual } from "node:util";
 import {
   serializeAgentTool,
@@ -12,6 +15,7 @@ import { z } from "zod";
 import { CreateAgentRequestMessageSchema } from "@getpaseo/protocol/messages";
 import type {
   PluginHookAgent,
+  PluginHookPayload,
   PluginHookContext,
   PluginLifecycleRegistration,
 } from "@getpaseo/plugin/server";
@@ -24,21 +28,21 @@ import type {
 import { WorkspaceCreateRequestSchema } from "@getpaseo/protocol/messages";
 import type { PersistedWorkspaceRecord } from "../../workspace-registry.js";
 
-export type PluginWireBeforeRequests = Omit<PluginHookRequests, "agent.open.prepare"> & {
-  "agent.open.prepare": SessionOpenWireRequest;
+export type PluginWireBeforeRequests = Omit<PluginHookRequests, "agent.open.before"> & {
+  "agent.open.before": SessionOpenWireRequest;
 };
 
 /** Daemon-only results; ownership never crosses the plugin process boundary. */
 export type PluginBeforeResults = PluginWireBeforeRequests & {
-  "agent.open.prepare": SessionOpenWireRequest & { mcpServerOwners?: Record<string, string> };
+  "agent.open.before": SessionOpenWireRequest & { mcpServerOwners?: Record<string, string> };
 };
 
 const beforeSchemas = {
-  "agent.create.prepare": CreateAgentRequestMessageSchema.pick({
+  "agent.create.before": CreateAgentRequestMessageSchema.pick({
     config: true,
     env: true,
   }).strict(),
-  "agent.open.prepare": z
+  "agent.open.before": z
     .object({
       agentId: z.string(),
       workspaceId: z.string().nullable(),
@@ -53,13 +57,13 @@ const beforeSchemas = {
       mcpServers: CreateAgentRequestMessageSchema.shape.config.shape.mcpServers.unwrap(),
     })
     .strict(),
-  "workspace.create.prepare": WorkspaceCreateRequestSchema.omit({
+  "workspace.create.before": WorkspaceCreateRequestSchema.omit({
     type: true,
     requestId: true,
   }).strict(),
 };
 
-const sessionOpenLocalResultSchema = beforeSchemas["agent.open.prepare"].extend({
+const sessionOpenLocalResultSchema = beforeSchemas["agent.open.before"].extend({
   tools: z.array(
     z.custom<AgentToolDefinition>(
       (tool) =>
@@ -73,6 +77,10 @@ const sessionOpenLocalResultSchema = beforeSchemas["agent.open.prepare"].extend(
 });
 
 export interface PluginLifecycle {
+  wait(
+    name: "worktree.create.after",
+    payload: PluginHookPayload<"worktree.create.after">,
+  ): Promise<void>;
   emit<Name extends keyof PluginHookEvents>(name: Name, event: PluginHookEvents[Name]): void;
   before<Name extends keyof PluginWireBeforeRequests>(
     name: Name,
@@ -121,32 +129,32 @@ export function publishAgentStream(
   event: AgentStreamEvent,
 ): void {
   if (event.type === "turn_started") {
-    lifecycle.emit("agent.turn.started", { agent, turnId: event.turnId ?? null });
+    lifecycle.emit("agent.turn.before", { agent, turnId: event.turnId ?? null });
   } else if (event.type === "turn_completed") {
-    lifecycle.emit("agent.turn.completed", {
+    lifecycle.emit("agent.turn.after", {
       agent,
       turnId: event.turnId ?? null,
       timeline: [],
       outcome: { kind: "completed" },
     });
   } else if (event.type === "turn_failed") {
-    lifecycle.emit("agent.turn.completed", {
+    lifecycle.emit("agent.turn.after", {
       agent,
       turnId: event.turnId ?? null,
       timeline: [],
       outcome: { kind: "failed", error: { message: event.error, code: event.code } },
     });
   } else if (event.type === "turn_canceled") {
-    lifecycle.emit("agent.turn.completed", {
+    lifecycle.emit("agent.turn.after", {
       agent,
       turnId: event.turnId ?? null,
       timeline: [],
       outcome: { kind: "canceled", reason: event.reason },
     });
   } else if (event.type === "permission_requested") {
-    lifecycle.emit("agent.permission.started", { agent, request: event.request });
+    lifecycle.emit("agent.permission.before", { agent, request: event.request });
   } else if (event.type === "permission_resolved") {
-    lifecycle.emit("agent.permission.completed", {
+    lifecycle.emit("agent.permission.after", {
       agent,
       requestId: event.requestId,
       resolution: event.resolution,
@@ -160,9 +168,9 @@ export function validateBeforeResult<Name extends keyof PluginWireBeforeRequests
   output: unknown,
 ): PluginWireBeforeRequests[Name] {
   const result = validateBeforeRequest(name, output);
-  if (name === "agent.open.prepare") {
-    const previous = beforeSchemas["agent.open.prepare"].parse(input);
-    const next = beforeSchemas["agent.open.prepare"].parse(result);
+  if (name === "agent.open.before") {
+    const previous = beforeSchemas["agent.open.before"].parse(input);
+    const next = beforeSchemas["agent.open.before"].parse(result);
     if (
       previous.agentId !== next.agentId ||
       previous.workspaceId !== next.workspaceId ||
@@ -173,14 +181,14 @@ export function validateBeforeResult<Name extends keyof PluginWireBeforeRequests
       previous.title !== next.title ||
       !isDeepStrictEqual(previous.labels, next.labels)
     ) {
-      throw new Error("agent.open.prepare hooks can only change env, tools, and mcpServers");
+      throw new Error("agent.open.before hooks can only change env, tools, and mcpServers");
     }
   }
-  if (name === "agent.create.prepare") {
-    const previous = beforeSchemas["agent.create.prepare"].parse(input);
-    const next = beforeSchemas["agent.create.prepare"].parse(result);
+  if (name === "agent.create.before") {
+    const previous = beforeSchemas["agent.create.before"].parse(input);
+    const next = beforeSchemas["agent.create.before"].parse(result);
     if (previous.config.cwd !== next.config.cwd) {
-      throw new Error("agent.create.prepare hooks cannot change the workspace directory");
+      throw new Error("agent.create.before hooks cannot change the workspace directory");
     }
   }
   return result;
@@ -224,10 +232,9 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
     const controller = new AbortController();
     this.active.set(id, controller);
     try {
-      if (name.endsWith(".prepare")) {
-        if (!Object.hasOwn(beforeSchemas, name)) throw new Error(`Unknown prepare hook: ${name}`);
+      if (Object.hasOwn(beforeSchemas, name)) {
         const hookName = name as keyof PluginHookRequests;
-        if (hookName === "agent.open.prepare") {
+        if (hookName === "agent.open.before") {
           return await this.openSession(input, { paseo, signal: controller.signal });
         }
         let request = validateBeforeRequest(hookName, input);
@@ -246,6 +253,11 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
         try {
           await handler(structuredClone(input), { paseo, signal: controller.signal });
         } catch (error) {
+          if (
+            Object.hasOwn(pluginHookRegistry, name) &&
+            pluginHookRegistry[name as keyof typeof pluginHookRegistry].waits
+          )
+            throw error;
           console.error(`Lifecycle hook ${name} failed`, error);
         }
       }
@@ -259,10 +271,10 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
     input: unknown,
     context: PluginHookContext,
   ): Promise<SessionOpenWireRequest> {
-    let request = validateBeforeRequest("agent.open.prepare", input);
+    let request = validateBeforeRequest("agent.open.before", input);
     this.agentTools?.detach(request.agentId);
     let tools: AgentToolDefinition[] = [];
-    for (const handler of this.handlers.get("agent.open.prepare") ?? []) {
+    for (const handler of this.handlers.get("agent.open.before") ?? []) {
       context.signal.throwIfAborted();
       const result = await handler(
         { request: { ...structuredClone(request), tools: [...tools] } },
@@ -271,7 +283,7 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
       if (result === undefined) continue;
       const local = sessionOpenLocalResultSchema.parse(result);
       const metadata = local.tools.map(serializeAgentTool);
-      request = validateBeforeResult("agent.open.prepare", request, { ...local, tools: metadata });
+      request = validateBeforeResult("agent.open.before", request, { ...local, tools: metadata });
       tools = local.tools;
     }
     context.signal.throwIfAborted();

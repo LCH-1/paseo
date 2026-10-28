@@ -307,7 +307,7 @@ export function createWorkspaceProvisioningService(deps: {
   }
 
   function emitWorkspaceCreated(workspace: PersistedWorkspaceRecord): void {
-    deps.lifecycle?.emit("workspace.create.completed", {
+    deps.lifecycle?.emit("workspace.create.after", {
       workspace: describeHookWorkspace(workspace),
     });
   }

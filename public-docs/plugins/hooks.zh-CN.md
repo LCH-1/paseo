@@ -12,7 +12,7 @@ nav: 钩子
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 
 export default function contribute(server: PluginServerContext) {
-  const remove = server.addHook("agent.open.prepare", async ({ request }) => ({
+  const remove = server.addHook("agent.open.before", async ({ request }) => ({
     ...request,
     env: { ...request.env, REGION: "eu" },
   }));
@@ -22,31 +22,46 @@ export default function contribute(server: PluginServerContext) {
 
 ## 命名与等待 {#naming-and-timing}
 
-名称遵循 `subject.operation.step`：主体、操作、步骤。`workspace` 包括所有工作区，无论其底层是目录还是 git worktree。
+名称遵循 `subject.operation.position`：主体、操作、`before` 或 `after`。名称标识生命周期中的位置；Paseo 是否等待由每个钩子决定，见下表。`workspace` 包括所有工作区，`worktree` 仅包括 git worktree。
 
-- `prepare`：Paseo 等待处理函数完成后再执行操作。处理函数收到 `{ request }`，可以返回完整的替换请求或 `undefined`。抛出错误、返回无效数据或超过 30 秒会让操作失败，错误包含 `Plugin <id> <hook> failed: …`。
-- `started`、`completed`：通知，Paseo 不等待。处理函数收到事件对象，返回 `Promise<void>`。错误会记录在插件名下，原操作继续。
+- 等待型钩子结束后 Paseo 才继续。抛出错误、返回无效数据或超过 30 秒会让操作失败，错误包含 `Plugin <id> <hook> failed: …`。修改请求的钩子收到 `{ request }`，可以返回完整的替换请求或 `undefined`。
+- 通知收到事件对象，返回 `Promise<void>`。Paseo 不等待；错误会记录在插件名下，原操作继续。`agent.turn.before` 和 `agent.permission.before` 分别在轮次开始或权限进入待处理状态时发出通知。
 
 所有处理函数都必须为异步函数。轮次完成包括成功、失败和取消，请查看 `outcome`。权限完成包括所有处理结果，请查看 `resolution`。
 
-创建 Agent 会发生一次，`agent.create.prepare` 修改已保存的配置。打开 Agent 指启动 Provider 进程，包括首次运行、daemon 重启后恢复、读取历史、导入外部会话和重新加载。`agent.open.prepare` 为每次启动提供临时的环境变量、工具和 MCP 服务器。创建会打开 Agent；打开已有 Agent 不会创建它；关闭会结束运行中的实例。在应用中打开标签页不属于此操作。
+创建 Agent 会发生一次，`agent.create.before` 修改已保存的配置。打开 Agent 指启动 Provider 进程，包括首次运行、daemon 重启后恢复、读取历史、导入外部会话和重新加载。`agent.open.before` 为每次启动提供临时的环境变量、工具和 MCP 服务器。创建会打开 Agent；打开已有 Agent 不会创建它；关闭会结束运行中的实例。在应用中打开标签页不属于此操作。
+
+`worktree.create.after` 在工作区注册前运行，随后是 `workspace.create.after`，两者都早于第一个 Agent 的 `agent.create.before` / `agent.open.before`。
+
+### 从等待型钩子提前返回 {#return-early-from-a-waiting-hook}
+
+如果操作应立即继续，可以启动独立任务并返回：
+
+```ts
+server.addHook("worktree.create.after", async ({ worktree }) => {
+  void warmCaches(worktree.path);
+});
+```
+
+Paseo 只观察返回的 Promise，因此独立任务没有错误报告，也没有取消 `signal`。
 
 ## 钩子一览 {#hooks}
 
-| 钩子                          | 等待 | 载荷                                   | 可修改                                    |
-| ----------------------------- | ---- | -------------------------------------- | ----------------------------------------- |
-| `workspace.create.prepare`    | 是   | `{ request }`                          | 整个创建请求                              |
-| `workspace.create.completed`  | 否   | `{ workspace }`                        |                                           |
-| `workspace.archive.completed` | 否   | `{ workspace }`                        |                                           |
-| `agent.create.prepare`        | 是   | `{ request: { config, env? } }`        | 除 `cwd` 外的已保存配置；`env`            |
-| `agent.create.completed`      | 否   | `{ agent }`                            |                                           |
-| `agent.open.prepare`          | 是   | `{ request }`                          | 仅用于启动的 `env`、`tools`、`mcpServers` |
-| `agent.close.completed`       | 否   | `{ agent }`                            |                                           |
-| `agent.archive.completed`     | 否   | `{ agent, archivedAt }`                |                                           |
-| `agent.turn.started`          | 否   | `{ agent, turnId }`                    |                                           |
-| `agent.turn.completed`        | 否   | `{ agent, turnId, outcome, timeline }` |                                           |
-| `agent.permission.started`    | 否   | `{ agent, request }`                   |                                           |
-| `agent.permission.completed`  | 否   | `{ agent, requestId, resolution }`     |                                           |
+| 钩子                      | 等待 | 载荷                                   | 可修改                                    |
+| ------------------------- | ---- | -------------------------------------- | ----------------------------------------- |
+| `workspace.create.before` | 是   | `{ request }`                          | 整个创建请求                              |
+| `workspace.create.after`  | 否   | `{ workspace }`                        |                                           |
+| `workspace.archive.after` | 否   | `{ workspace }`                        |                                           |
+| `worktree.create.after`   | 是   | `{ worktree }`                         | worktree 中的文件；抛出错误中止创建       |
+| `agent.create.before`     | 是   | `{ request: { config, env? } }`        | 除 `cwd` 外的已保存配置；`env`            |
+| `agent.create.after`      | 否   | `{ agent }`                            |                                           |
+| `agent.open.before`       | 是   | `{ request }`                          | 仅用于启动的 `env`、`tools`、`mcpServers` |
+| `agent.close.after`       | 否   | `{ agent }`                            |                                           |
+| `agent.archive.after`     | 否   | `{ agent, archivedAt }`                |                                           |
+| `agent.turn.before`       | 否   | `{ agent, turnId }`                    |                                           |
+| `agent.turn.after`        | 否   | `{ agent, turnId, outcome, timeline }` |                                           |
+| `agent.permission.before` | 否   | `{ agent, request }`                   |                                           |
+| `agent.permission.after`  | 否   | `{ agent, requestId, resolution }`     |                                           |
 
 ## 共享载荷 {#shared-payloads}
 
@@ -82,14 +97,14 @@ type PluginTurnOutcome =
 | `resolution` | SDK 的 `AgentPermissionResponse`                                                         |
 | `archivedAt` | 时间戳字符串                                                                             |
 
-## workspace.create.prepare {#workspacecreateprepare}
+## workspace.create.before {#workspacecreatebefore}
 
 收到 `{ request }`，其中包含 `source`、可选的 `title` 和 `firstAgentContext`。可替换整个显式创建请求；抛出错误、无效返回或超时会让创建失败。已有工作区和目录查找、导入不受影响。
 
 ### 选择工作区隔离方式 {#choose-workspace-isolation}
 
 ```ts
-server.addHook("workspace.create.prepare", async ({ request }) => {
+server.addHook("workspace.create.before", async ({ request }) => {
   if (request.source.kind !== "directory") {
     return request;
   }
@@ -107,31 +122,45 @@ server.addHook("workspace.create.prepare", async ({ request }) => {
 
 **结果**：显式的目录创建请求会变成 worktree 请求。已有的工作区以及目录查找/导入操作不受影响。
 
-## workspace.create.completed {#workspacecreatecompleted}
+## workspace.create.after {#workspacecreateafter}
 
 工作区记录创建且目录可用后触发，收到 `{ workspace }`。
 
 ```ts
-server.addHook("workspace.create.completed", async ({ workspace }) => {
+server.addHook("workspace.create.after", async ({ workspace }) => {
   console.log(workspace);
 });
 ```
 
-## workspace.archive.completed {#workspacearchivecompleted}
+## workspace.archive.after {#workspacearchiveafter}
 
 归档状态保存后触发，收到 `{ workspace }`；worktree 清理可能尚未完成。
 
 ```ts
-server.addHook("workspace.archive.completed", async ({ workspace }) => {
+server.addHook("workspace.archive.after", async ({ workspace }) => {
   console.log(workspace);
 });
 ```
 
-## agent.create.prepare {#agentcreateprepare}
+## worktree.create.after {#worktreecreateafter}
+
+新的 git worktree 在磁盘上创建后，Paseo 会等待此钩子，然后才注册工作区、运行 setup、打开终端或启动 Agent。收到 `{ worktree: { path, branch, sourceCheckout } }`，分别是 worktree 绝对路径、分支名、来源 checkout 目录。此时还没有工作区 id。无需返回数据，直接写入 worktree 即可。抛出错误或超过 30 秒会中止创建并删除新 worktree。
+
+此钩子覆盖新建分支、检出分支和检出 PR。恢复缺失的已归档 worktree 使用独立路径，不触发此钩子。
+
+```ts
+import { copyFile } from "node:fs/promises";
+
+server.addHook("worktree.create.after", async ({ worktree }) => {
+  await copyFile(`${worktree.sourceCheckout}/.env`, `${worktree.path}/.env`);
+});
+```
+
+## agent.create.before {#agentcreatebefore}
 
 收到 `{ request: { config, env? } }`。配置修改会保存，即使插件以后被停用或移除；`env` 只用于首次启动，不会保存。不能修改 `config.cwd`。抛出错误、无效返回或超时会让创建失败。
 
-**`agent.create.prepare.config`** 使用 `AgentSessionConfig`：
+**`agent.create.before.config`** 使用 `AgentSessionConfig`：
 
 | 字段                                          | 约束                                                     |
 | --------------------------------------------- | -------------------------------------------------------- |
@@ -147,7 +176,7 @@ server.addHook("workspace.archive.completed", async ({ workspace }) => {
 在 `contribute(server)` 中添加这个回调，为新的 Codex Agent 设置已保存的选项：
 
 ```ts
-server.addHook("agent.create.prepare", async ({ request }) => {
+server.addHook("agent.create.before", async ({ request }) => {
   if (request.config.provider !== "codex") {
     return request;
   }
@@ -173,21 +202,21 @@ server.addHook("agent.create.prepare", async ({ request }) => {
 
 所选的 Provider 会校验 `providerOptions`。显式的 Codex 沙盒和批准选项会覆盖它的模式预设。
 
-## agent.create.completed {#agentcreatecompleted}
+## agent.create.after {#agentcreateafter}
 
 常规创建完成后触发，收到 `{ agent }`；导入和恢复不会触发。
 
 ```ts
-server.addHook("agent.create.completed", async ({ agent }) => {
+server.addHook("agent.create.after", async ({ agent }) => {
   console.log(agent);
 });
 ```
 
-## agent.open.prepare {#agentopenprepare}
+## agent.open.before {#agentopenbefore}
 
 收到 `{ request }`，只能修改 `env`、`tools` 和 `mcpServers`，修改只用于此次启动。其他字段只读。抛出错误、无效返回或超时会让打开操作失败。
 
-**`agent.open.prepare` 请求示例：**
+**`agent.open.before` 请求示例：**
 
 ```json
 {
@@ -219,7 +248,7 @@ server.addHook("agent.create.completed", async ({ agent }) => {
 ### 在每次打开会话时注入环境变量 {#inject-environment-variables-on-every-session-opening}
 
 ```ts
-server.addHook("agent.open.prepare", async ({ request }) => {
+server.addHook("agent.open.before", async ({ request }) => {
   return {
     ...request,
     env: {
@@ -230,15 +259,15 @@ server.addHook("agent.open.prepare", async ({ request }) => {
 });
 ```
 
-会话打开时的环境变量覆盖项会在每次打开时重新计算。`agent.create.prepare.env` 只作用于首次启动，不会写入 Agent 的已保存配置。
+会话打开时的环境变量覆盖项会在每次打开时重新计算。`agent.create.before.env` 只作用于首次启动，不会写入 Agent 的已保存配置。
 
 ### 注入 MCP 服务器 {#inject-mcp-servers}
 
-需要将服务器保存为 Agent 配置的一部分时，使用 `agent.create.prepare.config.mcpServers`。
+需要将服务器保存为 Agent 配置的一部分时，使用 `agent.create.before.config.mcpServers`。
 插件拥有的服务器使用下面的回调，在 `contribute(server)` 中添加，并把占位 URL 替换为你的 MCP 端点：
 
 ```ts
-server.addHook("agent.open.prepare", async ({ request }) => {
+server.addHook("agent.open.before", async ({ request }) => {
   if (request.provider !== "codex") return;
 
   return {
@@ -263,7 +292,7 @@ Paseo 按插件 ID 顺序合并各插件的最终映射。
 
 ### 为 Agent 附加工具 {#attach-tools-to-agents}
 
-在 `index.server.ts` 中定义工具，并在 `server.addHook("agent.open.prepare", async handler)` 中附加它。
+在 `index.server.ts` 中定义工具，并在 `server.addHook("agent.open.before", async handler)` 中附加它。
 此示例只向带有 `notes/enabled: "true"` 标签的 Agent 提供 `append_workspace_note`：
 
 ```ts
@@ -287,7 +316,7 @@ const appendWorkspaceNote = defineAgentTool({
 });
 
 export default function contribute(server: PluginServerContext) {
-  server.addHook("agent.open.prepare", async ({ request }) => {
+  server.addHook("agent.open.before", async ({ request }) => {
     if (request.labels["notes/enabled"] !== "true") return;
     return { ...request, tools: [...request.tools, appendWorkspaceNote] };
   });
@@ -362,47 +391,47 @@ Paseo 通过 Agent 工具传输提供附加的工具，按 Provider 的支持情
 工具或另一插件的工具冲突，会话打开会失败，并指出双方。一个插件内的重复名称也会导致
 会话打开失败。回调未选中的 Agent 不受影响。
 
-| 变更                                                   | Agent 何时收到变更                                                                                                                                                                 |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 启动、停止或重新加载声明了 `agent.open.prepare` 的插件 | 已打开的会话会标记为过期。每个会话在下一次空闲提示词前重新打开；正在运行的轮次会继续，不会被中断。重新打开后的下一条提示词复用该会话。                                             |
-| 修改回调选择的 Agent                                   | 编辑此示例后运行 `paseo plugin reload agent-tools`，然后在 Agent 空闲时发送提示词。                                                                                                |
-| 立即应用                                               | 调用 `await paseo.agents.ref(id).reload({ requestId: "reload-notes" })`。`requestId` 可选。这会重新打开 Provider 会话，以 `reason: "refresh"` 再次运行钩子，并中断正在运行的轮次。 |
-| 读取当前快照                                           | 调用 `await paseo.agents.ref(id).refresh()`。这只读取状态，不会重新打开会话。                                                                                                      |
+| 变更                                                  | Agent 何时收到变更                                                                                                                                                                 |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 启动、停止或重新加载声明了 `agent.open.before` 的插件 | 已打开的会话会标记为过期。每个会话在下一次空闲提示词前重新打开；正在运行的轮次会继续，不会被中断。重新打开后的下一条提示词复用该会话。                                             |
+| 修改回调选择的 Agent                                  | 编辑此示例后运行 `paseo plugin reload agent-tools`，然后在 Agent 空闲时发送提示词。                                                                                                |
+| 立即应用                                              | 调用 `await paseo.agents.ref(id).reload({ requestId: "reload-notes" })`。`requestId` 可选。这会重新打开 Provider 会话，以 `reason: "refresh"` 再次运行钩子，并中断正在运行的轮次。 |
+| 读取当前快照                                          | 调用 `await paseo.agents.ref(id).refresh()`。这只读取状态，不会重新打开会话。                                                                                                      |
 
 如果自动重新打开失败，触发它的提示词会返回该错误。参阅
 [完整 agent-tools 示例](https://github.com/getpaseo/paseo/tree/main/plugin-examples/agent-tools)。
 
-## agent.close.completed {#agentclosecompleted}
+## agent.close.after {#agentcloseafter}
 
 运行中的 Agent 实例关闭后触发，收到 `{ agent }`。
 
 ```ts
-server.addHook("agent.close.completed", async ({ agent }) => {
+server.addHook("agent.close.after", async ({ agent }) => {
   console.log(agent);
 });
 ```
 
-## agent.archive.completed {#agentarchivecompleted}
+## agent.archive.after {#agentarchiveafter}
 
 归档状态保存后触发，收到 `{ agent, archivedAt }`；运行时清理可能尚未完成。
 
 ```ts
-server.addHook("agent.archive.completed", async ({ agent, archivedAt }) => {
+server.addHook("agent.archive.after", async ({ agent, archivedAt }) => {
   console.log(agent, archivedAt);
 });
 ```
 
-## agent.turn.started {#agentturnstarted}
+## agent.turn.before {#agentturnbefore}
 
 实时轮次开始后触发，收到 `{ agent, turnId }`。历史重放不会触发。
 
 ```ts
-server.addHook("agent.turn.started", async ({ agent, turnId }) => {
+server.addHook("agent.turn.before", async ({ agent, turnId }) => {
   console.log(agent, turnId);
 });
 ```
 
-## agent.turn.completed {#agentturncompleted}
+## agent.turn.after {#agentturnafter}
 
 实时轮次完成、失败或取消后触发，收到 `{ agent, turnId, outcome, timeline }`。`outcome.kind` 为 `completed`、`failed` 或 `canceled`。`timeline` 已弃用且始终为空；请按下面的示例通过 SDK 获取历史。
 
@@ -415,7 +444,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { latestOutputText } from "./server/inspect";
 
 export default function contribute(server: PluginServerContext) {
-  server.addHook("agent.turn.completed", async (event, context) => {
+  server.addHook("agent.turn.after", async (event, context) => {
     if (event.outcome.kind === "canceled") {
       return;
     }
@@ -442,7 +471,7 @@ Turn ends: "out of credits"
 
 这会用现有的 SDK 发送一条新消息。持续匹配会不断发送后续消息；需要时请在插件中添加次数限制或延迟。附件和工具的效果不会被重放。
 
-## agent.permission.started {#agentpermissionstarted}
+## agent.permission.before {#agentpermissionbefore}
 
 权限或问题进入待处理状态后触发，收到 `{ agent, request }`；`request` 为 `AgentPermissionRequest`。通过 SDK 回应。
 
@@ -455,7 +484,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { shellCommand } from "./server/inspect";
 
 export default function contribute(server: PluginServerContext) {
-  server.addHook("agent.permission.started", async (event, context) => {
+  server.addHook("agent.permission.before", async (event, context) => {
     const command = shellCommand(event.request);
     if (command === null) {
       return;
@@ -491,12 +520,12 @@ export default function contribute(server: PluginServerContext) {
 
 这个正则表达式只是一个示例策略，而不是 shell 解析器。权限请求也可能是问题、计划和模式变更；请求权限不会结束当前轮次。
 
-## agent.permission.completed {#agentpermissioncompleted}
+## agent.permission.after {#agentpermissionafter}
 
 待处理请求得到回应或清除后触发，收到 `{ agent, requestId, resolution }`；`resolution` 为 `AgentPermissionResponse`。
 
 ```ts
-server.addHook("agent.permission.completed", async ({ agent, requestId, resolution }) => {
+server.addHook("agent.permission.after", async ({ agent, requestId, resolution }) => {
   console.log(agent, requestId, resolution);
 });
 ```
@@ -507,10 +536,10 @@ Agent 钩子不包括 daemon 的私有临时辅助 Agent。公开的后台工作
 
 ```text
 Creation request
-  → agent.create.prepare hooks (plugin-ID order; registration order within each plugin)
+  → agent.create.before hooks (plugin-ID order; registration order within each plugin)
   → resolve defaults and validate provider configuration
   → derive launch configuration with Paseo runtime tools and daemon prompt
-  → agent.open.prepare hooks (same ordering; env and plugin-local tools and MCP servers)
+  → agent.open.before hooks (same ordering; env and plugin-local tools and MCP servers)
   → set PASEO_AGENT_ID and PASEO_AGENT_CWD
   → open provider session and save agent configuration
 ```
@@ -527,24 +556,24 @@ Creation request
 
 ## context 与清理 {#context-and-cleanup}
 
-| 契约                       | 行为                                                                                 |
-| -------------------------- | ------------------------------------------------------------------------------------ |
-| `context.paseo`            | 已连接到此 daemon 的现有 SDK                                                         |
-| `context.signal`           | 在调用超时或插件停止时中止；请把它传给外部请求                                       |
-| 输入数据                   | 分离的快照；通过返回的请求或 SDK 命令改变状态                                        |
-| 注册结果                   | 幂等的移除函数，例如 `const remove = server.addHook(...); remove();`                 |
-| 重新加载、停用、移除、关闭 | 移除剩余的注册                                                                       |
-| 未知的钩子名称             | 注册失败                                                                             |
-| 钩子超时                   | 30 秒；会中止 signal。prepare 钩子会让待处理的操作失败；事件处理函数会记录一条错误。 |
-| 事件处理函数出错           | 记录在插件名下；原操作继续进行                                                       |
-| 事件投递                   | 实时、尽力而为；没有重放、持久化或自动重试                                           |
-| 事件并发                   | 不同的事件可能重叠；不保证回调完成的顺序                                             |
+| 契约                       | 行为                                                                               |
+| -------------------------- | ---------------------------------------------------------------------------------- |
+| `context.paseo`            | 已连接到此 daemon 的现有 SDK                                                       |
+| `context.signal`           | 在调用超时或插件停止时中止；请把它传给外部请求                                     |
+| 输入数据                   | 分离的快照；通过返回的请求或 SDK 命令改变状态                                      |
+| 注册结果                   | 幂等的移除函数，例如 `const remove = server.addHook(...); remove();`               |
+| 重新加载、停用、移除、关闭 | 移除剩余的注册                                                                     |
+| 未知的钩子名称             | 注册失败                                                                           |
+| 钩子超时                   | 30 秒；会中止 signal。等待型钩子会让待处理的操作失败；事件处理函数会记录一条错误。 |
+| 事件处理函数出错           | 记录在插件名下；原操作继续进行                                                     |
+| 事件投递                   | 实时、尽力而为；没有重放、持久化或自动重试                                         |
+| 事件并发                   | 不同的事件可能重叠；不保证回调完成的顺序                                           |
 
 ## 完整示例 {#complete-examples}
 
 | 插件                                                                                                   | 包含                                                   |
 | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
-| [lifecycle-logger](https://github.com/getpaseo/paseo/tree/main/plugin-examples/lifecycle-logger)       | 全部十二个钩子；隐去环境变量值的 JSON 日志             |
+| [lifecycle-logger](https://github.com/getpaseo/paseo/tree/main/plugin-examples/lifecycle-logger)       | 全部十三个钩子；隐去环境变量值的 JSON 日志             |
 | [lifecycle-actions](https://github.com/getpaseo/paseo/tree/main/plugin-examples/lifecycle-actions)     | 后续消息、权限、环境变量、切换 Provider、选择 worktree |
 | [agent-configuration](https://github.com/getpaseo/paseo/tree/main/plugin-examples/agent-configuration) | MCP 注入以及 Codex 沙盒/批准选项                       |
 | [agent-tools](https://github.com/getpaseo/paseo/tree/main/plugin-examples/agent-tools)                 | 按标签选择 Agent，并在插件进程中执行文件操作的工具     |
@@ -555,17 +584,17 @@ Creation request
 
 旧注册方法已弃用，会在 2027-04-30 之后移除。现有插件继续按原来的方式运行。同一插件中混合使用新旧注册方法时，处理函数按注册顺序运行。`addHook` 只接受新名称。
 
-| 旧注册方式                                         | 新注册方式                                                    |
-| -------------------------------------------------- | ------------------------------------------------------------- |
-| `server.before("workspace.create", handler)`       | `server.addHook("workspace.create.prepare", asyncHandler)`    |
-| `server.on("workspace.created", handler)`          | `server.addHook("workspace.create.completed", asyncHandler)`  |
-| `server.on("workspace.archived", handler)`         | `server.addHook("workspace.archive.completed", asyncHandler)` |
-| `server.before("agent.create", handler)`           | `server.addHook("agent.create.prepare", asyncHandler)`        |
-| `server.on("agent.created", handler)`              | `server.addHook("agent.create.completed", asyncHandler)`      |
-| `server.before("agent.session_open", handler)`     | `server.addHook("agent.open.prepare", asyncHandler)`          |
-| `server.on("agent.closed", handler)`               | `server.addHook("agent.close.completed", asyncHandler)`       |
-| `server.on("agent.archived", handler)`             | `server.addHook("agent.archive.completed", asyncHandler)`     |
-| `server.on("agent.turn_started", handler)`         | `server.addHook("agent.turn.started", asyncHandler)`          |
-| `server.on("agent.turn_ended", handler)`           | `server.addHook("agent.turn.completed", asyncHandler)`        |
-| `server.on("agent.permission_requested", handler)` | `server.addHook("agent.permission.started", asyncHandler)`    |
-| `server.on("agent.permission_resolved", handler)`  | `server.addHook("agent.permission.completed", asyncHandler)`  |
+| 旧注册方式                                         | 新注册方式                                                |
+| -------------------------------------------------- | --------------------------------------------------------- |
+| `server.before("workspace.create", handler)`       | `server.addHook("workspace.create.before", asyncHandler)` |
+| `server.on("workspace.created", handler)`          | `server.addHook("workspace.create.after", asyncHandler)`  |
+| `server.on("workspace.archived", handler)`         | `server.addHook("workspace.archive.after", asyncHandler)` |
+| `server.before("agent.create", handler)`           | `server.addHook("agent.create.before", asyncHandler)`     |
+| `server.on("agent.created", handler)`              | `server.addHook("agent.create.after", asyncHandler)`      |
+| `server.before("agent.session_open", handler)`     | `server.addHook("agent.open.before", asyncHandler)`       |
+| `server.on("agent.closed", handler)`               | `server.addHook("agent.close.after", asyncHandler)`       |
+| `server.on("agent.archived", handler)`             | `server.addHook("agent.archive.after", asyncHandler)`     |
+| `server.on("agent.turn_started", handler)`         | `server.addHook("agent.turn.before", asyncHandler)`       |
+| `server.on("agent.turn_ended", handler)`           | `server.addHook("agent.turn.after", asyncHandler)`        |
+| `server.on("agent.permission_requested", handler)` | `server.addHook("agent.permission.before", asyncHandler)` |
+| `server.on("agent.permission_resolved", handler)`  | `server.addHook("agent.permission.after", asyncHandler)`  |

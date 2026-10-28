@@ -1,7 +1,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 
 export default function contribute(server: PluginServerContext) {
-  server.addHook("agent.create.prepare", async ({ request }) => {
+  server.addHook("agent.create.before", async ({ request }) => {
     if (request.config.provider !== "codex") {
       return request;
     }
@@ -19,7 +19,7 @@ export default function contribute(server: PluginServerContext) {
     };
   });
 
-  server.addHook("agent.open.prepare", async ({ request }) => {
+  server.addHook("agent.open.before", async ({ request }) => {
     if (request.provider !== "codex") {
       return;
     }

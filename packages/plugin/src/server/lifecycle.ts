@@ -21,6 +21,12 @@ export interface PluginHookWorkspace {
   archivedAt: string | null;
 }
 
+export interface PluginHookWorktree {
+  path: string;
+  branch: string;
+  sourceCheckout: string;
+}
+
 export interface PluginHookAgent {
   id: string;
   workspaceId: string | null;
@@ -50,8 +56,8 @@ export type PluginTurnOutcome =
   | { kind: "canceled"; reason: string };
 
 export interface PluginHookEvents {
-  "agent.turn.started": { agent: PluginHookAgent; turnId: string | null };
-  "agent.turn.completed": {
+  "agent.turn.before": { agent: PluginHookAgent; turnId: string | null };
+  "agent.turn.after": {
     agent: PluginHookAgent;
     turnId: string | null;
     outcome: PluginTurnOutcome;
@@ -61,23 +67,23 @@ export interface PluginHookEvents {
      */
     timeline: readonly AgentTimelineItem[];
   };
-  "agent.permission.started": { agent: PluginHookAgent; request: AgentPermissionRequest };
-  "agent.permission.completed": {
+  "agent.permission.before": { agent: PluginHookAgent; request: AgentPermissionRequest };
+  "agent.permission.after": {
     agent: PluginHookAgent;
     requestId: string;
     resolution: AgentPermissionResponse;
   };
-  "agent.archive.completed": { agent: PluginHookAgent; archivedAt: string };
-  "agent.create.completed": { agent: PluginHookAgent };
-  "agent.close.completed": { agent: PluginHookAgent };
-  "workspace.create.completed": { workspace: PluginHookWorkspace };
-  "workspace.archive.completed": { workspace: PluginHookWorkspace };
+  "agent.archive.after": { agent: PluginHookAgent; archivedAt: string };
+  "agent.create.after": { agent: PluginHookAgent };
+  "agent.close.after": { agent: PluginHookAgent };
+  "workspace.create.after": { workspace: PluginHookWorkspace };
+  "workspace.archive.after": { workspace: PluginHookWorkspace };
 }
 
 export interface PluginHookRequests {
-  "agent.create.prepare": { config: AgentSessionConfig; env?: Record<string, string> };
-  "agent.open.prepare": PluginSessionOpenRequest;
-  "workspace.create.prepare": Omit<WorkspaceCreateRequest, "type" | "requestId">;
+  "agent.create.before": { config: AgentSessionConfig; env?: Record<string, string> };
+  "agent.open.before": PluginSessionOpenRequest;
+  "workspace.create.before": Omit<WorkspaceCreateRequest, "type" | "requestId">;
 }
 
 export type PluginHooks = {
@@ -85,7 +91,9 @@ export type PluginHooks = {
     request: PluginHookRequests[Name];
     result: PluginHookRequests[Name];
   };
-} & { [Name in keyof PluginHookEvents]: { payload: PluginHookEvents[Name] } };
+} & { [Name in keyof PluginHookEvents]: { payload: PluginHookEvents[Name] } } & {
+  "worktree.create.after": { payload: { worktree: PluginHookWorktree } };
+};
 
 export type PluginHookPayload<Name extends keyof PluginHooks> = {
   [Key in keyof PluginHooks]: PluginHooks[Key] extends { request: infer Request }
@@ -127,37 +135,39 @@ export interface PluginLifecycleRegistration {
   ): () => void;
 }
 
-const hookNames = [
-  "workspace.create.prepare",
-  "workspace.create.completed",
-  "workspace.archive.completed",
-  "agent.create.prepare",
-  "agent.create.completed",
-  "agent.open.prepare",
-  "agent.close.completed",
-  "agent.archive.completed",
-  "agent.turn.started",
-  "agent.turn.completed",
-  "agent.permission.started",
-  "agent.permission.completed",
-] as const satisfies readonly (keyof PluginHooks)[];
+/** @internal Lifecycle policy shared by the daemon and plugin process. */
+export const pluginHookRegistry = {
+  "workspace.create.before": { waits: true },
+  "workspace.create.after": { waits: false },
+  "workspace.archive.after": { waits: false },
+  "worktree.create.after": { waits: true },
+  "agent.create.before": { waits: true },
+  "agent.create.after": { waits: false },
+  "agent.open.before": { waits: true },
+  "agent.close.after": { waits: false },
+  "agent.archive.after": { waits: false },
+  "agent.turn.before": { waits: false },
+  "agent.turn.after": { waits: false },
+  "agent.permission.before": { waits: false },
+  "agent.permission.after": { waits: false },
+} as const satisfies Record<keyof PluginHooks, { waits: boolean }>;
 
 // COMPAT(pluginHookNames): added in v0.14, remove after 2027-04-30
 const legacyEvents = {
-  "workspace.created": "workspace.create.completed",
-  "workspace.archived": "workspace.archive.completed",
-  "agent.created": "agent.create.completed",
-  "agent.closed": "agent.close.completed",
-  "agent.archived": "agent.archive.completed",
-  "agent.turn_started": "agent.turn.started",
-  "agent.turn_ended": "agent.turn.completed",
-  "agent.permission_requested": "agent.permission.started",
-  "agent.permission_resolved": "agent.permission.completed",
+  "workspace.created": "workspace.create.after",
+  "workspace.archived": "workspace.archive.after",
+  "agent.created": "agent.create.after",
+  "agent.closed": "agent.close.after",
+  "agent.archived": "agent.archive.after",
+  "agent.turn_started": "agent.turn.before",
+  "agent.turn_ended": "agent.turn.after",
+  "agent.permission_requested": "agent.permission.before",
+  "agent.permission_resolved": "agent.permission.after",
 } as const;
 const legacyRequests = {
-  "workspace.create": "workspace.create.prepare",
-  "agent.create": "agent.create.prepare",
-  "agent.session_open": "agent.open.prepare",
+  "workspace.create": "workspace.create.before",
+  "agent.create": "agent.create.before",
+  "agent.session_open": "agent.open.before",
 } as const;
 export type PluginLifecycleEvents = {
   [Name in keyof typeof legacyEvents]: PluginHookEvents[(typeof legacyEvents)[Name]];
@@ -173,7 +183,7 @@ export function createLifecycleRegistration(
     handler: (input: never, context: PluginHookContext) => unknown,
   ) => () => void,
 ): PluginLifecycleRegistration {
-  const names = new Set<string>(hookNames);
+  const names = new Set<string>(Object.keys(pluginHookRegistry));
   return {
     addHook(name, handler) {
       if (!names.has(name)) throw new Error(`Unknown lifecycle hook: ${name}`);

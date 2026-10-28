@@ -9,17 +9,17 @@ const paseo = createPaseoApi(
 
 test("removing an old registration twice preserves a newer registration for the same hook", async () => {
   const hooks = new PluginHookHandlers(() => {});
-  const remove = hooks.addHook("workspace.create.prepare", async ({ request }) => {
+  const remove = hooks.addHook("workspace.create.before", async ({ request }) => {
     return { ...request, title: "old" };
   });
   remove();
-  hooks.addHook("workspace.create.prepare", async ({ request }) => {
+  hooks.addHook("workspace.create.before", async ({ request }) => {
     return { ...request, title: "new" };
   });
   remove();
   const output = await hooks.invoke(
     "operation",
-    "workspace.create.prepare",
+    "workspace.create.before",
     {
       source: { kind: "directory", path: "/project" },
     },
@@ -30,17 +30,17 @@ test("removing an old registration twice preserves a newer registration for the 
 
 test("before hooks compose returned requests and preserve the original input", async () => {
   const hooks = new PluginHookHandlers(() => {});
-  hooks.addHook("workspace.create.prepare", async ({ request }) => {
+  hooks.addHook("workspace.create.before", async ({ request }) => {
     return { ...request, title: "first" };
   });
-  hooks.addHook("workspace.create.prepare", async () => {
+  hooks.addHook("workspace.create.before", async () => {
     return;
   });
-  hooks.addHook("workspace.create.prepare", async ({ request }) => {
+  hooks.addHook("workspace.create.before", async ({ request }) => {
     return { ...request, title: request.title + ":second" };
   });
   const input = { source: { kind: "directory", path: "/project" } };
-  expect(await hooks.invoke("operation", "workspace.create.prepare", input, paseo)).toEqual({
+  expect(await hooks.invoke("operation", "workspace.create.before", input, paseo)).toEqual({
     source: { kind: "directory", path: "/project" },
     title: "first:second",
   });
@@ -49,7 +49,7 @@ test("before hooks compose returned requests and preserve the original input", a
 
 test("teardown aborts an active callback and removes its registrations", async () => {
   const hooks = new PluginHookHandlers(() => {});
-  hooks.addHook("workspace.create.prepare", async (_input, context) => {
+  hooks.addHook("workspace.create.before", async (_input, context) => {
     await new Promise<void>((_resolve, reject) => {
       context.signal.addEventListener(
         "abort",
@@ -62,7 +62,7 @@ test("teardown aborts an active callback and removes its registrations", async (
   });
   const invocation = hooks.invoke(
     "operation",
-    "workspace.create.prepare",
+    "workspace.create.before",
     {
       source: { kind: "directory", path: "/project" },
     },
@@ -75,13 +75,13 @@ test("teardown aborts an active callback and removes its registrations", async (
 
 test("session-open hooks reject changes to session identity instead of silently ignoring them", async () => {
   const hooks = new PluginHookHandlers(() => {});
-  hooks.addHook("agent.open.prepare", async ({ request }) => {
+  hooks.addHook("agent.open.before", async ({ request }) => {
     return { ...request, provider: "another-provider" };
   });
   await expect(
     hooks.invoke(
       "operation",
-      "agent.open.prepare",
+      "agent.open.before",
       {
         agentId: "agent",
         workspaceId: "workspace",
@@ -97,18 +97,18 @@ test("session-open hooks reject changes to session identity instead of silently 
       },
       paseo,
     ),
-  ).rejects.toThrow("agent.open.prepare hooks can only change env");
+  ).rejects.toThrow("agent.open.before hooks can only change env");
 });
 
 test.each([{ title: "Changed" }, { labels: { changed: "true" } }])(
   "session-open targeting metadata is read-only: %j",
   async (patch) => {
     const hooks = new PluginHookHandlers(() => {});
-    hooks.addHook("agent.open.prepare", async ({ request }) => ({ ...request, ...patch }));
+    hooks.addHook("agent.open.before", async ({ request }) => ({ ...request, ...patch }));
     await expect(
       hooks.invoke(
         "operation",
-        "agent.open.prepare",
+        "agent.open.before",
         {
           agentId: "agent",
           workspaceId: null,
@@ -124,14 +124,14 @@ test.each([{ title: "Changed" }, { labels: { changed: "true" } }])(
         },
         paseo,
       ),
-    ).rejects.toThrow("agent.open.prepare hooks can only change env, tools, and mcpServers");
+    ).rejects.toThrow("agent.open.before hooks can only change env, tools, and mcpServers");
   },
 );
 
-test("new prepare registrations compose with legacy registrations in registration order", async () => {
+test("new request-changing registrations compose with legacy registrations in registration order", async () => {
   const hooks = new PluginHookHandlers(() => {});
   hooks.before("workspace.create", ({ request }) => ({ ...request, title: "legacy" }));
-  hooks.addHook("workspace.create.prepare", async ({ request }) => ({
+  hooks.addHook("workspace.create.before", async ({ request }) => ({
     ...request,
     title: request.title + ":new",
   }));
@@ -142,7 +142,7 @@ test("new prepare registrations compose with legacy registrations in registratio
   expect(
     await hooks.invoke(
       "operation",
-      "workspace.create.prepare",
+      "workspace.create.before",
       {
         source: { kind: "directory", path: "/project" },
       },
@@ -151,7 +151,7 @@ test("new prepare registrations compose with legacy registrations in registratio
   ).toEqual({ source: { kind: "directory", path: "/project" }, title: "legacy:new:last" });
 });
 
-test.each(["agent.session_open", "nonsense"])(
+test.each(["agent.session_open", "agent.create.prepare", "nonsense"])(
   "addHook rejects unsupported name %s at registration",
   (name) => {
     const hooks = new PluginHookHandlers(() => {});
@@ -161,18 +161,18 @@ test.each(["agent.session_open", "nonsense"])(
 );
 
 test.each([
-  ["workspace.create", "workspace.create.prepare"],
-  ["workspace.created", "workspace.create.completed"],
-  ["workspace.archived", "workspace.archive.completed"],
-  ["agent.create", "agent.create.prepare"],
-  ["agent.created", "agent.create.completed"],
-  ["agent.session_open", "agent.open.prepare"],
-  ["agent.closed", "agent.close.completed"],
-  ["agent.archived", "agent.archive.completed"],
-  ["agent.turn_started", "agent.turn.started"],
-  ["agent.turn_ended", "agent.turn.completed"],
-  ["agent.permission_requested", "agent.permission.started"],
-  ["agent.permission_resolved", "agent.permission.completed"],
+  ["workspace.create", "workspace.create.before"],
+  ["workspace.created", "workspace.create.after"],
+  ["workspace.archived", "workspace.archive.after"],
+  ["agent.create", "agent.create.before"],
+  ["agent.created", "agent.create.after"],
+  ["agent.session_open", "agent.open.before"],
+  ["agent.closed", "agent.close.after"],
+  ["agent.archived", "agent.archive.after"],
+  ["agent.turn_started", "agent.turn.before"],
+  ["agent.turn_ended", "agent.turn.after"],
+  ["agent.permission_requested", "agent.permission.before"],
+  ["agent.permission_resolved", "agent.permission.after"],
 ] as const)("legacy %s registers only %s across the process boundary", (oldName, newName) => {
   const hooks = new PluginHookHandlers(() => {});
   const handler = async () => {};
@@ -194,7 +194,7 @@ test("legacy notifications and addHook share payloads, registration order, and c
   const remove = hooks.on("workspace.created", (event) => {
     received.push(["old", event]);
   });
-  hooks.addHook("workspace.create.completed", async (event) => {
+  hooks.addHook("workspace.create.after", async (event) => {
     received.push(["new", event]);
   });
   const payload = {
@@ -206,13 +206,36 @@ test("legacy notifications and addHook share payloads, registration order, and c
       archivedAt: null,
     },
   };
-  await hooks.invoke("first", "workspace.create.completed", payload, paseo);
+  await hooks.invoke("first", "workspace.create.after", payload, paseo);
   remove();
   remove();
-  await hooks.invoke("second", "workspace.create.completed", payload, paseo);
+  await hooks.invoke("second", "workspace.create.after", payload, paseo);
   expect(received).toEqual([
     ["old", payload],
     ["new", payload],
     ["new", payload],
   ]);
+});
+
+test("a waiting after hook propagates failures and stops later handlers", async () => {
+  const hooks = new PluginHookHandlers(() => {});
+  const received: string[] = [];
+  hooks.addHook("worktree.create.after", async ({ worktree }) => {
+    received.push(worktree.path);
+    throw new Error("cannot initialize worktree");
+  });
+  hooks.addHook("worktree.create.after", async () => {
+    received.push("unexpected later handler");
+  });
+  await expect(
+    hooks.invoke(
+      "worktree",
+      "worktree.create.after",
+      {
+        worktree: { path: "/worktree", branch: "feature", sourceCheckout: "/source" },
+      },
+      paseo,
+    ),
+  ).rejects.toThrow("cannot initialize worktree");
+  expect(received).toEqual(["/worktree"]);
 });

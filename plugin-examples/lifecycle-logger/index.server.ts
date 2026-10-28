@@ -2,55 +2,59 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { logHook } from "./server/log";
 
 export default function contribute(server: PluginServerContext) {
-  server.addHook("workspace.create.prepare", async ({ request }) => {
-    logHook("workspace.create.prepare", { request });
+  server.addHook("workspace.create.before", async ({ request }) => {
+    logHook("workspace.create.before", { request });
     return request;
   });
 
-  server.addHook("workspace.create.completed", async (event) => {
-    logHook("workspace.create.completed", event);
+  server.addHook("workspace.create.after", async (event) => {
+    logHook("workspace.create.after", event);
   });
 
-  server.addHook("workspace.archive.completed", async (event) => {
-    logHook("workspace.archive.completed", event);
+  server.addHook("workspace.archive.after", async (event) => {
+    logHook("workspace.archive.after", event);
   });
 
-  server.addHook("agent.create.prepare", async ({ request }) => {
-    logHook("agent.create.prepare", { request });
+  server.addHook("worktree.create.after", async (event) => {
+    logHook("worktree.create.after", event);
+  });
+
+  server.addHook("agent.create.before", async ({ request }) => {
+    logHook("agent.create.before", { request });
     return request;
   });
 
-  server.addHook("agent.open.prepare", async ({ request }) => {
-    logHook("agent.open.prepare", { request });
+  server.addHook("agent.open.before", async ({ request }) => {
+    logHook("agent.open.before", { request });
     return request;
   });
 
-  server.addHook("agent.create.completed", async (event) => {
-    logHook("agent.create.completed", event);
+  server.addHook("agent.create.after", async (event) => {
+    logHook("agent.create.after", event);
   });
 
-  server.addHook("agent.close.completed", async (event) => {
-    logHook("agent.close.completed", event);
+  server.addHook("agent.close.after", async (event) => {
+    logHook("agent.close.after", event);
   });
 
-  server.addHook("agent.turn.started", async (event) => {
-    logHook("agent.turn.started", event);
+  server.addHook("agent.turn.before", async (event) => {
+    logHook("agent.turn.before", event);
   });
 
-  server.addHook("agent.turn.completed", async (event) => {
-    logHook("agent.turn.completed", event);
+  server.addHook("agent.turn.after", async (event) => {
+    logHook("agent.turn.after", event);
   });
 
-  server.addHook("agent.permission.started", async (event) => {
-    logHook("agent.permission.started", event);
+  server.addHook("agent.permission.before", async (event) => {
+    logHook("agent.permission.before", event);
   });
 
-  server.addHook("agent.permission.completed", async (event) => {
-    logHook("agent.permission.completed", event);
+  server.addHook("agent.permission.after", async (event) => {
+    logHook("agent.permission.after", event);
   });
 
-  server.addHook("agent.archive.completed", async (event) => {
-    logHook("agent.archive.completed", event);
+  server.addHook("agent.archive.after", async (event) => {
+    logHook("agent.archive.after", event);
   });
 
   return () => {};

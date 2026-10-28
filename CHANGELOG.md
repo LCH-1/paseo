@@ -21,7 +21,7 @@ Voice settings now let you configure speech providers and download local models 
 
 ### Improved
 
-- Added `server.addHook` with `subject.operation.step` names and deprecated the previous plugin hook registration methods without changing their behavior ([#8081](https://github.com/getpaseo/paseo/pull/8081))
+- Added `server.addHook` with `subject.operation.position` names and the awaited `worktree.create.after` hook before setup and agents; deprecated the previous plugin hook registration methods without changing their behavior ([#8081](https://github.com/getpaseo/paseo/pull/8081))
 
 - Release eligible agent runtimes after one idle hour, resuming the saved session on the next prompt ([#7782](https://github.com/getpaseo/paseo/pull/7782))
 - Added a link back to the parent in subagent panes ([#7784](https://github.com/getpaseo/paseo/pull/7784))

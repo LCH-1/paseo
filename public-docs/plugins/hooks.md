@@ -14,7 +14,7 @@ Use `server.addHook(name, handler)` in `index.server.ts`. Hooks run while the pl
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 
 export default function contribute(server: PluginServerContext) {
-  const remove = server.addHook("agent.open.prepare", async ({ request }) => ({
+  const remove = server.addHook("agent.open.before", async ({ request }) => ({
     ...request,
     env: { ...request.env, REGION: "eu" },
   }));
@@ -24,31 +24,46 @@ export default function contribute(server: PluginServerContext) {
 
 ## Naming and timing
 
-Names follow `subject.operation.step`: the subject, the operation, then its step. `workspace` covers every workspace, whether backed by a directory or a git worktree.
+Names follow `subject.operation.position`: the subject, the operation, then `before` or `after`. The name identifies a lifecycle position. Whether Paseo waits is a per-hook property shown in the table below. `workspace` covers every workspace; `worktree` covers only git worktrees.
 
-- `prepare`: Paseo waits before doing the operation. The handler receives `{ request }` and may return a complete replacement request or `undefined`. Throwing, returning invalid data, or exceeding 30 seconds fails the operation with `Plugin <id> <hook> failed: …`.
-- `started`, `completed`: notifications Paseo does not wait for. The handler receives the event object and returns `Promise<void>`. Errors are logged against the plugin and the operation continues.
+- Waiting hooks finish before Paseo continues. Throwing, returning invalid data, or exceeding 30 seconds fails the operation with `Plugin <id> <hook> failed: …`. Request-changing hooks receive `{ request }` and may return a complete replacement request or `undefined`.
+- Notifications receive the event object and return `Promise<void>`. Paseo does not wait; errors are logged against the plugin and the operation continues. `agent.turn.before` and `agent.permission.before` are notifications fired when a turn starts or a permission becomes pending.
 
 All handlers must be async. Turn completion includes success, failure, and cancellation; inspect `outcome`. Permission completion includes every resolution; inspect `resolution`.
 
-Creating an agent happens once, and `agent.create.prepare` changes its saved configuration. Opening starts the provider process: the first run, resume after a daemon restart, reading history, importing an outside session, or reload. `agent.open.prepare` contributes launch-only environment, tools, and MCP servers each time. Creating opens the agent; opening an existing agent does not create it; closing ends the running instance. Opening a tab in the app is a separate action.
+Creating an agent happens once, and `agent.create.before` changes its saved configuration. Opening starts the provider process: the first run, resume after a daemon restart, reading history, importing an outside session, or reload. `agent.open.before` contributes launch-only environment, tools, and MCP servers each time. Creating opens the agent; opening an existing agent does not create it; closing ends the running instance. Opening a tab in the app is a separate action.
+
+`worktree.create.after` runs before the workspace is registered. It precedes `workspace.create.after`, and both precede the first agent's `agent.create.before` / `agent.open.before`.
+
+### Return early from a waiting hook
+
+Start detached work and return when the operation should continue immediately:
+
+```ts
+server.addHook("worktree.create.after", async ({ worktree }) => {
+  void warmCaches(worktree.path);
+});
+```
+
+Paseo only sees the returned promise, so detached work gets no error reporting and no cancellation `signal`.
 
 ## Hooks
 
-| Hook                          | Waits | Payload                                | Handler may change                       |
-| ----------------------------- | ----- | -------------------------------------- | ---------------------------------------- |
-| `workspace.create.prepare`    | yes   | `{ request }`                          | Entire create request                    |
-| `workspace.create.completed`  | no    | `{ workspace }`                        |                                          |
-| `workspace.archive.completed` | no    | `{ workspace }`                        |                                          |
-| `agent.create.prepare`        | yes   | `{ request: { config, env? } }`        | Saved config except `cwd`; `env`         |
-| `agent.create.completed`      | no    | `{ agent }`                            |                                          |
-| `agent.open.prepare`          | yes   | `{ request }`                          | Launch-only `env`, `tools`, `mcpServers` |
-| `agent.close.completed`       | no    | `{ agent }`                            |                                          |
-| `agent.archive.completed`     | no    | `{ agent, archivedAt }`                |                                          |
-| `agent.turn.started`          | no    | `{ agent, turnId }`                    |                                          |
-| `agent.turn.completed`        | no    | `{ agent, turnId, outcome, timeline }` |                                          |
-| `agent.permission.started`    | no    | `{ agent, request }`                   |                                          |
-| `agent.permission.completed`  | no    | `{ agent, requestId, resolution }`     |                                          |
+| Hook                      | Waits | Payload                                | Handler may change                             |
+| ------------------------- | ----- | -------------------------------------- | ---------------------------------------------- |
+| `workspace.create.before` | yes   | `{ request }`                          | Entire create request                          |
+| `workspace.create.after`  | no    | `{ workspace }`                        |                                                |
+| `workspace.archive.after` | no    | `{ workspace }`                        |                                                |
+| `worktree.create.after`   | yes   | `{ worktree }`                         | Files in the worktree; throw to abort creation |
+| `agent.create.before`     | yes   | `{ request: { config, env? } }`        | Saved config except `cwd`; `env`               |
+| `agent.create.after`      | no    | `{ agent }`                            |                                                |
+| `agent.open.before`       | yes   | `{ request }`                          | Launch-only `env`, `tools`, `mcpServers`       |
+| `agent.close.after`       | no    | `{ agent }`                            |                                                |
+| `agent.archive.after`     | no    | `{ agent, archivedAt }`                |                                                |
+| `agent.turn.before`       | no    | `{ agent, turnId }`                    |                                                |
+| `agent.turn.after`        | no    | `{ agent, turnId, outcome, timeline }` |                                                |
+| `agent.permission.before` | no    | `{ agent, request }`                   |                                                |
+| `agent.permission.after`  | no    | `{ agent, requestId, resolution }`     |                                                |
 
 ## Shared payloads
 
@@ -84,14 +99,14 @@ type PluginTurnOutcome =
 | `resolution` | SDK `AgentPermissionResponse`                                                          |
 | `archivedAt` | Timestamp string                                                                       |
 
-## workspace.create.prepare
+## workspace.create.before
 
 Receives `{ request }` with `source`, optional `title`, and `firstAgentContext`. You may replace the entire explicit create request; a throw, invalid result, or timeout fails creation. Existing workspaces and directory lookup/import are unaffected.
 
 ### Choose workspace isolation
 
 ```ts
-server.addHook("workspace.create.prepare", async ({ request }) => {
+server.addHook("workspace.create.before", async ({ request }) => {
   if (request.source.kind !== "directory") {
     return request;
   }
@@ -110,31 +125,45 @@ server.addHook("workspace.create.prepare", async ({ request }) => {
 **Result:** an explicit directory creation request becomes a worktree request. Existing workspaces
 and directory lookup/import operations are unaffected.
 
-## workspace.create.completed
+## workspace.create.after
 
 Fires after the workspace record is created and its directory is available. Receives `{ workspace }`.
 
 ```ts
-server.addHook("workspace.create.completed", async ({ workspace }) => {
+server.addHook("workspace.create.after", async ({ workspace }) => {
   console.log(workspace);
 });
 ```
 
-## workspace.archive.completed
+## workspace.archive.after
 
 Fires after archive state is saved. Receives `{ workspace }`; worktree cleanup can still be pending.
 
 ```ts
-server.addHook("workspace.archive.completed", async ({ workspace }) => {
+server.addHook("workspace.archive.after", async ({ workspace }) => {
   console.log(workspace);
 });
 ```
 
-## agent.create.prepare
+## worktree.create.after
+
+Paseo waits for this hook after a new git worktree exists and before workspace registration, setup, terminals, or agents. Receives `{ worktree: { path, branch, sourceCheckout } }`: the absolute worktree path, branch name, and source checkout directory. There is no workspace id yet. Return nothing; write files directly into the worktree. Throwing or exceeding 30 seconds aborts creation and removes the new worktree.
+
+This covers branch-off, branch checkout, and PR checkout creation. Restoring a missing archived worktree uses a separate recovery path and does not fire this hook.
+
+```ts
+import { copyFile } from "node:fs/promises";
+
+server.addHook("worktree.create.after", async ({ worktree }) => {
+  await copyFile(`${worktree.sourceCheckout}/.env`, `${worktree.path}/.env`);
+});
+```
+
+## agent.create.before
 
 Receives `{ request: { config, env? } }`. Config changes are saved and remain after the plugin is disabled or removed; `env` applies to the initial launch and is not saved. You cannot change `config.cwd`. A throw, invalid result, or timeout fails creation.
 
-**`agent.create.prepare.config`** uses `AgentSessionConfig`:
+**`agent.create.before.config`** uses `AgentSessionConfig`:
 
 | Fields                                        | Constraint                                                                 |
 | --------------------------------------------- | -------------------------------------------------------------------------- |
@@ -150,7 +179,7 @@ Receives `{ request: { config, env? } }`. Config changes are saved and remain af
 Add this callback inside `contribute(server)` to set the saved options for new Codex agents:
 
 ```ts
-server.addHook("agent.create.prepare", async ({ request }) => {
+server.addHook("agent.create.before", async ({ request }) => {
   if (request.config.provider !== "codex") {
     return request;
   }
@@ -177,21 +206,21 @@ server.addHook("agent.create.prepare", async ({ request }) => {
 The selected provider validates `providerOptions`. Explicit Codex sandbox and approval options
 override its mode presets.
 
-## agent.create.completed
+## agent.create.after
 
 Ordinary creation finishes. Receives `{ agent }`; import and resume do not fire it.
 
 ```ts
-server.addHook("agent.create.completed", async ({ agent }) => {
+server.addHook("agent.create.after", async ({ agent }) => {
   console.log(agent);
 });
 ```
 
-## agent.open.prepare
+## agent.open.before
 
 Receives `{ request }`; only `env`, `tools`, and `mcpServers` may change, for this launch. All other fields are read-only. A throw, invalid result, or timeout fails the open.
 
-**`agent.open.prepare` request example:**
+**`agent.open.before` request example:**
 
 ```json
 {
@@ -223,7 +252,7 @@ Receives `{ request }`; only `env`, `tools`, and `mcpServers` may change, for th
 ### Inject environment variables on every session opening
 
 ```ts
-server.addHook("agent.open.prepare", async ({ request }) => {
+server.addHook("agent.open.before", async ({ request }) => {
   return {
     ...request,
     env: {
@@ -234,17 +263,17 @@ server.addHook("agent.open.prepare", async ({ request }) => {
 });
 ```
 
-Session-open overrides are re-derived on every open. `agent.create.prepare.env` applies only to the
+Session-open overrides are re-derived on every open. `agent.create.before.env` applies only to the
 initial launch and is not saved in the agent's configuration.
 
 ### Inject MCP servers
 
-Use `agent.create.prepare.config.mcpServers` when the server should become part of the agent's saved
+Use `agent.create.before.config.mcpServers` when the server should become part of the agent's saved
 configuration. For a plugin-owned server, add this callback inside `contribute(server)`, replacing
 the placeholder URL with your MCP endpoint:
 
 ```ts
-server.addHook("agent.open.prepare", async ({ request }) => {
+server.addHook("agent.open.before", async ({ request }) => {
   if (request.provider !== "codex") return;
 
   return {
@@ -271,7 +300,7 @@ these servers. Install, disable, and reload changes reach existing agents throug
 
 ### Attach tools to agents
 
-Define a tool in `index.server.ts` and attach it in `server.addHook("agent.open.prepare", async handler)`.
+Define a tool in `index.server.ts` and attach it in `server.addHook("agent.open.before", async handler)`.
 This example gives `append_workspace_note` only to agents with the label `notes/enabled: "true"`:
 
 ```ts
@@ -295,7 +324,7 @@ const appendWorkspaceNote = defineAgentTool({
 });
 
 export default function contribute(server: PluginServerContext) {
-  server.addHook("agent.open.prepare", async ({ request }) => {
+  server.addHook("agent.open.before", async ({ request }) => {
     if (request.labels["notes/enabled"] !== "true") return;
     return { ...request, tools: [...request.tools, appendWorkspaceNote] };
   });
@@ -373,47 +402,47 @@ tool or another plugin's tool on the same agent fails the session open and names
 A duplicate name within one plugin also fails the session open. Agents the callback does not
 target are unaffected.
 
-| Change                                                         | When the agent receives it                                                                                                                                                                                 |
-| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Start, stop, or reload a plugin declaring `agent.open.prepare` | Open sessions become stale. Each reopens before its next idle prompt; a running turn continues without interruption. The next prompt after that reopen reuses the session.                                 |
-| Change which agents the callback targets                       | Run `paseo plugin reload agent-tools` after editing this example, then send the agent a prompt when it is idle.                                                                                            |
-| Apply immediately                                              | Call `await paseo.agents.ref(id).reload({ requestId: "reload-notes" })`. `requestId` is optional. This reopens the provider session, reruns hooks with `reason: "refresh"`, and interrupts a running turn. |
-| Read the current snapshot                                      | Call `await paseo.agents.ref(id).refresh()`. This reads state without reopening the session.                                                                                                               |
+| Change                                                        | When the agent receives it                                                                                                                                                                                 |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Start, stop, or reload a plugin declaring `agent.open.before` | Open sessions become stale. Each reopens before its next idle prompt; a running turn continues without interruption. The next prompt after that reopen reuses the session.                                 |
+| Change which agents the callback targets                      | Run `paseo plugin reload agent-tools` after editing this example, then send the agent a prompt when it is idle.                                                                                            |
+| Apply immediately                                             | Call `await paseo.agents.ref(id).reload({ requestId: "reload-notes" })`. `requestId` is optional. This reopens the provider session, reruns hooks with `reason: "refresh"`, and interrupts a running turn. |
+| Read the current snapshot                                     | Call `await paseo.agents.ref(id).refresh()`. This reads state without reopening the session.                                                                                                               |
 
 If an automatic reopen fails, the triggering prompt fails with that error. See the
 [complete agent-tools example](https://github.com/getpaseo/paseo/tree/main/plugin-examples/agent-tools).
 
-## agent.close.completed
+## agent.close.after
 
 A live agent runtime closes. Receives `{ agent }`.
 
 ```ts
-server.addHook("agent.close.completed", async ({ agent }) => {
+server.addHook("agent.close.after", async ({ agent }) => {
   console.log(agent);
 });
 ```
 
-## agent.archive.completed
+## agent.archive.after
 
 Archive state is saved. Receives `{ agent, archivedAt }`; runtime cleanup can still be pending.
 
 ```ts
-server.addHook("agent.archive.completed", async ({ agent, archivedAt }) => {
+server.addHook("agent.archive.after", async ({ agent, archivedAt }) => {
   console.log(agent, archivedAt);
 });
 ```
 
-## agent.turn.started
+## agent.turn.before
 
 A live turn starts. Receives `{ agent, turnId }`. History replay does not fire it.
 
 ```ts
-server.addHook("agent.turn.started", async ({ agent, turnId }) => {
+server.addHook("agent.turn.before", async ({ agent, turnId }) => {
   console.log(agent, turnId);
 });
 ```
 
-## agent.turn.completed
+## agent.turn.after
 
 A live turn completes, fails, or is canceled. Receives `{ agent, turnId, outcome, timeline }`. `outcome.kind` is `completed`, `failed`, or `canceled`. `timeline` is deprecated and always empty; fetch history through the SDK as below.
 
@@ -429,7 +458,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { latestOutputText } from "./server/inspect";
 
 export default function contribute(server: PluginServerContext) {
-  server.addHook("agent.turn.completed", async (event, context) => {
+  server.addHook("agent.turn.after", async (event, context) => {
     if (event.outcome.kind === "canceled") {
       return;
     }
@@ -458,7 +487,7 @@ Use `cursor` and `direction` to page further when your plugin needs more history
 This sends a new message with the existing SDK. Persistent matches keep sending follow-ups;
 add limits or delays in your plugin when needed. Attachments and tool effects are not replayed.
 
-## agent.permission.started
+## agent.permission.before
 
 A permission or question becomes pending. Receives `{ agent, request }`; `request` is an `AgentPermissionRequest`. Send the answer through the SDK.
 
@@ -471,7 +500,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { shellCommand } from "./server/inspect";
 
 export default function contribute(server: PluginServerContext) {
-  server.addHook("agent.permission.started", async (event, context) => {
+  server.addHook("agent.permission.before", async (event, context) => {
     const command = shellCommand(event.request);
     if (command === null) {
       return;
@@ -508,12 +537,12 @@ export default function contribute(server: PluginServerContext) {
 The regex is an example policy, not a shell parser. Permission requests can also be questions,
 plans, and mode changes; requesting permission does not end the turn.
 
-## agent.permission.completed
+## agent.permission.after
 
 A pending request is answered or cleared. Receives `{ agent, requestId, resolution }`; `resolution` is an `AgentPermissionResponse`.
 
 ```ts
-server.addHook("agent.permission.completed", async ({ agent, requestId, resolution }) => {
+server.addHook("agent.permission.after", async ({ agent, requestId, resolution }) => {
   console.log(agent, requestId, resolution);
 });
 ```
@@ -524,10 +553,10 @@ Agent hooks exclude the daemon's private disposable helpers. Public background w
 
 ```text
 Creation request
-  → agent.create.prepare hooks (plugin-ID order; registration order within each plugin)
+  → agent.create.before hooks (plugin-ID order; registration order within each plugin)
   → resolve defaults and validate provider configuration
   → derive launch configuration with Paseo runtime tools and daemon prompt
-  → agent.open.prepare hooks (same ordering; env and plugin-local tools and MCP servers)
+  → agent.open.before hooks (same ordering; env and plugin-local tools and MCP servers)
   → set PASEO_AGENT_ID and PASEO_AGENT_CWD
   → open provider session and save agent configuration
 ```
@@ -553,7 +582,7 @@ replaces that scope's prior value.
 | Registration result                | Idempotent remover, e.g. `const remove = server.addHook(...); remove();`                                         |
 | Reload, disable, removal, shutdown | Remaining registrations removed                                                                                  |
 | Unknown hook name                  | Registration fails                                                                                               |
-| Hook timeout                       | 30 seconds; aborts the signal. A prepare hook fails the pending operation; a notification handler logs an error. |
+| Hook timeout                       | 30 seconds; aborts the signal. A waiting hook fails the pending operation; a notification handler logs an error. |
 | Event-handler error                | Logged against plugin; original operation continues                                                              |
 | Event delivery                     | Live, best effort; no replay, persistence, or automatic retry                                                    |
 | Event concurrency                  | Different events may overlap; callback completion order is not guaranteed                                        |
@@ -562,7 +591,7 @@ replaces that scope's prior value.
 
 | Plugin                                                                                                 | Includes                                                                     |
 | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| [lifecycle-logger](https://github.com/getpaseo/paseo/tree/main/plugin-examples/lifecycle-logger)       | All twelve hooks; JSON logs with environment values redacted                 |
+| [lifecycle-logger](https://github.com/getpaseo/paseo/tree/main/plugin-examples/lifecycle-logger)       | All thirteen hooks; JSON logs with environment values redacted               |
 | [lifecycle-actions](https://github.com/getpaseo/paseo/tree/main/plugin-examples/lifecycle-actions)     | Follow-ups, permissions, environment, provider switching, worktree selection |
 | [agent-configuration](https://github.com/getpaseo/paseo/tree/main/plugin-examples/agent-configuration) | MCP injection and Codex sandbox/approval options                             |
 | [agent-tools](https://github.com/getpaseo/paseo/tree/main/plugin-examples/agent-tools)                 | Label-targeted tools and file operations in the plugin process               |
@@ -573,17 +602,17 @@ Read logger output with `paseo plugin logs lifecycle-logger` or the host's `daem
 
 The old registration methods are deprecated for removal after 2027-04-30. Existing plugins keep their behavior. Mixed old and new registrations within a plugin run in registration order. `addHook` accepts only the new names.
 
-| Old registration                                   | New registration                                              |
-| -------------------------------------------------- | ------------------------------------------------------------- |
-| `server.before("workspace.create", handler)`       | `server.addHook("workspace.create.prepare", asyncHandler)`    |
-| `server.on("workspace.created", handler)`          | `server.addHook("workspace.create.completed", asyncHandler)`  |
-| `server.on("workspace.archived", handler)`         | `server.addHook("workspace.archive.completed", asyncHandler)` |
-| `server.before("agent.create", handler)`           | `server.addHook("agent.create.prepare", asyncHandler)`        |
-| `server.on("agent.created", handler)`              | `server.addHook("agent.create.completed", asyncHandler)`      |
-| `server.before("agent.session_open", handler)`     | `server.addHook("agent.open.prepare", asyncHandler)`          |
-| `server.on("agent.closed", handler)`               | `server.addHook("agent.close.completed", asyncHandler)`       |
-| `server.on("agent.archived", handler)`             | `server.addHook("agent.archive.completed", asyncHandler)`     |
-| `server.on("agent.turn_started", handler)`         | `server.addHook("agent.turn.started", asyncHandler)`          |
-| `server.on("agent.turn_ended", handler)`           | `server.addHook("agent.turn.completed", asyncHandler)`        |
-| `server.on("agent.permission_requested", handler)` | `server.addHook("agent.permission.started", asyncHandler)`    |
-| `server.on("agent.permission_resolved", handler)`  | `server.addHook("agent.permission.completed", asyncHandler)`  |
+| Old registration                                   | New registration                                          |
+| -------------------------------------------------- | --------------------------------------------------------- |
+| `server.before("workspace.create", handler)`       | `server.addHook("workspace.create.before", asyncHandler)` |
+| `server.on("workspace.created", handler)`          | `server.addHook("workspace.create.after", asyncHandler)`  |
+| `server.on("workspace.archived", handler)`         | `server.addHook("workspace.archive.after", asyncHandler)` |
+| `server.before("agent.create", handler)`           | `server.addHook("agent.create.before", asyncHandler)`     |
+| `server.on("agent.created", handler)`              | `server.addHook("agent.create.after", asyncHandler)`      |
+| `server.before("agent.session_open", handler)`     | `server.addHook("agent.open.before", asyncHandler)`       |
+| `server.on("agent.closed", handler)`               | `server.addHook("agent.close.after", asyncHandler)`       |
+| `server.on("agent.archived", handler)`             | `server.addHook("agent.archive.after", asyncHandler)`     |
+| `server.on("agent.turn_started", handler)`         | `server.addHook("agent.turn.before", asyncHandler)`       |
+| `server.on("agent.turn_ended", handler)`           | `server.addHook("agent.turn.after", asyncHandler)`        |
+| `server.on("agent.permission_requested", handler)` | `server.addHook("agent.permission.before", asyncHandler)` |
+| `server.on("agent.permission_resolved", handler)`  | `server.addHook("agent.permission.after", asyncHandler)`  |

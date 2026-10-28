@@ -438,10 +438,10 @@ The [public reference](../public-docs/plugins/reference.md#icons) owns the autho
 ## Lifecycle hooks
 
 Server entries register async handlers with `server.addHook(name, handler)`, returning a cleanup
-function. Names follow `subject.operation.step`: `prepare` waits and may replace `{ request }`;
-`started` and `completed` notify without delaying the operation. The [hooks reference](../public-docs/plugins/hooks.md)
-owns payloads, ordering, failure behavior, and examples. `agent.create.prepare` edits saved
-configuration; `agent.open.prepare` contributes launch-only `env`, `tools`, and `mcpServers` on
+function. Names follow `subject.operation.position`, ending in `before` or `after`. Waiting is a per-hook
+registry property, independent of position. The [hooks reference](../public-docs/plugins/hooks.md)
+owns payloads, ordering, failure behavior, and examples. `agent.create.before` edits saved
+configuration; `agent.open.before` contributes launch-only `env`, `tools`, and `mcpServers` on
 every open. Executable tool definitions stay in the plugin process; only metadata crosses the boundary.
 
 Emit from the operation owner, not a client subscription. Provider history replay must not trigger
