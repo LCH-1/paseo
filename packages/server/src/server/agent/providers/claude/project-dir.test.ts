@@ -5,9 +5,23 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { getSessionInfo } from "@anthropic-ai/claude-agent-sdk";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 
-import { claudeProjectDir, claudeProjectDirSync } from "./project-dir.js";
+import { claudeConfigDir, claudeProjectDir, claudeProjectDirSync } from "./project-dir.js";
+
+test("an empty default-profile override resolves history under the user home", async () => {
+  vi.stubEnv("CLAUDE_CONFIG_DIR", "");
+  try {
+    const cwd = join(tmpdir(), "paseo-empty-profile-history");
+    const configDir = join(homedir(), ".claude");
+    expect(claudeConfigDir({ CLAUDE_CONFIG_DIR: "" })).toBe(configDir);
+    expect(claudeConfigDir({ CLAUDE_CONFIG_DIR: "custom-profile" })).toBe("custom-profile");
+    expect(claudeProjectDirSync(cwd)).toBe(claudeProjectDirSync(cwd, { configDir }));
+    await expect(claudeProjectDir(cwd)).resolves.toBe(claudeProjectDirSync(cwd, { configDir }));
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
 
 // Parity oracle: the Claude SDK's getSessionInfo({ dir }) canonicalizes the
 // given dir with the SDK's own encoder and looks for `<sessionId>.jsonl` under
@@ -50,7 +64,7 @@ const cases: ParityCase[] = [
       const real = await ensureDir(join(workspaceRoot, "real-target"));
       const link = join(workspaceRoot, "via-symlink");
       if (!existsSync(link)) {
-        await symlink(real, link);
+        await symlink(real, link, process.platform === "win32" ? "junction" : "dir");
       }
       return link;
     },

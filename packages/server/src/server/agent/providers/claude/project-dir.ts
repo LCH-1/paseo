@@ -108,7 +108,7 @@ function hashSuffix(input: string): string {
 
 // Claude Code keeps its settings and transcripts here for a process launched with `env`.
 export function claudeConfigDir(env: NodeJS.ProcessEnv): string {
-  return env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+  return env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
 }
 
 function resolveConfigDir(options?: ClaudeProjectDirOptions): string {
