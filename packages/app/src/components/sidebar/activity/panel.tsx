@@ -344,7 +344,12 @@ const styles = StyleSheet.create((theme) => ({
   tabs: {
     flexDirection: "row",
     gap: theme.spacing[1],
-    padding: theme.spacing[2],
+    margin: theme.spacing[2],
+    padding: theme.spacing[1],
+    backgroundColor: theme.colors.surface2,
+    borderWidth: 1,
+    borderColor: theme.colors.borderAccent,
+    borderRadius: theme.borderRadius.xl,
   },
   tab: {
     flex: 1,
@@ -353,11 +358,19 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: theme.borderRadius.lg,
+    borderWidth: 1,
+    borderColor: "transparent",
     paddingHorizontal: theme.spacing[1],
   },
-  selectedTab: { backgroundColor: theme.colors.surfaceSidebarSelected },
+  selectedTab: {
+    backgroundColor: theme.colors.sidebarFilterSelectedBackground,
+    borderColor: theme.colors.sidebarFilterSelectedBorder,
+  },
   tabLabel: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
-  selectedLabel: { color: theme.colors.foreground },
+  selectedLabel: {
+    color: theme.colors.sidebarFilterSelectedForeground,
+    fontWeight: theme.fontWeight.medium,
+  },
   listContent: { paddingHorizontal: theme.spacing[2], paddingBottom: theme.spacing[4] },
   row: {
     padding: theme.spacing[2],
