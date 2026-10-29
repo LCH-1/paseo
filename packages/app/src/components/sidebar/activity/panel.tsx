@@ -78,13 +78,15 @@ export function SidebarActivityPanel({
 
   return (
     <View style={styles.container}>
-      <View style={styles.tabs} accessibilityRole="tablist" testID="sidebar-activity-tabs">
-        {activityViews.map((tab) => {
-          const selected = view === tab;
-          let label = t(`sidebar.activity.${tab}`);
-          if (tab !== "all") label = `${label} ${groups[tab].length}`;
-          return <ActivityTab key={tab} tab={tab} selected={selected} label={label} />;
-        })}
+      <View style={styles.tabsSection} testID="sidebar-activity-filter-section">
+        <View style={styles.tabs} accessibilityRole="tablist" testID="sidebar-activity-tabs">
+          {activityViews.map((tab) => {
+            const selected = view === tab;
+            let label = t(`sidebar.activity.${tab}`);
+            if (tab !== "all") label = `${label} ${groups[tab].length}`;
+            return <ActivityTab key={tab} tab={tab} selected={selected} label={label} />;
+          })}
+        </View>
       </View>
       <RetainedPanel active={showingAll}>{children}</RetainedPanel>
       <RetainedPanel active={!showingAll}>
@@ -340,6 +342,13 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.destructive,
     fontSize: theme.fontSize.sm,
     padding: theme.spacing[2],
+  },
+  tabsSection: {
+    backgroundColor: theme.colors.surface1,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.colors.foregroundExtraMuted,
+    paddingBottom: theme.spacing[1],
+    marginBottom: theme.spacing[2],
   },
   tabs: {
     flexDirection: "row",
