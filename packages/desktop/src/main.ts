@@ -980,6 +980,7 @@ async function bootstrap(): Promise<void> {
     },
   });
   ensureNotificationCenterRegistration();
+  session.defaultSession.setDownloadPath(app.getPath("desktop"));
   registerDaemonManager();
   registerWindowManager({ mode: DESKTOP_WINDOW_CHROME_MODE });
   registerDialogHandlers();
