@@ -55,6 +55,17 @@ test("listed built-ins resolve to matching manifests and compile", async () => {
   }
 });
 
+test("retired Windows plugin ID is reserved without starting a second usage engine", async () => {
+  const loader = new BuiltinPluginLoader();
+  expect(loader.ids.has("claude-windows-usage")).toBe(true);
+  const started: string[] = [];
+  await loader.load(async ({ id }) => {
+    started.push(id);
+  });
+  expect(started).toContain("claude-usage-source");
+  expect(started).not.toContain("claude-windows-usage");
+});
+
 test("listed client bundle is published while plugins are disabled; unlisted directory is inert", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "paseo-builtin-fixture-"));
   roots.push(root);

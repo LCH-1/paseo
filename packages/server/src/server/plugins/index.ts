@@ -1,4 +1,5 @@
 import type { PluginLifecycle } from "./lifecycle/index.js";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { stat, rm } from "node:fs/promises";
 import type pino from "pino";
@@ -584,11 +585,14 @@ export class PluginService {
 
   private publishUsageSources(pluginId: string): void {
     const metadata = this.runtime.getUsageSourceRegistrations(pluginId);
+    // Groups cannot cross plugin ownership or survive replacement of that process.
+    const generation = `${pluginId}:${randomUUID()}`;
     const registered: string[] = [];
     try {
       for (const source of metadata) {
         this.usageSources.register({
           id: source.id,
+          cacheGroup: source.cacheGroup ? `${generation}:${source.cacheGroup}` : undefined,
           label: source.label,
           icon: source.icon,
           discover: async (scope) => {

@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 export const builtinPlugins = [
   "antigravity-provider",
   "claude-usage-source",
-  "claude-windows-usage",
   "codex-usage-source",
   "copilot-usage-source",
   "cursor-usage-source",
@@ -17,6 +16,11 @@ export const builtinPlugins = [
   "opencode-go-usage-source",
   "zai-usage-source",
 ] as const;
+
+/** Retired external identities whose compatibility sources now belong to a built-in. */
+export const builtinPluginReplacements: Readonly<Record<string, string>> = {
+  "claude-windows-usage": "claude-usage-source",
+};
 
 export function resolveBuiltinPluginsRoot(moduleUrl: string | URL = import.meta.url): string {
   const moduleDir = path.dirname(fileURLToPath(moduleUrl));
@@ -45,7 +49,12 @@ export class BuiltinPluginLoader {
     private readonly root = resolveBuiltinPluginsRoot(),
     private readonly list: readonly string[] = builtinPlugins,
   ) {
-    this.ids = new Set(list);
+    this.ids = new Set([
+      ...list,
+      ...Object.entries(builtinPluginReplacements)
+        .filter(([, replacement]) => list.includes(replacement))
+        .map(([id]) => id),
+    ]);
   }
 
   async load(start: (plugin: BuiltinPlugin) => Promise<void>): Promise<void> {

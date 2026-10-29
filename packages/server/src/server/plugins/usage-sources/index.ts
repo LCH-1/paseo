@@ -13,6 +13,7 @@ import {
 
 export interface UsageSource {
   id: string;
+  cacheGroup?: string;
   label: string;
   icon?: string;
   discover(scope: UsageScope): Promise<unknown>;
@@ -85,6 +86,10 @@ export class UsageSourceRegistry {
     for (const key of this.successful.keys())
       if (key.startsWith(`${id}:`)) this.successful.delete(key);
     for (const key of this.pending.keys()) if (key.startsWith(`${id}:`)) this.pending.delete(key);
+    const active = this.activeCacheKeys();
+    for (const map of [this.cache, this.successful, this.pending]) {
+      for (const key of map.keys()) if (!active.has(key)) map.delete(key);
+    }
   }
 
   async listReports(options: ListUsageReportsOptions = {}): Promise<UsageReportEntry[]> {
@@ -265,11 +270,25 @@ export class UsageSourceRegistry {
   private fetchId(id: string, known: KnownReport, forceRefresh = false): Promise<UsageReportEntry> {
     // Account identity groups cards; the ordered login set identifies a fetch result.
     const cacheKey = cacheIdentity(id, known);
+    const present = (entry: UsageReportEntry): UsageReportEntry =>
+      entry.id === id &&
+      entry.sourceLabel === known.source.label &&
+      entry.icon === known.source.icon &&
+      entry.account.label === known.label
+        ? entry
+        : {
+            ...entry,
+            id,
+            sourceId: known.source.id,
+            sourceLabel: known.source.label,
+            icon: known.source.icon,
+            account: { label: known.label },
+          };
     const cached = this.cache.get(cacheKey);
     if (!forceRefresh && cached && this.now() - cached.at < this.ttlMs)
-      return Promise.resolve(cached.entry);
+      return Promise.resolve(present(cached.entry));
     const pending = this.pending.get(cacheKey);
-    if (pending) return pending;
+    if (pending) return pending.then(present);
     const request = (async () => {
       const fetchedAt = new Date(this.now()).toISOString();
       const outcome = await this.fetchWithFallback(known);
@@ -394,7 +413,10 @@ function loginKey(login: Login): string {
 }
 
 function cacheIdentity(id: string, known: KnownReport): string {
-  return `${id}:${createHash("sha256")
+  const identity = known.source.cacheGroup
+    ? `${known.source.cacheGroup}:${id.slice(known.source.id.length + 1)}`
+    : id;
+  return `${identity}:${createHash("sha256")
     .update(JSON.stringify([known.label, known.logins.map(loginKey)]))
     .digest("hex")}`;
 }

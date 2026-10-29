@@ -26,6 +26,7 @@ export interface PluginProviderMetadata {
 
 export interface PluginUsageSourceMetadata {
   id: string;
+  cacheGroup?: string;
   label: string;
   icon?: string;
 }
@@ -122,6 +123,10 @@ const providerMetadataSchema = z
 const usageSourceMetadataSchema = z
   .object({
     id: z.string().min(1),
+    cacheGroup: z
+      .string()
+      .regex(/^[a-z][a-z0-9._-]*$/)
+      .optional(),
     label: z.string().min(1),
     icon: z.string().optional(),
   })

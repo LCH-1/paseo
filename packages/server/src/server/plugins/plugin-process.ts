@@ -140,6 +140,7 @@ export function createPluginWorker(options: {
     const id = source.id.trim();
     if (
       !/^[a-z][a-z0-9._-]*$/.test(id) ||
+      (source.cacheGroup !== undefined && !/^[a-z][a-z0-9._-]*$/.test(source.cacheGroup)) ||
       !source.label.trim() ||
       typeof source.fetch !== "function" ||
       typeof source.discover !== "function" ||
@@ -298,6 +299,7 @@ export function createPluginWorker(options: {
         .sort((a, b) => a.id.localeCompare(b.id))
         .map(async (source) => ({
           id: source.id,
+          cacheGroup: source.cacheGroup,
           label: source.label,
           icon: source.icon
             ? await readPluginProviderIcon(message.pluginDirectory, source.icon)

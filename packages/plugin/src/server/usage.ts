@@ -77,6 +77,8 @@ export type UsageScope = z.infer<typeof UsageScopeSchema>;
 
 export interface UsageSourceRegistration {
   id: string;
+  /** Sources owned by this plugin may share fetches while retaining their report IDs. */
+  cacheGroup?: string;
   label: string;
   icon?: string;
   input: ZodType;

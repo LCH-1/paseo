@@ -1,5 +1,47 @@
 import { expect, test } from "vitest";
 import { UsageSourceRegistry } from "./index.js";
+
+test("compatibility sources share one fetch and freshness while retaining their report identities", async () => {
+  let calls = 0;
+  const registry = new UsageSourceRegistry();
+  const fetch = async () => {
+    calls++;
+    return { status: "available", windows: [] };
+  };
+  const discover = async () => [{ key: "same-account", input: { store: "fixture" } }];
+  for (const id of ["claude", "claude-windows"])
+    registry.register({
+      id,
+      cacheGroup: "owned-generation:claude",
+      label: "Claude",
+      discover,
+      fetch,
+    });
+  const first = await registry.listReports();
+  expect(calls).toBe(1);
+  expect(first.map(({ id }) => id).sort()).toEqual([
+    "claude-windows:same-account",
+    "claude:same-account",
+  ]);
+  expect(first.map(({ sourceId }) => sourceId).sort()).toEqual(["claude", "claude-windows"]);
+  await registry.listReports();
+  expect(calls).toBe(1);
+  await registry.listReports({ forceRefresh: true });
+  expect(calls).toBe(2);
+  registry.unregister("claude-windows");
+  expect((await registry.listReports()).map(({ sourceId }) => sourceId)).toEqual(["claude"]);
+  expect(calls).toBe(2);
+  registry.unregister("claude");
+  registry.register({
+    id: "claude",
+    cacheGroup: "replacement-generation:claude",
+    label: "Claude",
+    discover,
+    fetch,
+  });
+  await registry.listReports();
+  expect(calls).toBe(3);
+});
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

@@ -381,8 +381,6 @@ export async function discover(
     scope.kind === "global" ? await globalRoutes(lookup) : await sessionRoutes(scope, lookup);
   const accounts: UsageAccount[] = [];
   for (const input of candidates) {
-    const credentials = await resolveClaudeCredentials(input, lookup);
-    if (!credentials) continue;
     const harness = {
       pi: "Pi",
       omp: "OMP",
@@ -391,6 +389,17 @@ export async function discover(
       "windows-credman": "Claude",
     }[input.route.store];
     const fallback = { key: hashAccountKey(JSON.stringify(input.route)), harness, input };
+    let credentials;
+    try {
+      credentials = await resolveClaudeCredentials(input, lookup);
+    } catch {
+      accounts.push(fallback);
+      continue;
+    }
+    if (!credentials) {
+      if (input.route.store === "windows-credman") accounts.push(fallback);
+      continue;
+    }
     if (credentials.expires !== undefined && credentials.expires <= (lookup.now ?? Date.now)()) {
       accounts.push(fallback);
       continue;
@@ -401,7 +410,16 @@ export async function discover(
         fetchApi,
         lookup.now ?? Date.now,
       );
-      accounts.push("status" in profile ? fallback : { ...profile, harness, input });
+      accounts.push(
+        "status" in profile
+          ? fallback
+          : {
+              key: profile.key,
+              ...(profile.label ? { label: profile.label } : {}),
+              harness,
+              input,
+            },
+      );
     } catch {
       // Keep the login visible; fetching usage reports the vendor failure.
       accounts.push(fallback);
@@ -430,8 +448,18 @@ async function claudeRoute(lookup: ClaudeCredentialLookup): Promise<UsageInput> 
     const env = lookup.env ?? process.env;
     const directory = env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? env.CLAUDE_CONFIG_DIR;
     const service = `${CLAUDE_KEYCHAIN_SERVICE}${directory ? `-${hashAccountKey(directory.normalize("NFC")).slice(0, 8)}` : ""}`;
-    if (await windowsCredentialRecord(service, lookup))
-      return { route: { store: "windows-credman", service } };
+    const input = { route: { store: "windows-credman" as const, service } };
+    try {
+      if ((await (lookup.readWindowsCredentials ?? readWindowsCredentials)(service)) !== null)
+        return input;
+    } catch {
+      return input;
+    }
+    if (
+      env.CLAUDE_CODE_FORCE_WINDOWS_CREDMAN === "1" &&
+      !(await readCredentialFile(claudeCredentialPath(lookup)))
+    )
+      return input;
   }
   const route = claudeKeychainRoute(lookup);
   return (await keychainCredentialRecord(lookup, route))
@@ -674,10 +702,30 @@ function formatWait(ms: number): string {
 }
 
 // The OAuth usage endpoint meters the active organization selected by the token.
-type ClaudeIdentity = { key: string; label?: string } | { status: number };
-const PROFILE_TTL_MS = 300_000;
+export const accessProfileSchema = z.object({
+  account: z.object({
+    uuid: z.string().min(1),
+    email: z.string().optional(),
+    has_claude_pro: z.boolean().optional(),
+    has_claude_max: z.boolean().optional(),
+  }),
+  organization: z.object({
+    uuid: z.string().min(1),
+    organization_type: z.string().optional(),
+    subscription_status: z.string().nullish(),
+    claude_code_trial_ends_at: z.string().nullish(),
+  }),
+});
+type ClaudeIdentity =
+  | { key: string; label?: string; profile: z.output<typeof accessProfileSchema> }
+  | { status: number };
+const PROFILE_TTL_MS = 60_000;
+const REJECTED_PROFILE_TTL_MS = 5_000;
 const PROFILE_CACHE_LIMIT = 128;
-const profileCache = new Map<string, { at: number; result: Promise<ClaudeIdentity> }>();
+const profileCache = new Map<
+  string,
+  { at: number; ttl: number; result: Promise<ClaudeIdentity> }
+>();
 
 function cachedProfile(token: string, now: number): Promise<ClaudeIdentity> | undefined {
   pruneProfileCache(now);
@@ -686,7 +734,7 @@ function cachedProfile(token: string, now: number): Promise<ClaudeIdentity> | un
 
 function pruneProfileCache(now: number): void {
   for (const [key, entry] of profileCache) {
-    if (now - entry.at >= PROFILE_TTL_MS) profileCache.delete(key);
+    if (now - entry.at >= entry.ttl) profileCache.delete(key);
   }
 }
 
@@ -706,6 +754,7 @@ async function readProfile(
   }
   const request = (async () => {
     const response = await fetchApi("https://api.anthropic.com/api/oauth/profile", {
+      redirect: "error",
       signal: AbortSignal.timeout(15_000),
       headers: {
         Authorization: `Bearer ${token}`,
@@ -713,25 +762,83 @@ async function readProfile(
         "anthropic-beta": CLAUDE_OAUTH_BETA,
       },
     });
-    if (response.status === 401 || response.status === 403) return { status: response.status };
+    if ([401, 402, 403].includes(response.status)) return { status: response.status };
     if (!response.ok) throw new Error(`Claude profile API returned ${response.status}`);
-    const profile = z
+    const raw: unknown = await response.json();
+    const basic = z
       .object({
         account: z.object({ uuid: z.string().min(1), email: z.string().optional() }),
         organization: z.object({ uuid: z.string().min(1) }),
       })
-      .parse(await response.json());
+      .parse(raw);
+    // Additional billing fields must never change an existing usage card's
+    // identity when the vendor changes one of those optional fields.
+    const access = accessProfileSchema.safeParse(raw);
+    const profile = access.success ? access.data : basic;
     const account = profile.account;
     return {
       key: `${account.uuid}.${profile.organization.uuid}`,
+      profile,
       ...(account.email ? { label: account.email } : {}),
     };
   })();
-  profileCache.set(tokenHash, { at: now(), result: request });
+  profileCache.set(tokenHash, { at: now(), ttl: PROFILE_TTL_MS, result: request });
   try {
-    return await request;
+    const result = await request;
+    const entry = profileCache.get(tokenHash);
+    if ("status" in result && entry?.result === request) entry.ttl = REJECTED_PROFILE_TTL_MS;
+    return result;
   } catch (error) {
     if (profileCache.get(tokenHash)?.result === request) profileCache.delete(tokenHash);
     throw error;
   }
+}
+
+/** Returns only account metadata; credential paths and tokens never cross this RPC. */
+export async function profilesForProviders(
+  ids: string[],
+  fetchApi: typeof fetch = fetch,
+  lookup: ClaudeCredentialLookup = {},
+) {
+  const configured = await configuredClaudeProviders(lookup);
+  return Promise.all(
+    [...new Set(ids)].map(async (providerId) => {
+      try {
+        const provider = configured.find((entry) => entry.id === providerId);
+        if (!provider) return { providerId, status: "missing" as const };
+        const scoped = {
+          ...lookup,
+          env: { ...(lookup.env ?? process.env), ...provider.env },
+          claudeHome: provider.env.CLAUDE_CONFIG_DIR ?? lookup.claudeHome,
+        };
+        const credentials = await resolveClaudeCredentials(await claudeRoute(scoped), scoped);
+        if (
+          !credentials ||
+          (credentials.expires !== undefined && credentials.expires <= (lookup.now ?? Date.now)())
+        )
+          return { providerId, status: "missing" as const };
+        const result = await readProfile(
+          credentials.oauth.accessToken,
+          fetchApi,
+          lookup.now ?? Date.now,
+        );
+        return "status" in result
+          ? { providerId, status: result.status }
+          : {
+              providerId,
+              status: "ready" as const,
+              profile: result.profile,
+              identity: hashAccountKey(
+                JSON.stringify([
+                  "claude",
+                  result.profile.account.uuid,
+                  result.profile.organization.uuid,
+                ]),
+              ),
+            };
+      } catch {
+        return { providerId, status: "unknown" as const };
+      }
+    }),
+  );
 }

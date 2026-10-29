@@ -3,7 +3,8 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchUsage, discover } from "./usage.js";
+import { fetchUsage, discover, profilesForProviders } from "./usage.js";
+import { configuredClaudeProviders } from "./claude-provider-config.js";
 import { inputSchema, type UsageInput } from "../shared/input.js";
 import { hashAccountKey, type UsageReport } from "@getpaseo/plugin/server/usage";
 
@@ -11,6 +12,52 @@ vi.mock("./windows-credentials.js", () => ({ readWindowsCredentials: vi.fn(async
 vi.mock("./claude-provider-config.js", () => ({
   configuredClaudeProviders: vi.fn(async () => []),
 }));
+
+it("configured profiles share discovery and access metadata without returning credentials or reading arbitrary IDs", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "paseo-common-profile-"));
+  const token = "common-profile-fixture-token";
+  const providers = vi.mocked(configuredClaudeProviders);
+  providers.mockResolvedValue([
+    { id: "claude", env: { CLAUDE_CONFIG_DIR: directory } },
+    { id: "claude-alias", env: { CLAUDE_CONFIG_DIR: directory } },
+  ]);
+  try {
+    writeClaudeCredentials(directory, token);
+    let calls = 0;
+    const fetchApi: typeof fetch = async () => {
+      calls++;
+      return jsonResponse({
+        account: {
+          uuid: "common-profile-account",
+          email: "fixture@example.invalid",
+          has_claude_max: true,
+          ignoredPrivateField: "must-not-return",
+        },
+        organization: { uuid: "org", subscription_status: "active" },
+        accessToken: token,
+      });
+    };
+    const results = await profilesForProviders(
+      ["claude", "claude-alias", "arbitrary-path"],
+      fetchApi,
+      { platform: "linux", env: {} },
+    );
+    expect(calls).toBe(1);
+    expect(results[0]?.status).toBe("ready");
+    expect(results[2]).toEqual({ providerId: "arbitrary-path", status: "missing" });
+    expect(JSON.stringify(results)).not.toContain(token);
+    expect(JSON.stringify(results)).not.toContain("must-not-return");
+    await discover(
+      { kind: "session", provider: "claude", env: { CLAUDE_CONFIG_DIR: directory } },
+      { platform: "linux", env: {}, claudeHome: directory },
+      fetchApi,
+    );
+    expect(calls).toBe(1);
+  } finally {
+    providers.mockResolvedValue([]);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function credentialInput(directory: string): UsageInput {
   return { route: { store: "claude", path: join(directory, ".credentials.json") } };
@@ -759,6 +806,26 @@ it("expires cached token profiles after five minutes", async () => {
   await accountFor(input, fetchProfile, () => now, lookup);
   expect(calls).toBe(2);
 });
+
+it.each([401, 403])(
+  "a temporary profile rejection HTTP %i cannot hide a recovered login for five minutes",
+  async (status) => {
+    let now = 0;
+    let calls = 0;
+    const lookup = tokenLookup(`temporary-profile-rejection-${status}`);
+    const input = credentialInput(lookup.claudeHome);
+    const api: typeof fetch = async () => {
+      calls++;
+      return calls === 1
+        ? new Response(null, { status })
+        : jsonResponse({ account: { uuid: "recovered" }, organization: { uuid: "org" } });
+    };
+    await accountFor(input, api, () => now, lookup);
+    now = 5_001;
+    expect(await accountFor(input, api, () => now, lookup)).toEqual({ key: "recovered.org" });
+    expect(calls).toBe(2);
+  },
+);
 
 it("discovery and fetch share the explicit macOS keychain route", async () => {
   const directory = mkdtempSync(join(tmpdir(), "claude-keychain-identity-"));

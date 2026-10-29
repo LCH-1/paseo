@@ -54,12 +54,15 @@ export const readCredential: ReadCredential = (target) =>
         reject(new Error("Claude Windows credential store could not be read"));
         return;
       }
+      let value: string | null;
       try {
         const result = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        resolve(result === null ? null : Buffer.from(result.value, "base64").toString("utf8"));
+        value = result === null ? null : Buffer.from(result.value, "base64").toString("utf8");
       } catch {
         reject(new Error("Invalid Claude Windows credential store response"));
+        return;
       }
+      resolve(value);
     };
     const timer = setTimeout(() => finish(false), 20_000);
     child.stdout.on("data", (chunk: Buffer) => {
@@ -78,6 +81,21 @@ export async function readWindowsCredentials(
   service: string,
   read: ReadCredential = readCredential,
 ): Promise<unknown | null> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await readWindowsSnapshot(service, read);
+    } catch (error) {
+      const changing =
+        error instanceof SyntaxError ||
+        (error instanceof Error &&
+          /^(?:Invalid split|Incomplete split|Changed split)/.test(error.message));
+      if (!changing || attempt >= 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 75));
+    }
+  }
+}
+
+async function readWindowsSnapshot(service: string, read: ReadCredential): Promise<unknown | null> {
   const name = service + "/claude-code-user";
   const meta = await read(name + "#m");
   if (!meta) {
@@ -86,6 +104,8 @@ export async function readWindowsCredentials(
   }
   const info = JSON.parse(meta);
   if (
+    !info ||
+    typeof info !== "object" ||
     !Number.isInteger(info.n) ||
     info.n < 1 ||
     info.n > 256 ||
@@ -100,5 +120,7 @@ export async function readWindowsCredentials(
   const encoded = chunks.map((chunk) => chunk ?? "").join("");
   if (chunks.some((chunk) => chunk === null) || encoded.length !== info.l)
     throw new Error("Incomplete split Claude Windows credentials");
+  if ((await read(name + "#m")) !== meta)
+    throw new Error("Changed split Claude Windows credentials");
   return JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
 }
