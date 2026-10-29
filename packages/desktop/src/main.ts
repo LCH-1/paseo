@@ -135,6 +135,9 @@ const bootstrapComplete = new Promise<void>((resolve) => {
 let bootstrapIsComplete = false;
 
 app.setName(APP_NAME);
+if (process.platform === "win32") {
+  app.setAppUserModelId("sh.paseo.desktop");
+}
 log.info("[desktop] app startup", {
   version: app.getVersion(),
   platform: process.platform,
