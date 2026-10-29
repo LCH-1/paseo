@@ -82,9 +82,11 @@ export function SidebarActivityPanel({
         <View style={styles.tabs} accessibilityRole="tablist" testID="sidebar-activity-tabs">
           {activityViews.map((tab) => {
             const selected = view === tab;
-            let label = t(`sidebar.activity.${tab}`);
-            if (tab !== "all") label = `${label} ${groups[tab].length}`;
-            return <ActivityTab key={tab} tab={tab} selected={selected} label={label} />;
+            const label = t(`sidebar.activity.${tab}`);
+            const count = tab === "all" ? null : groups[tab].length;
+            return (
+              <ActivityTab key={tab} tab={tab} selected={selected} label={label} count={count} />
+            );
           })}
         </View>
       </View>
@@ -185,28 +187,37 @@ const ActivityTab = memo(function ActivityTab({
   tab,
   selected,
   label,
+  count,
 }: {
   tab: SidebarActivityView;
   selected: boolean;
   label: string;
+  count: number | null;
 }) {
   const setView = useSidebarActivityStore((state) => state.setView);
   const select = useCallback(() => setView(tab), [setView, tab]);
   const accessibilityState = useMemo(() => ({ selected }), [selected]);
+  const accessibilityLabel = count === null ? label : `${label} ${count}`;
   return (
     <PressHighlight
       testID={`sidebar-activity-${tab}`}
       accessibilityRole="tab"
       accessibilityState={accessibilityState}
       aria-selected={selected}
-      accessibilityLabel={label}
+      accessibilityLabel={accessibilityLabel}
       onPress={select}
-      style={[styles.tab, selected && styles.selectedTab]}
+      style={styles.tab}
       highlightStyle={styles.pressed}
     >
       <Text numberOfLines={1} style={[styles.tabLabel, selected && styles.selectedLabel]}>
         {label}
       </Text>
+      {count !== null ? (
+        <View style={[styles.countBadge, selected && styles.selectedCountBadge]}>
+          <Text style={[styles.countLabel, selected && styles.selectedLabel]}>{count}</Text>
+        </View>
+      ) : null}
+      {selected ? <View style={styles.activeIndicator} /> : null}
     </PressHighlight>
   );
 });
@@ -344,42 +355,53 @@ const styles = StyleSheet.create((theme) => ({
     padding: theme.spacing[2],
   },
   tabsSection: {
-    backgroundColor: theme.colors.surface1,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.foregroundExtraMuted,
-    paddingBottom: theme.spacing[1],
-    marginBottom: theme.spacing[2],
+    paddingHorizontal: theme.spacing[3],
+    paddingTop: theme.spacing[1],
+    paddingBottom: theme.spacing[2],
+    marginBottom: theme.spacing[1],
   },
   tabs: {
     flexDirection: "row",
     gap: theme.spacing[1],
-    margin: theme.spacing[2],
-    padding: theme.spacing[1],
-    backgroundColor: theme.colors.surface2,
-    borderWidth: 1,
-    borderColor: theme.colors.borderAccent,
-    borderRadius: theme.borderRadius.xl,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.colors.surface3,
   },
   tab: {
     flex: 1,
     minWidth: 0,
     minHeight: density.rowHeight,
+    flexDirection: "row",
+    gap: theme.spacing[1],
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: theme.borderRadius.lg,
-    borderWidth: 1,
-    borderColor: "transparent",
+    borderRadius: theme.borderRadius.md,
     paddingHorizontal: theme.spacing[1],
-  },
-  selectedTab: {
-    backgroundColor: theme.colors.sidebarFilterSelectedBackground,
-    borderColor: theme.colors.sidebarFilterSelectedBorder,
   },
   tabLabel: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
   selectedLabel: {
     color: theme.colors.sidebarFilterSelectedForeground,
     fontWeight: theme.fontWeight.medium,
   },
+  activeIndicator: {
+    position: "absolute",
+    bottom: -1,
+    left: theme.spacing[2],
+    right: theme.spacing[2],
+    height: 2,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.sidebarFilterSelectedBorder,
+  },
+  countBadge: {
+    minWidth: theme.spacing[4] + theme.spacing[1],
+    height: theme.spacing[4] + theme.spacing[1],
+    paddingHorizontal: theme.spacing[1],
+    borderRadius: theme.borderRadius.full,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: theme.colors.surface2,
+  },
+  selectedCountBadge: { backgroundColor: theme.colors.sidebarFilterSelectedBackground },
+  countLabel: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
   listContent: { paddingHorizontal: theme.spacing[2], paddingBottom: theme.spacing[4] },
   row: {
     padding: theme.spacing[2],
