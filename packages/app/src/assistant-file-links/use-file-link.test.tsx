@@ -72,7 +72,12 @@ function createToast(): ToastApi {
   };
 }
 
-function createWrapper(input: { client: TestClient; openedFiles: OpenedFile[]; toast?: ToastApi }) {
+function createWrapper(input: {
+  client: TestClient;
+  openedFiles: OpenedFile[];
+  toast?: ToastApi;
+  download?: (file: { fileName: string; path: string }) => void;
+}) {
   const queryClient = createQueryClient();
   return function Wrapper({ children }: { children: ReactNode }) {
     const openWorkspaceFile = useCallback(
@@ -89,6 +94,7 @@ function createWrapper(input: { client: TestClient; openedFiles: OpenedFile[]; t
           serverId="server-1"
           workspaceRoot="/Users/test/project"
           onOpenWorkspaceFile={openWorkspaceFile}
+          onDownloadWorkspaceFile={input.download}
           toast={input.toast}
         >
           {children}
@@ -99,6 +105,76 @@ function createWrapper(input: { client: TestClient; openedFiles: OpenedFile[]; t
 }
 
 describe("useFileLink", () => {
+  it("resolves a relative download without opening a file tab", async () => {
+    const download = vi.fn();
+    const openedFiles: OpenedFile[] = [];
+    const { result } = renderHook(() => useFileLink(SOURCE), {
+      wrapper: createWrapper({
+        client: {
+          getDirectorySuggestions: async () =>
+            resolvedSuggestions([{ path: "docs/dumm.md", kind: "file" }]),
+        },
+        openedFiles,
+        download,
+      }),
+    });
+    expect(result.current.canDownload).toBe(true);
+    act(() => result.current.download());
+    await waitFor(() =>
+      expect(download).toHaveBeenCalledWith({
+        fileName: "dumm.md",
+        path: "/Users/test/project/docs/dumm.md",
+      }),
+    );
+    expect(openedFiles).toEqual([]);
+  });
+
+  it("reports a failed download lookup and allows retry", async () => {
+    const download = vi.fn();
+    const toast = createToast();
+    const lookup = vi
+      .fn()
+      .mockResolvedValueOnce(resolvedSuggestions([]))
+      .mockResolvedValueOnce(resolvedSuggestions([{ path: "docs/dumm.md", kind: "file" }]));
+    const { result } = renderHook(() => useFileLink(SOURCE), {
+      wrapper: createWrapper({
+        client: { getDirectorySuggestions: lookup },
+        openedFiles: [],
+        download,
+        toast,
+      }),
+    });
+    act(() => result.current.download());
+    await waitFor(() =>
+      expect(toast.show).toHaveBeenCalledWith("No file found for dumm.md", {
+        variant: "error",
+        testID: "assistant-file-link-not-found-toast",
+      }),
+    );
+    expect(download).not.toHaveBeenCalled();
+    act(() => result.current.download());
+    await waitFor(() =>
+      expect(download).toHaveBeenCalledWith({
+        fileName: "dumm.md",
+        path: "/Users/test/project/docs/dumm.md",
+      }),
+    );
+  });
+
+  it.each(["https://example.com/article", "mailto:test@example.com"])(
+    "does not offer a workspace download for %s",
+    (href) => {
+      const { result } = renderHook(() => useFileLink({ href }), {
+        wrapper: createWrapper({
+          client: { getDirectorySuggestions: async () => resolvedSuggestions([]) },
+          openedFiles: [],
+          download: vi.fn(),
+        }),
+      });
+      expect(result.current.canDownload).toBe(false);
+    },
+  );
+
   it("returns the same object across no-op parent rerenders", () => {
     const getDirectorySuggestions = vi.fn(async () => resolvedSuggestions([]));
     const queryClient = createQueryClient();

@@ -880,6 +880,12 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
 
   // --- Command center ---
   {
+    id: "command-center-toggle-ctrl-shift-f",
+    action: "command-center.toggle",
+    combo: "Ctrl+Shift+F",
+    repeat: false,
+  },
+  {
     id: "command-center-toggle-cmd-k-mac",
     action: "command-center.toggle",
     combo: "Cmd+K",
@@ -1033,7 +1039,7 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
   {
     id: "view-toggle-focus-ctrl-shift-f-non-mac",
     action: "view.toggle.focus",
-    combo: "Ctrl+Shift+F",
+    combo: "Ctrl+Alt+Shift+F",
     when: { mac: false, commandCenter: false, terminal: false },
     help: {
       id: "toggle-focus",

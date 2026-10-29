@@ -23,7 +23,11 @@ export interface UseFileLinkResult {
   onHoverIn: () => void;
   onPress: () => void;
   open: (source: AssistantFileLinkSource, disposition: OpenFileDisposition) => void;
+  canDownload: boolean;
+  download: () => void;
 }
+
+type FileLinkDisposition = OpenFileDisposition | "download";
 
 export interface AssistantFileLinkActions {
   open(source: AssistantFileLinkSource, disposition: OpenFileDisposition): void;
@@ -128,6 +132,19 @@ export function useFileLink(source: AssistantFileLinkSource): UseFileLinkResult 
   const onPress = useStableEvent(() => {
     open(stableSource, "preferred");
   });
+  const canDownload = Boolean(
+    activeConfig.onDownloadWorkspaceFile &&
+    canResolveAssistantFileLinkToFile(stableSource, workspaceRoot),
+  );
+  const download = useStableEvent(() => {
+    openAssistantFileLink({
+      source: stableSource,
+      disposition: "download",
+      context,
+      queryClient,
+      formatNoFileFoundMessage: (token) => t("common.errors.noFileFound", { token }),
+    });
+  });
 
   const target = useMemo(() => {
     if (resolution.kind === "resolved") {
@@ -138,8 +155,8 @@ export function useFileLink(source: AssistantFileLinkSource): UseFileLinkResult 
 
   const tooltipPath = target ? formatFileLinkTooltipPath({ target, workspaceRoot }) : null;
   return useMemo(
-    () => ({ target, tooltipPath, onHoverIn, onPress, open }),
-    [target, tooltipPath, onHoverIn, onPress, open],
+    () => ({ target, tooltipPath, onHoverIn, onPress, open, canDownload, download }),
+    [target, tooltipPath, onHoverIn, onPress, open, canDownload, download],
   );
 }
 
@@ -168,7 +185,7 @@ export function useAssistantFileLinkActions(): AssistantFileLinkActions {
 
 function openAssistantFileLink(input: {
   source: AssistantFileLinkSource;
-  disposition: OpenFileDisposition;
+  disposition: FileLinkDisposition;
   context: AssistantFileLinkResolverContextValue;
   queryClient: ReturnType<typeof useQueryClient>;
   formatNoFileFoundMessage: (token: string) => string;
@@ -275,7 +292,7 @@ function assistantFileLinkQueryKey(input: {
 
 async function dispatchResolvedLink(input: {
   resolution: Extract<AssistantFileLinkResolution, { kind: "resolved" }>;
-  disposition: OpenFileDisposition;
+  disposition: FileLinkDisposition;
   capturedServerId?: string;
   capturedWorkspaceRoot?: string;
   context: AssistantFileLinkResolverContextValue;
@@ -291,7 +308,7 @@ async function dispatchResolvedLink(input: {
     });
     return;
   }
-  if (value.kind === "external") {
+  if (value.kind === "external" && input.disposition !== "download") {
     await dispatchExternalUrl({
       url: value.url,
       capturedServerId: input.capturedServerId,
@@ -303,7 +320,7 @@ async function dispatchResolvedLink(input: {
 
 async function dispatchFileTarget(input: {
   target: InlinePathTarget;
-  disposition: OpenFileDisposition;
+  disposition: FileLinkDisposition;
   capturedServerId?: string;
   capturedWorkspaceRoot?: string;
   context: AssistantFileLinkResolverContextValue;
@@ -313,6 +330,12 @@ async function dispatchFileTarget(input: {
     current.serverId !== input.capturedServerId ||
     current.workspaceRoot !== input.capturedWorkspaceRoot
   ) {
+    return;
+  }
+  if (input.disposition === "download") {
+    const path = input.target.path;
+    const fileName = path.replace(/\\/g, "/").split("/").pop() || path;
+    current.onDownloadWorkspaceFile?.({ fileName, path });
     return;
   }
   current.onOpenWorkspaceFile?.(input.target, input.disposition);

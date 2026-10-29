@@ -133,6 +133,34 @@ interface HelpSectionCase {
 
 describe("keyboard-shortcuts", () => {
   it.each(["other", "editable", "message-input", "terminal", "browser"] as const)(
+    "opens search with Ctrl+Shift+F from %s",
+    (focusScope) => {
+      const bindings = buildEffectiveBindings({ "command-center-toggle-ctrl-k-non-mac": "F1" });
+      const context = { isDesktop: true, focusScope };
+      const search = resolveShortcut({
+        event: { key: "F", code: "KeyF", ctrlKey: true, shiftKey: true },
+        context,
+        bindings,
+      });
+      expect(search.match?.action).toBe("command-center.toggle");
+      expect(search.match?.preventDefault).toBe(true);
+    },
+  );
+
+  it("preserves the F1 search override alongside Ctrl+Shift+F", () => {
+    const bindings = buildEffectiveBindings({ "command-center-toggle-ctrl-k-non-mac": "F1" });
+    const result = resolveShortcut({ event: { key: "F1", code: "F1" }, bindings });
+    expect(result.match?.action).toBe("command-center.toggle");
+  });
+
+  it("keeps focus mode available without taking the search shortcut", () => {
+    expectShortcutResolution({
+      event: { key: "F", code: "KeyF", ctrlKey: true, altKey: true, shiftKey: true },
+      action: "view.toggle.focus",
+    });
+  });
+
+  it.each(["other", "editable", "message-input", "terminal", "browser"] as const)(
     "reopens a closed tab with Ctrl+Shift+T from %s on desktop",
     (focusScope) => {
       expectShortcutResolution({

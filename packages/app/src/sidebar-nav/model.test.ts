@@ -42,10 +42,9 @@ describe("resolveSidebarNavItems", () => {
       pluginGroups: [kanban],
       preferences,
     });
-    expect(summarize(items).slice(0, 3)).toEqual([
+    expect(summarize(items).slice(0, 2)).toEqual([
       { key: kanbanKey, visible: true },
       { key: "session-settings", visible: true },
-      { key: "search", visible: true },
     ]);
     const saved = setSidebarNavItemVisible({
       items,
@@ -71,9 +70,9 @@ describe("resolveSidebarNavItems", () => {
         { key: "session-settings", visible: false },
       ],
     });
-    expect(summarize(items).slice(0, 2)).toEqual([
-      { key: "search", visible: true },
+    expect(summarize(items)).toEqual([
       { key: "session-settings", visible: false },
+      { key: "history", visible: true },
     ]);
     expect(items.filter((item) => item.key === "session-settings")).toHaveLength(1);
   });
@@ -86,18 +85,16 @@ describe("resolveSidebarNavItems", () => {
     });
 
     expect(summarize(items)).toEqual([
-      { key: "new-workspace", visible: true },
       { key: "history", visible: true },
-      { key: "search", visible: true },
       { key: "session-settings", visible: true },
       { key: kanbanKey, visible: true },
       { key: notesKey, visible: true },
     ]);
-    expect(items[4]).toEqual({ kind: "plugin", key: kanbanKey, group: kanban, visible: true });
+    expect(items[2]).toEqual({ kind: "plugin", key: kanbanKey, group: kanban, visible: true });
     expect(items[0]).toEqual({
       kind: "builtin",
-      key: "new-workspace",
-      id: "new-workspace",
+      key: "history",
+      id: "history",
       visible: true,
     });
   });
@@ -116,9 +113,7 @@ describe("resolveSidebarNavItems", () => {
     expect(summarize(items)).toEqual([
       { key: kanbanKey, visible: false },
       { key: "session-settings", visible: true },
-      { key: "new-workspace", visible: false },
       { key: "history", visible: true },
-      { key: "search", visible: true },
       { key: notesKey, visible: true },
     ]);
   });
@@ -134,12 +129,7 @@ describe("resolveSidebarNavItems", () => {
       ],
     });
 
-    expect(items.map((item) => item.key)).toEqual([
-      "history",
-      "new-workspace",
-      "search",
-      "session-settings",
-    ]);
+    expect(items.map((item) => item.key)).toEqual(["history", "session-settings"]);
   });
 
   it("lets the first of duplicate keys win", () => {
@@ -154,8 +144,6 @@ describe("resolveSidebarNavItems", () => {
 
     expect(summarize(items)).toEqual([
       { key: "history", visible: false },
-      { key: "new-workspace", visible: true },
-      { key: "search", visible: true },
       { key: "session-settings", visible: true },
     ]);
   });
@@ -179,12 +167,10 @@ describe("setSidebarNavItemVisible", () => {
       preferences: [],
     });
 
-    const next = setSidebarNavItemVisible({ items, key: "search", visible: false, previous: [] });
+    const next = setSidebarNavItemVisible({ items, key: "history", visible: false, previous: [] });
 
     expect(next).toEqual([
-      { key: "new-workspace", visible: true },
-      { key: "history", visible: true },
-      { key: "search", visible: false },
+      { key: "history", visible: false },
       { key: "session-settings", visible: true },
       { key: kanbanKey, visible: true },
     ]);
@@ -206,8 +192,6 @@ describe("setSidebarNavItemVisible", () => {
     expect(next).toEqual([
       { key: notesKey, visible: false },
       { key: "history", visible: false },
-      { key: "new-workspace", visible: true },
-      { key: "search", visible: true },
       { key: "session-settings", visible: true },
     ]);
   });
@@ -229,10 +213,8 @@ describe("setSidebarNavItemVisible", () => {
     const next = setSidebarNavItemVisible({ items, key: "history", visible: false, previous });
 
     expect(next).toEqual([
-      { key: "new-workspace", visible: true },
       { key: notesKey, visible: false },
       { key: "history", visible: false },
-      { key: "search", visible: true },
       { key: "session-settings", visible: true },
     ]);
     expect(
@@ -267,13 +249,16 @@ describe("moveSidebarNavItem", () => {
   });
 
   it("moves an item up", () => {
-    const next = moveSidebarNavItem({ items, key: "search", direction: "up", previous: [] });
+    const next = moveSidebarNavItem({
+      items,
+      key: "session-settings",
+      direction: "up",
+      previous: [],
+    });
 
     expect(next.map((preference) => preference.key)).toEqual([
-      "new-workspace",
-      "search",
-      "history",
       "session-settings",
+      "history",
       kanbanKey,
     ]);
   });
@@ -287,9 +272,7 @@ describe("moveSidebarNavItem", () => {
     });
 
     expect(next.map((preference) => preference.key)).toEqual([
-      "new-workspace",
       "history",
-      "search",
       kanbanKey,
       "session-settings",
     ]);
@@ -298,7 +281,7 @@ describe("moveSidebarNavItem", () => {
   it("leaves the order alone at the boundaries", () => {
     const first = moveSidebarNavItem({
       items,
-      key: "new-workspace",
+      key: "history",
       direction: "up",
       previous: [],
     });
@@ -330,8 +313,6 @@ describe("moveSidebarNavItem", () => {
 
 describe("builtinSidebarNavShortcutAction", () => {
   it("maps only the builtins that have a keyboard shortcut", () => {
-    expect(builtinSidebarNavShortcutAction("new-workspace")).toBe("new-workspace");
-    expect(builtinSidebarNavShortcutAction("search")).toBe("toggle-command-center");
     expect(builtinSidebarNavShortcutAction("history")).toBeNull();
     expect(builtinSidebarNavShortcutAction("session-settings")).toBeNull();
   });

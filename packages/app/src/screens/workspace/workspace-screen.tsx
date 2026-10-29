@@ -4,6 +4,7 @@ import {
   type InlinePathTarget,
 } from "@/assistant-file-links";
 import { useFileExplorerActions } from "@/hooks/use-file-explorer-actions";
+import { useFileDownload } from "@/hooks/use-file-download";
 import { reopenLastClosedWorkspaceTab } from "@/workspace-tabs/reopen";
 import {
   WorkspaceComposerEditingSessionsProvider,
@@ -3767,6 +3768,11 @@ function WorkspaceScreenContent({
   const openMarkdownFile = useStableEvent((location: WorkspaceFileLocation) => {
     handleOpenPreferredAssistantFile({ location, parentTabId: activeTabId });
   });
+  const downloadMarkdownFile = useFileDownload({
+    serverId: normalizedServerId,
+    workspaceId: normalizedWorkspaceId,
+    workspaceRoot: workspaceDirectory ?? "",
+  });
   const openMarkdownDirectory = useStableEvent((directoryPath: string) => {
     void revealDirectory(directoryPath);
     openExplorerSidebarView({
@@ -3840,6 +3846,7 @@ function WorkspaceScreenContent({
         serverId={normalizedServerId}
         workspaceRoot={workspaceDirectory ?? undefined}
         onOpenWorkspaceFile={openMarkdownPath}
+        onDownloadWorkspaceFile={downloadMarkdownFile}
         toast={toast}
       >
         {renderedWorkspaceScreen}

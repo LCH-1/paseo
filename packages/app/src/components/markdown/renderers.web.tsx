@@ -1,5 +1,14 @@
 import { Text } from "react-native";
-import { forwardRef, useCallback, useMemo, useState, type ComponentProps } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useMemo,
+  useState,
+  type ComponentProps,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
+import { useTranslation } from "react-i18next";
 import type {
   CodeBlockRendererProps,
   LinkRendererProps,
@@ -8,6 +17,12 @@ import type {
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useFileLink } from "@/assistant-file-links";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  useContextMenu,
+} from "@/components/ui/context-menu";
 import { HighlightedCodeBlock } from "@/components/highlighted-code-block";
 import type { Theme } from "@/styles/theme";
 import { MermaidFence } from "./fence/mermaid";
@@ -31,7 +46,9 @@ function WebCodeBlock({ code, language }: CodeBlockRendererProps) {
 const LINK_HOVER_STYLE = { textDecoration: "underline" } as const;
 
 function WebLink({ link, anchorProps, children }: LinkRendererProps) {
-  const { tooltipPath, onHoverIn } = useFileLink(markdownLinkSource(link.url, link.sourceType));
+  const { tooltipPath, onHoverIn, canDownload, download } = useFileLink(
+    markdownLinkSource(link.url, link.sourceType),
+  );
   const [hovered, setHovered] = useState(false);
   const handleMouseEnter = useCallback(() => setHovered(true), []);
   const handleMouseLeave = useCallback(() => setHovered(false), []);
@@ -53,7 +70,7 @@ function WebLink({ link, anchorProps, children }: LinkRendererProps) {
       {children}
     </a>
   );
-  return (
+  const tooltip = (
     <Tooltip delayDuration={400}>
       <TooltipTrigger asChild onHoverIn={onHoverIn}>
         <InlineLinkTrigger>{anchor}</InlineLinkTrigger>
@@ -66,6 +83,36 @@ function WebLink({ link, anchorProps, children }: LinkRendererProps) {
         </TooltipContent>
       ) : null}
     </Tooltip>
+  );
+  if (!canDownload) return tooltip;
+  return (
+    <ContextMenu>
+      <FileLinkMenu onDownload={download}>{tooltip}</FileLinkMenu>
+    </ContextMenu>
+  );
+}
+
+function FileLinkMenu({ children, onDownload }: { children: ReactNode; onDownload: () => void }) {
+  const { t } = useTranslation();
+  const menu = useContextMenu();
+  const openMenu = useCallback(
+    (event: MouseEvent<HTMLSpanElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      menu.setAnchorRect({ x: event.pageX, y: event.pageY, width: 0, height: 0 });
+      menu.setOpen(true);
+    },
+    [menu],
+  );
+  return (
+    <>
+      <span onContextMenu={openMenu}>{children}</span>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={onDownload} testID="assistant-file-link-download">
+          {t("workspace.fileActions.download")}
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </>
   );
 }
 // TooltipTrigger also supplies native Pressable handlers; forward only DOM events.
