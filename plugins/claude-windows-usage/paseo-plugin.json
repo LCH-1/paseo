@@ -1,0 +1,6 @@
+{
+  "id": "claude-windows-usage",
+  "name": "Claude Windows Usage",
+  "description": "Paseo 내장 Claude 사용량 조회의 Windows 자격증명 저장소 호환",
+  "requirements": { "paseo": ">=0.12.0" }
+}

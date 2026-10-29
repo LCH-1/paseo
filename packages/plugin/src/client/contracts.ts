@@ -158,6 +158,8 @@ interface PluginClientContextAliases {
 }
 
 export interface PluginClientContext extends PluginCommandCapabilities, PluginClientContextAliases {
+  /** Keep former settings/screen routes working after consolidating plugins. */
+  addLegacyId(id: string): PluginCleanup;
   /** Play a base64-encoded audio file on this client; resolves when playback ends. */
   playAudio(source: { base64: string; mimeType: string }): Promise<void>;
   addSettingsScreen(contribution: PluginSettingsScreenContribution): PluginCleanup;

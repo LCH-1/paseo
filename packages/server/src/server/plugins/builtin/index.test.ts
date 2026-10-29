@@ -78,6 +78,31 @@ test("listed client bundle is published while plugins are disabled; unlisted dir
   }
 }, 60_000);
 
+test("a promoted built-in keeps its registration and hides its former external source", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "paseo-promoted-builtin-"));
+  roots.push(root);
+  const listed = await fixture(root, "listed", true);
+  const daemon = await createTestPaseoDaemon({
+    daemonVersion: "0.9.2",
+    pluginsEnabled: true,
+    builtinPlugins: new BuiltinPluginLoader(root, ["listed"]),
+    plugins: { listed: { source: "directory", path: listed, enabled: true } },
+  });
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws`, appVersion: "0.9.2" });
+  try {
+    await client.connect();
+    expect(await client.listPlugins()).toEqual([]);
+    expect((await client.getPluginCatalog()).filter((entry) => entry.id === "listed")).toHaveLength(
+      1,
+    );
+    await client.patchDaemonConfig({ pluginsEnabled: false });
+    expect((await client.getPluginCatalog()).some((entry) => entry.id === "listed")).toBe(true);
+  } finally {
+    await client.close();
+    await daemon.close();
+  }
+}, 60_000);
+
 test("directory, Git, and npm installs reject a built-in ID", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "paseo-builtin-install-"));
   roots.push(root);

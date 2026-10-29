@@ -5,6 +5,7 @@ import {
   pluginScreenParamsFromRoute,
 } from "./routes";
 import type { InstalledPlugin } from "./types";
+import { matchesPluginId } from "./identity";
 
 export type PluginSurfaceContributionIdentity =
   | { kind: "sidebar"; id: string }
@@ -64,7 +65,8 @@ export function currentPluginScreen(
   routeParams: Readonly<Record<string, string | string[] | undefined>>,
 ): PluginScreenLocation | null {
   const route = parsePluginSurfaceRoute(pathname);
-  if (!route || route.serverId !== plugin.serverId || route.pluginId !== plugin.id) return null;
+  if (!route || route.serverId !== plugin.serverId || !matchesPluginId(plugin, route.pluginId))
+    return null;
   const screenId = resolvePluginSurfaceContribution(plugin, route.identity).surface?.id;
   return screenId ? { screenId, params: pluginScreenParamsFromRoute(routeParams) } : null;
 }
@@ -93,7 +95,7 @@ export function getPluginSurfaceContributionServerIds(
   return installations
     .filter(
       (installation) =>
-        installation.id === pluginId &&
+        matchesPluginId(installation, pluginId) &&
         resolvePluginSurfaceContribution(installation, identity).surface !== null,
     )
     .map((installation) => installation.serverId);

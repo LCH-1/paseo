@@ -230,3 +230,7 @@ Paseo is an independent project used by tens of thousands of developers daily, b
 ## License
 
 Apache-2.0
+
+## Maintained 0.12 distribution
+
+The `suite-core-*` release tags retain the existing 0.12 runtime and its desktop fixes. They include Windows identity and usage compatibility, selection and copy fixes, closed-tab history, and client identity aliases for consolidated plugins. A distribution may provide a hash-pinned offline setup under `resources/bundled-setup.json`; an ordinary core build has no bundled setup side effects. Desktop distribution versions can differ from the bundled daemon's protocol version without restarting the daemon solely for that difference.

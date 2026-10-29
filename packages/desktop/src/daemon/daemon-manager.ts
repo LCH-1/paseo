@@ -46,6 +46,7 @@ import type { DesktopSettings } from "../settings/desktop-settings.js";
 import { getDesktopSettingsStore } from "../settings/desktop-settings-electron.js";
 import { isRunningUnderARM64Translation } from "../system/arm64-translation.js";
 import { describeSandbox } from "../diagnostics/sandbox.js";
+import { getBundledDaemonVersion } from "../bundled-setup.js";
 import { getDesktopAppLogs } from "../diagnostics/app-logs.js";
 import { getDesktopUpdaterDiagnostics } from "../diagnostics/updater.js";
 import {
@@ -265,7 +266,7 @@ function normalizeVersion(version: string | null): string | null {
 
 function shouldRestartForVersion(current: DesktopDaemonStatus): boolean {
   if (!current.ownedByDesktop) return false;
-  const appVersion = normalizeVersion(resolveDesktopAppVersion());
+  const appVersion = normalizeVersion(getBundledDaemonVersion() ?? resolveDesktopAppVersion());
   const daemonVersion = normalizeVersion(current.version);
   return Boolean(appVersion && daemonVersion && appVersion !== daemonVersion);
 }

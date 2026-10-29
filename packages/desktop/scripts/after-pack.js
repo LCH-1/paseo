@@ -115,6 +115,17 @@ exports.default = async function afterPack(context) {
   const platform = context.electronPlatformName;
   const arch = ARCH_MAP[context.arch] || process.arch;
 
+  // The physical Node runner sits outside app.asar. A parent project's ESM
+  // package.json must not change how this CommonJS entrypoint is interpreted.
+  const resources =
+    platform === "darwin"
+      ? path.join(context.appOutDir, `${EXECUTABLE_NAME}.app`, "Contents", "Resources")
+      : path.join(context.appOutDir, "resources");
+  fs.writeFileSync(
+    path.join(resources, "app.asar.unpacked", "package.json"),
+    '{"type":"commonjs"}\n',
+  );
+
   pruneNativeModules(context.appOutDir, platform, arch);
 
   if (platform === "linux") {

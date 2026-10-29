@@ -83,6 +83,28 @@ const workspaceLayoutIds = createDeterministicWorkspaceLayoutIds();
 const workspaceLayoutStore = createWorkspaceLayoutStore(workspaceLayoutIds);
 
 describe("closed tab history", () => {
+  it("orders extension tabs and native closes in the same bounded history", () => {
+    const store = createWorkspaceLayoutStore(workspaceLayoutIds);
+    const workspaceKey = "server-1:extension-history";
+    store.getState().recordClosedTab(workspaceKey, {
+      tab: { tabId: "global-agent", target: { kind: "agent", agentId: "external" }, createdAt: 1 },
+      paneId: null,
+      browserUrl: null,
+      origin: "global-workspace-tabs",
+      position: 3,
+    });
+    const tabId = store
+      .getState()
+      .openTab({ workspaceKey, target: { kind: "file", path: "file.txt" }, intent: "reveal" })!;
+    store.getState().closeTab(workspaceKey, tabId);
+    const entries = store.getState().closedTabsByWorkspace[workspaceKey];
+    expect(entries[1].sequence).toBeGreaterThan(entries[0].sequence!);
+    expect(store.getState().takeLastClosedTab(workspaceKey)?.tab.target.kind).toBe("file");
+    expect(store.getState().takeLastClosedTab(workspaceKey)).toMatchObject({
+      origin: "global-workspace-tabs",
+      position: 3,
+    });
+  });
   it("reopens the same conversation and keeps an archived conversation visible", () => {
     const workspaceKey = "server-1:reopen-conversation";
     const store = useWorkspaceLayoutStore.getState();
@@ -200,13 +222,11 @@ describe("closed tab history", () => {
     const store = createWorkspaceLayoutStore(workspaceLayoutIds);
     const workspaceKey = "server-1:bounded-history";
     for (let index = 0; index < 35; index++) {
-      const tabId = store
-        .getState()
-        .openTab({
-          workspaceKey,
-          target: { kind: "agent", agentId: `agent-${index}` },
-          intent: "reveal",
-        })!;
+      const tabId = store.getState().openTab({
+        workspaceKey,
+        target: { kind: "agent", agentId: `agent-${index}` },
+        intent: "reveal",
+      })!;
       store.getState().closeTab(workspaceKey, tabId);
     }
     expect(store.getState().closedTabsByWorkspace[workspaceKey]).toHaveLength(30);

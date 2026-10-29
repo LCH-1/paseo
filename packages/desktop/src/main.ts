@@ -101,6 +101,8 @@ import {
   stopDesktopManagedDaemonOnQuitIfNeeded,
 } from "./daemon/quit-lifecycle.js";
 import { runDesktopStartup } from "./desktop-startup.js";
+import { runBundledSetup } from "./bundled-setup.js";
+import { readDaemonInstance, resolvePaseoHome } from "@getpaseo/server/daemon-control";
 import { registerBrowserAutomationIpc } from "./features/browser-automation/ipc.js";
 import { BrowserKeyboard } from "./features/browser-keyboard/index.js";
 import { installAppUpdateOnQuit } from "./features/auto-updater.js";
@@ -931,6 +933,16 @@ async function bootstrap(): Promise<void> {
   }
 
   await app.whenReady();
+
+  if (app.isPackaged) {
+    const home = resolvePaseoHome();
+    await runBundledSetup({
+      resourcesPath: process.resourcesPath,
+      executable: process.execPath,
+      home,
+      isDaemonRunning: async () => (await readDaemonInstance(home)) !== null,
+    });
+  }
 
   const appDistDir = getAppDistDir();
   protocol.handle(APP_SCHEME, (request) => {

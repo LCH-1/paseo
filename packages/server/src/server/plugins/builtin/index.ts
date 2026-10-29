@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 export const builtinPlugins = [
   "antigravity-provider",
   "claude-usage-source",
+  "claude-windows-usage",
   "codex-usage-source",
   "copilot-usage-source",
   "cursor-usage-source",

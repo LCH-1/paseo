@@ -109,6 +109,7 @@ export function runPluginClientBundle(
   onChange: () => void = () => undefined,
 ): EvaluatedPlugin {
   const collector: Omit<EvaluatedPlugin, "id" | "cleanup"> = {
+    legacyIds: [],
     surfaces: [],
     settingsScreens: [],
     sidebarItems: { header: [], footer: [] },
@@ -196,6 +197,14 @@ export function runPluginClientBundle(
   }
   const pluginContext: PluginClientContext = {
     ...runtime,
+    addLegacyId(value) {
+      if (stopped) throw new Error("Plugin has stopped");
+      const alias = requireId(value, "legacy plugin id");
+      if (alias === id || collector.legacyIds!.includes(alias)) {
+        throw new Error(`Duplicate legacy plugin id: ${alias}`);
+      }
+      return register(collector.legacyIds!, alias, () => undefined);
+    },
     addAgentTabTitleResolver(contribution) {
       if (stopped) throw new Error("Plugin has stopped");
       if (typeof contribution !== "object" || contribution === null) {
@@ -541,6 +550,7 @@ export function runPluginClientBundle(
   };
   return {
     id,
+    legacyIds: collector.legacyIds,
     cleanup,
     surfaces: collector.surfaces,
     settingsScreens: collector.settingsScreens,

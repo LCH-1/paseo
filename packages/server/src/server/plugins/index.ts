@@ -203,39 +203,43 @@ export class PluginService {
     const config = this.configStore.get();
     const running = new Set(this.runtime.catalog().map((plugin) => plugin.id));
     const plugins = await Promise.all(
-      Object.entries(config.plugins ?? {}).map(async ([id, source]) => {
-        const enabled = source.enabled !== false;
-        const item: PluginListItem = {
-          id,
-          path: source.path,
-          enabled,
-          status: resolvePluginStatus({
+      Object.entries(config.plugins ?? {})
+        .filter(([id]) => !this.builtinPluginIds.has(id))
+        .map(async ([id, source]) => {
+          const enabled = source.enabled !== false;
+          const item: PluginListItem = {
+            id,
+            path: source.path,
             enabled,
-            globallyEnabled: config.pluginsEnabled === true,
-            running: running.has(id),
-          }),
-        };
-        const manifest = await readPluginManifest(path.resolve(source.path)).catch(() => null);
-        if (manifest) {
-          item.name = manifest.name;
-          item.description = manifest.description;
-          item.icon = manifest.icon;
-          item.media = manifest.media;
-        }
-        item.installation = await this.managedSources
-          ?.describe(id, source.path)
-          .catch(() => undefined);
-        if (!this.managedSources)
-          item.installation = { identity: { kind: "directory", path: path.resolve(source.path) } };
-        if (item.installation?.identity.kind === "git") {
-          item.source = "git";
-          item.remote = item.installation.identity.remote;
-          item.commit = item.installation.currentRevision;
-        }
-        const error = this.errors.get(id);
-        if (error && item.status === "failed") item.error = error;
-        return item;
-      }),
+            status: resolvePluginStatus({
+              enabled,
+              globallyEnabled: config.pluginsEnabled === true,
+              running: running.has(id),
+            }),
+          };
+          const manifest = await readPluginManifest(path.resolve(source.path)).catch(() => null);
+          if (manifest) {
+            item.name = manifest.name;
+            item.description = manifest.description;
+            item.icon = manifest.icon;
+            item.media = manifest.media;
+          }
+          item.installation = await this.managedSources
+            ?.describe(id, source.path)
+            .catch(() => undefined);
+          if (!this.managedSources)
+            item.installation = {
+              identity: { kind: "directory", path: path.resolve(source.path) },
+            };
+          if (item.installation?.identity.kind === "git") {
+            item.source = "git";
+            item.remote = item.installation.identity.remote;
+            item.commit = item.installation.currentRevision;
+          }
+          const error = this.errors.get(id);
+          if (error && item.status === "failed") item.error = error;
+          return item;
+        }),
     );
     return plugins.sort((left, right) => left.id.localeCompare(right.id));
   }
@@ -506,6 +510,9 @@ export class PluginService {
   }
 
   private async startConfigured(pluginId: string): Promise<void> {
+    // A formerly external plugin may now ship as a built-in. Its old source
+    // must never override or start a second copy of the built-in registration.
+    if (this.builtinPluginIds.has(pluginId)) return;
     const source = this.configStore.get().plugins?.[pluginId];
     if (!source || source.enabled === false || !this.canPublish(pluginId)) return;
     this.errors.delete(pluginId);
@@ -561,9 +568,9 @@ export class PluginService {
   }
 
   private async stopConfiguredPlugins(): Promise<void> {
-    const stopping = Object.keys(this.configStore.get().plugins ?? {}).map((id) =>
-      this.stopPlugin(id),
-    );
+    const stopping = Object.keys(this.configStore.get().plugins ?? {})
+      .filter((id) => !this.builtinPluginIds.has(id))
+      .map((id) => this.stopPlugin(id));
     await Promise.all(stopping);
   }
 

@@ -1,6 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 import type { InstalledPlugin } from "./types";
+import { findPluginById } from "./identity";
 import {
   currentPluginScreen,
   getPluginSurfaceContributionServerIds,
@@ -42,6 +43,30 @@ function installation(
     agentTabTitleResolvers: [],
   };
 }
+
+describe("consolidated plugin identities", () => {
+  it("keeps old routes and settings identities without replacing an exact installation", () => {
+    const merged = installation("host-a", ["terminal"], [], "ui");
+    merged.legacyIds = ["old-ui"];
+    const exact = installation("host-a", ["terminal"], [], "old-ui");
+    expect(findPluginById([merged], "host-a", "old-ui")).toBe(merged);
+    expect(findPluginById([merged, exact], "host-a", "old-ui")).toBe(exact);
+    expect(findPluginById([merged], "host-b", "old-ui")).toBeNull();
+    expect(currentPluginScreen(merged, "/h/host-a/plugin/old-ui/surface/terminal", {})).toEqual({
+      screenId: "terminal",
+      params: {},
+    });
+    expect(
+      getPluginSurfaceContributionServerIds([merged], "old-ui", {
+        kind: "surface",
+        id: "terminal",
+      }),
+    ).toEqual(["host-a"]);
+    const other = installation("host-a", [], [], "other-ui");
+    other.legacyIds = ["old-ui"];
+    expect(findPluginById([merged, other], "host-a", "old-ui")).toBeNull();
+  });
+});
 
 describe("plugin surface contribution identity", () => {
   const installations = [

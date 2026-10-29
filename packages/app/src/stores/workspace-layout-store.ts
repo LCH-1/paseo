@@ -127,10 +127,15 @@ export interface ClosedWorkspaceTab {
   tab: WorkspaceTab;
   paneId: string | null;
   browserUrl: string | null;
+  sequence?: number;
+  origin?: string;
+  position?: number;
 }
 
 interface WorkspaceLayoutStore {
   closedTabsByWorkspace: Record<string, readonly ClosedWorkspaceTab[]>;
+  closedTabSequence: number;
+  recordClosedTab: (workspaceKey: string, entry: ClosedWorkspaceTab) => void;
   takeLastClosedTab: (workspaceKey: string) => ClosedWorkspaceTab | null;
   /** Published once by the app shell; callers never pass a form factor to open a tab. */
   layoutMode: WorkspaceLayoutMode;
@@ -239,9 +244,13 @@ function rememberClosedTab(
   if (entry.tab.target.kind === "new_tab") return {};
   const previous = state.closedTabsByWorkspace[workspaceKey] ?? [];
   return {
+    closedTabSequence: state.closedTabSequence + 1,
     closedTabsByWorkspace: {
       ...state.closedTabsByWorkspace,
-      [workspaceKey]: [...previous.slice(-(MAX_CLOSED_TABS - 1)), entry],
+      [workspaceKey]: [
+        ...previous.slice(-(MAX_CLOSED_TABS - 1)),
+        { ...entry, sequence: state.closedTabSequence + 1 },
+      ],
     },
   };
 }
@@ -989,6 +998,9 @@ export function createWorkspaceLayoutStore(
           return tabId;
         },
         closedTabsByWorkspace: {},
+        closedTabSequence: 0,
+        recordClosedTab: (workspaceKey, entry) =>
+          set((state) => rememberClosedTab(state, workspaceKey, entry)),
         takeLastClosedTab: (workspaceKey) => {
           const entries = get().closedTabsByWorkspace[workspaceKey] ?? [];
           const entry = entries.at(-1);

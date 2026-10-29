@@ -5,6 +5,7 @@ import { app } from "electron";
 import { UUID } from "builder-util-runtime";
 import log from "electron-log/main";
 import { autoUpdater } from "electron-updater";
+import { configureBundledUpdateFeed } from "./bundled-update-feed.js";
 import {
   createAppUpdateService,
   type AppUpdateCheckResult,
@@ -194,6 +195,7 @@ class ElectronAppUpdateRuntime implements AppUpdateRuntime {
 
   async checkForUpdates(): Promise<RuntimeUpdateCheckResult | null> {
     try {
+      await configureBundledUpdateFeed(autoUpdater);
       const result = await autoUpdater.checkForUpdates();
       if (!result) return null;
       return {

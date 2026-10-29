@@ -224,3 +224,48 @@ index 18d3627..769b0fe 100644
      }
  
      this.markAsOutOfBounds(adaptedEvent.pointerId);
+diff --git a/node_modules/react-native-gesture-handler/lib/commonjs/web/handlers/GestureHandler.js b/node_modules/react-native-gesture-handler/lib/commonjs/web/handlers/GestureHandler.js
+index 96c5227..cbf1a88 100644
+--- a/node_modules/react-native-gesture-handler/lib/commonjs/web/handlers/GestureHandler.js
++++ b/node_modules/react-native-gesture-handler/lib/commonjs/web/handlers/GestureHandler.js
+@@ -58,7 +58,9 @@ class GestureHandler {
+     manager.setOnPointerMoveOver(this.onPointerMoveOver.bind(this));
+     manager.setOnPointerMoveOut(this.onPointerMoveOut.bind(this));
+     manager.setOnWheel(this.onWheel.bind(this));
+-    manager.registerListeners();
++    if (this.enabled) {
++      manager.registerListeners();
++    }
+   }
+ 
+   //
+diff --git a/node_modules/react-native-gesture-handler/lib/module/web/handlers/GestureHandler.js b/node_modules/react-native-gesture-handler/lib/module/web/handlers/GestureHandler.js
+index 0791c66..2f41c77 100644
+--- a/node_modules/react-native-gesture-handler/lib/module/web/handlers/GestureHandler.js
++++ b/node_modules/react-native-gesture-handler/lib/module/web/handlers/GestureHandler.js
+@@ -52,7 +52,9 @@ export default class GestureHandler {
+     manager.setOnPointerMoveOver(this.onPointerMoveOver.bind(this));
+     manager.setOnPointerMoveOut(this.onPointerMoveOut.bind(this));
+     manager.setOnWheel(this.onWheel.bind(this));
+-    manager.registerListeners();
++    if (this.enabled) {
++      manager.registerListeners();
++    }
+   }
+ 
+   //
+diff --git a/node_modules/react-native-gesture-handler/src/web/handlers/GestureHandler.ts b/node_modules/react-native-gesture-handler/src/web/handlers/GestureHandler.ts
+index ddb79a3..4e1274c 100644
+--- a/node_modules/react-native-gesture-handler/src/web/handlers/GestureHandler.ts
++++ b/node_modules/react-native-gesture-handler/src/web/handlers/GestureHandler.ts
+@@ -79,7 +79,9 @@ export default abstract class GestureHandler implements IGestureHandler {
+     manager.setOnPointerMoveOut(this.onPointerMoveOut.bind(this));
+     manager.setOnWheel(this.onWheel.bind(this));
+ 
+-    manager.registerListeners();
++    if (this.enabled) {
++      manager.registerListeners();
++    }
+   }
+ 
+   //

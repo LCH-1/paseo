@@ -29,6 +29,18 @@ function bundle(body: string): string {
 }
 
 describe("evaluatePluginClientBundle", () => {
+  it("releases old plugin identities on teardown and rejects duplicate aliases", async () => {
+    const plugin = runPluginClientBundle("ui", bundle(`plugin.addLegacyId("old-ui");`), runtime);
+    expect(plugin.legacyIds).toEqual(["old-ui"]);
+    await plugin.cleanup();
+    expect(plugin.legacyIds).toEqual([]);
+    expect(() => runPluginClientBundle("ui", bundle(`plugin.addLegacyId("ui");`), runtime)).toThrow(
+      "Duplicate legacy plugin id",
+    );
+    expect(() =>
+      runPluginClientBundle("ui", bundle(`plugin.addLegacyId("../other");`), runtime),
+    ).toThrow("Invalid legacy plugin id");
+  });
   it("invalidates and removes title registrations added after setup", async () => {
     const onChange = vi.fn();
     const plugin = runPluginClientBundle(

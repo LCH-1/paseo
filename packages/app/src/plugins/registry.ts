@@ -8,6 +8,7 @@ import { resolveAppVersion } from "@/utils/app-version";
 import { createPluginClientRuntime } from "./client-runtime";
 import { runPluginClientBundle } from "./evaluate";
 import type { InstalledPlugin } from "./types";
+import { findPluginById, matchesPluginId } from "./identity";
 
 type CatalogPlugin = Awaited<ReturnType<DaemonClient["getPluginCatalog"]>>[number];
 
@@ -197,14 +198,13 @@ export function useInstalledPlugins(): InstalledPlugin[] {
 }
 
 export function useInstalledPlugin(serverId: string, pluginId: string): InstalledPlugin | null {
-  return (
-    useInstalledPlugins().find(
-      (plugin) => plugin.serverId === serverId && plugin.id === pluginId,
-    ) ?? null
-  );
+  return findPluginById(useInstalledPlugins(), serverId, pluginId);
 }
 
 export function usePluginInstallations(pluginId: string): InstalledPlugin[] {
   const installed = useInstalledPlugins();
-  return useMemo(() => installed.filter((plugin) => plugin.id === pluginId), [installed, pluginId]);
+  return useMemo(
+    () => installed.filter((plugin) => matchesPluginId(plugin, pluginId)),
+    [installed, pluginId],
+  );
 }
