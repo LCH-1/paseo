@@ -16,6 +16,22 @@ import {
   type UsageQueryState,
 } from "./model";
 import type { UsageReportEntry, UsageWindow } from "./types";
+import { uniqueUsageReports } from "./compatibility";
+
+it("shows two Claude accounts once while retaining original IDs for refresh and older hosts", () => {
+  const first = entry({ sourceId: "claude" });
+  const alias = { ...first, sourceId: "claude-windows", id: "claude-windows:account-1" };
+  const second = { ...first, id: "claude:account-2" };
+  const secondAlias = { ...alias, id: "claude-windows:account-2" };
+  expect(uniqueUsageReports([alias, first, secondAlias, second])).toEqual([first, second]);
+  expect(uniqueUsageReports([alias])).toEqual([alias]);
+  expect(
+    uniqueUsageReports([{ ...first, report: { status: "error", error: "offline" } }, alias]),
+  ).toEqual([alias]);
+  expect(
+    uniqueUsageReports([first, { ...first, sourceId: "other", id: "other:account-1" }]),
+  ).toHaveLength(2);
+});
 
 function entry(input: {
   windows?: UsageWindow[];

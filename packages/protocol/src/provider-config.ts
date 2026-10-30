@@ -49,6 +49,8 @@ export const ProviderProfileModelSchema = z.object({
 });
 
 export const ProviderOverrideSchema = z.object({
+  /** Hide a compatibility alias in selectors while preserving existing session launches. */
+  selectable: z.boolean().optional(),
   extends: z.string().optional(),
   label: z.string().optional(),
   description: z.string().optional(),

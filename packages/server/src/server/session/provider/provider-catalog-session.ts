@@ -43,6 +43,8 @@ export interface ProviderCatalogSessionHost {
   // COMPAT(providersSnapshot): visibility gating for older clients lives on the shell
   // (agent-lifecycle shares it). Reads appVersion live.
   isProviderVisibleToClient(provider: string): boolean;
+  /** Selection-only aliases remain available to existing sessions and direct catalog reads. */
+  isProviderSelectable?(provider: string): boolean;
   // COMPAT(customModeIcons): reads clientCapabilities live.
   supportsCustomModeIcons(): boolean;
   supportsCompactProviderSnapshots(): boolean;
@@ -121,8 +123,10 @@ export class ProviderCatalogSession {
     // COMPAT(providersSnapshot): use the shell's current visibility policy for both sides.
     return {
       ...snapshot,
-      records: snapshot.records.filter(({ entry }) =>
-        this.host.isProviderVisibleToClient(entry.provider),
+      records: snapshot.records.filter(
+        ({ entry }) =>
+          this.host.isProviderVisibleToClient(entry.provider) &&
+          this.host.isProviderSelectable?.(entry.provider) !== false,
       ),
     };
   }
@@ -390,8 +394,10 @@ export class ProviderCatalogSession {
   ): Promise<void> {
     const fetchedAt = new Date().toISOString();
     try {
-      const providers = (await this.host.listProviderAvailability()).filter((provider) =>
-        this.host.isProviderVisibleToClient(provider.provider),
+      const providers = (await this.host.listProviderAvailability()).filter(
+        (provider) =>
+          this.host.isProviderVisibleToClient(provider.provider) &&
+          this.host.isProviderSelectable?.(provider.provider) !== false,
       );
       this.host.emit({
         type: "list_available_providers_response",

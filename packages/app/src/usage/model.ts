@@ -1,5 +1,6 @@
 import { formatCompactTimeAgoAsProse } from "@/utils/time";
 import { usageCopy } from "./copy";
+import { uniqueUsageReports } from "./compatibility";
 import type { UsageDisplayAs } from "./preferences";
 import type { UsageReport, UsageReportEntry, UsageView, UsageWindow } from "./types";
 
@@ -120,7 +121,11 @@ export function resolveUsageView(input: {
     return { kind: "unavailable", message: usageCopy.hostUpgradeRequired(hostLabel) };
   }
   if (query?.data) {
-    return { kind: "ready", reports: query.data, isRefreshing: query.isFetching };
+    return {
+      kind: "ready",
+      reports: uniqueUsageReports(query.data),
+      isRefreshing: query.isFetching,
+    };
   }
   if (query?.error) {
     return {
@@ -151,7 +156,9 @@ export function resolveAgentUsageView(input: {
     return { kind: "error", message: usageCopy.agentError(reason) };
   }
   if (query.data) {
-    return query.data.length === 0 ? { kind: "none" } : { kind: "ready", reports: query.data };
+    return query.data.length === 0
+      ? { kind: "none" }
+      : { kind: "ready", reports: uniqueUsageReports(query.data) };
   }
   return { kind: "loading" };
 }

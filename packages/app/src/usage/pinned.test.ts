@@ -8,6 +8,23 @@ import {
 } from "./pinned";
 import type { UsageReportEntry, UsageWindow } from "./types";
 
+it("keeps legacy Windows pins selected without displaying each account twice", () => {
+  const canonical = report({
+    sourceId: "claude",
+    sourceLabel: "Claude",
+    windows: [{ id: "weekly", label: "Weekly", usedPct: 20 }],
+  });
+  const legacy = { ...canonical, sourceId: "claude-windows", id: "claude-windows:default" };
+  const legacyPreferences: UsagePreferences = {
+    displayAs: "used",
+    serverId: "host",
+    pins: [{ sourceId: "claude-windows", windowId: "weekly" }],
+  };
+  expect(resolvePinnedUsage([legacy, canonical], legacyPreferences)).toHaveLength(1);
+  expect(resolvePinnedUsage([canonical], legacyPreferences)).toHaveLength(1);
+  expect(legacyPreferences.pins).toEqual([{ sourceId: "claude-windows", windowId: "weekly" }]);
+});
+
 function report(input: {
   sourceId: string;
   sourceLabel: string;

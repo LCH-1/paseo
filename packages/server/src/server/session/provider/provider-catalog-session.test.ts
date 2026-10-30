@@ -18,6 +18,43 @@ import { expandProviderSnapshot } from "@getpaseo/protocol/provider-snapshot-cod
 
 type SnapshotChangeHandler = (transition: ProviderSnapshotTransition) => void;
 
+it("hides selection-only aliases in catalogs without disabling direct reads for existing sessions", async () => {
+  const entries = makeEntries();
+  const { subsystem, emitted, pushSnapshotChange } = makeSubsystem({
+    visibleProviders: new Set(["codex", "claude"]),
+    host: {
+      isProviderSelectable: (provider) => provider !== "claude",
+      listProviderAvailability: async () =>
+        entries.map((e) => ({ provider: e.provider, available: true, error: null })),
+    },
+    snapshot: {
+      getSnapshot: () => createProviderSnapshot(entries),
+      getProvider: async () => entries[1]!,
+    },
+  });
+  subsystem.start();
+  pushSnapshotChange(createProviderSnapshot(entries));
+  expect(
+    findByType(emitted, "providers_snapshot_update")!.payload.entries.map((e) => e.provider),
+  ).toEqual(["codex"]);
+  await subsystem.handleListAvailableProvidersRequest({
+    type: "list_available_providers_request",
+    requestId: "list",
+  });
+  expect(
+    findByType(emitted, "list_available_providers_response")!.payload.providers.map(
+      (e) => e.provider,
+    ),
+  ).toEqual(["codex"]);
+  await subsystem.handleListProviderModelsRequest({
+    type: "list_provider_models_request",
+    provider: "claude",
+    requestId: "existing-session",
+  });
+  expect(findByType(emitted, "list_provider_models_response")!.payload.error).toBeNull();
+  subsystem.dispose();
+});
+
 interface MakeOptions {
   visibleProviders?: Set<string>;
   supportsCustomModeIcons?: boolean;

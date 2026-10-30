@@ -2,6 +2,7 @@ import { formatPct } from "./format";
 import { displayPercent } from "./model";
 import { effectiveUsagePins, type UsagePreferences } from "./preferences";
 import { windowTone } from "./tone";
+import { uniqueUsageReports, usageSourceIdentity } from "./compatibility";
 import type { UsageReportEntry, UsageTone } from "./types";
 
 /** One summary window of one account, as the sidebar Usage item shows it. */
@@ -71,13 +72,17 @@ export function resolvePinnedUsage(
 ): PinnedUsageSource[] {
   const pins = effectiveUsagePins(preferences, reports);
   const meaning = preferences.displayAs === "remaining" ? "left" : "used";
-  return groupBySource(reports).flatMap((entry) => {
+  return groupBySource(uniqueUsageReports(reports)).flatMap((entry) => {
     if (entry.report.status !== "available") return [];
     const windows = entry.report.windows
       .filter(
         (window) =>
           displayPercent(window, preferences.displayAs) !== null &&
-          pins.some((pin) => pin.sourceId === entry.sourceId && pin.windowId === window.id),
+          pins.some(
+            (pin) =>
+              usageSourceIdentity(pin.sourceId) === usageSourceIdentity(entry.sourceId) &&
+              pin.windowId === window.id,
+          ),
       )
       .map((window) => {
         const percent = displayPercent(window, preferences.displayAs) ?? 0;

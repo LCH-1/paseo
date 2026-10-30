@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { displayPercent } from "./model";
+import { usageSourceIdentity } from "./compatibility";
 import type { UsageReportEntry } from "./types";
 
 /** Whether percentages read as the share used or the share left. */
@@ -44,7 +45,9 @@ export const UsagePreferencesSchema = z
   .catch(DEFAULT_USAGE_PREFERENCES);
 
 function samePin(a: UsagePin, b: UsagePin): boolean {
-  return a.sourceId === b.sourceId && a.windowId === b.windowId;
+  return (
+    usageSourceIdentity(a.sourceId) === usageSourceIdentity(b.sourceId) && a.windowId === b.windowId
+  );
 }
 
 /** The only owner of default and customized pin selection, shared by every usage surface. */
@@ -52,7 +55,10 @@ export function effectiveUsagePins(
   preferences: UsagePreferences,
   reports: readonly UsageReportEntry[],
 ): UsagePin[] {
-  if (preferences.pins !== null) return preferences.pins;
+  if (preferences.pins !== null)
+    return preferences.pins.filter(
+      (pin, index, pins) => pins.findIndex((other) => samePin(other, pin)) === index,
+    );
   const pins: UsagePin[] = [];
   for (const entry of reports) {
     if (entry.report.status !== "available") continue;
