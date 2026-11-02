@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { act, cleanup, renderHook } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement, type PropsWithChildren } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAgentUsage, useHostUsage, useUsageHostReports } from "./queries";
@@ -58,6 +58,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   queryClient.clear();
+  focusManager.setFocused(undefined);
   vi.useRealTimers();
 });
 
@@ -129,4 +130,11 @@ it("shares sidebar and settings reads while preserving explicit cache-bypassing 
   await act(async () => { settings.result.current.refresh(); await vi.advanceTimersByTimeAsync(10); });
   expect(fixture.list).toHaveBeenCalledTimes(3);
   expect(fixture.list.mock.calls[2][0].forceRefresh).toBe(true);
+});
+
+it("keeps mounted reports fresh while the user works in another app", async () => {
+  focusManager.setFocused(false);
+  renderHook(() => useUsageHostReports("host"), { wrapper });
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_010); });
+  expect(fixture.list).toHaveBeenCalledTimes(2);
 });

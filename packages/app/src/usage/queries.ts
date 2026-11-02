@@ -142,6 +142,7 @@ export function useHostUsage(serverId: string): { view: UsageView; refresh: () =
     dataShape: "list",
     staleTimeMs: REPORTS_STALE_TIME_MS,
     refetchInterval: REPORTS_REFRESH_INTERVAL_MS,
+    refetchIntervalInBackground: true,
     refetchOnReconnect: true,
     refetchOnWindowFocus: true,
   });
@@ -174,6 +175,7 @@ export function useUsageHostReports(serverId: string | null): UsageReportEntry[]
     dataShape: "list",
     staleTimeMs: REPORTS_STALE_TIME_MS,
     refetchInterval: REPORTS_REFRESH_INTERVAL_MS,
+    refetchIntervalInBackground: true,
     refetchOnReconnect: true,
     refetchOnWindowFocus: true,
   });
@@ -205,6 +207,7 @@ export function useAgentUsage(serverId: string, agentId: string): AgentUsageView
     retry: false,
     staleTimeMs: REPORTS_STALE_TIME_MS,
     refetchInterval: REPORTS_REFRESH_INTERVAL_MS,
+    refetchIntervalInBackground: true,
     refetchOnReconnect: true,
     refetchOnWindowFocus: true,
   });
