@@ -146,6 +146,88 @@ describe("FilePreviewLifecycleModel", () => {
     second.resolve(nextPreview);
     await expectSnapshot(model, { status: "ready", preview: nextPreview });
   });
+
+  it("retries a failed preparation after rereading the same unchanged file", async () => {
+    const retry = deferred<FilePanePreview | null>();
+    let preparations = 0;
+    const model = new FilePreviewLifecycleModel(() => {
+      preparations += 1;
+      if (preparations === 1) return Promise.reject(new Error("attachment failed"));
+      return retry.promise;
+    });
+    const rawFile = file();
+    const ready = completed(rawFile);
+    const targetKey = "/workspace:file.ts";
+    const preview: FilePanePreview = {
+      file: previewFile("preview"),
+      imageAttachment: null,
+    };
+
+    model.setSource(source(targetKey, ready));
+    await expectSnapshot(model, { status: "error", message: "attachment failed" });
+    model.setSource(source(targetKey, { ...ready, read: { status: "pending", requested: true } }));
+    expect(preparations).toBe(1);
+
+    model.setSource(source(targetKey, completed(rawFile)));
+    expect(preparations).toBe(2);
+    expect(model.getSnapshot()).toEqual({ status: "preparing" });
+    retry.resolve(preview);
+    await expectSnapshot(model, { status: "ready", preview });
+  });
+
+  it("does not duplicate pending or successful preparation during an unchanged refresh", async () => {
+    const preparation = deferred<FilePanePreview | null>();
+    let preparations = 0;
+    const model = new FilePreviewLifecycleModel(() => {
+      preparations += 1;
+      return preparation.promise;
+    });
+    const rawFile = file();
+    const targetKey = "/workspace:file.ts";
+    const ready = completed(rawFile);
+    const refreshing = { ...ready, read: { status: "pending" as const, requested: true } };
+    const preview: FilePanePreview = {
+      file: previewFile("preview"),
+      imageAttachment: null,
+    };
+
+    model.setSource(source(targetKey, ready));
+    model.setSource(source(targetKey, refreshing));
+    model.setSource(source(targetKey, completed(rawFile)));
+    expect(preparations).toBe(1);
+    preparation.resolve(preview);
+    await expectSnapshot(model, { status: "ready", preview });
+
+    const snapshot = model.getSnapshot();
+    model.setSource(source(targetKey, refreshing));
+    model.setSource(source(targetKey, completed(rawFile)));
+    expect(preparations).toBe(1);
+    expect(model.getSnapshot()).toBe(snapshot);
+  });
+
+  it("ignores an older preparation failure after a newer revision is ready", async () => {
+    const first = deferred<FilePanePreview | null>();
+    const second = deferred<FilePanePreview | null>();
+    const model = new FilePreviewLifecycleModel((rawFile) =>
+      rawFile.revision === "one" ? first.promise : second.promise,
+    );
+    const preview: FilePanePreview = {
+      file: previewFile("newer revision"),
+      imageAttachment: null,
+    };
+    const targetKey = "/workspace:file.ts";
+
+    model.setSource(source(targetKey, completed(file("one"))));
+    model.setSource(source(targetKey, completed(file("two"))));
+    second.resolve(preview);
+    await expectSnapshot(model, { status: "ready", preview });
+    const snapshot = model.getSnapshot();
+
+    first.reject(new Error("stale attachment failed"));
+    await expectSnapshot(model, { status: "ready", preview });
+    model.setSource(source(targetKey, completed(file("two"))));
+    expect(model.getSnapshot()).toBe(snapshot);
+  });
 });
 
 async function expectSnapshot(

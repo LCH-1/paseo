@@ -84,7 +84,10 @@ export function ZoomableViewport({
     if (!canvas) return;
     const observer = new ResizeObserver(([entry]) => {
       if (!entry || entry.contentRect.width <= 0 || entry.contentRect.height <= 0) return;
-      setViewport({ width: entry.contentRect.width, height: entry.contentRect.height });
+      const { width, height } = entry.contentRect;
+      setViewport((current) =>
+        current?.width === width && current.height === height ? current : { width, height },
+      );
     });
     observer.observe(canvas);
     return () => observer.disconnect();

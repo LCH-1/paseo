@@ -369,6 +369,97 @@ describe("FileEditorModel", () => {
     expect(model.getSnapshot().status).toBe("clean");
   });
 
+  test("waits for a slow save before autosaving newer edits against its revision", async () => {
+    const { model, session, clock } = makeModel();
+    session.holdNextWrite();
+    model.edit("first save");
+    const saving = model.save();
+
+    model.edit("latest edit");
+    clock.fire();
+    const repeatedSave = model.save();
+    expect(session.writes).toHaveLength(1);
+    expect(model.getSnapshot()).toMatchObject({ status: "saving", content: "latest edit" });
+
+    session.finishHeldWrite({
+      status: "written",
+      modifiedAt: "2026-07-18T00:00:01.000Z",
+      revision: "saved-revision",
+      size: 10,
+    });
+    await saving;
+    await repeatedSave;
+    clock.fire();
+    await Promise.resolve();
+
+    expect(session.writes).toEqual([
+      { content: "first save", expectedModifiedAt: "2026-07-18T00:00:00.000Z" },
+      {
+        content: "latest edit",
+        expectedModifiedAt: "2026-07-18T00:00:01.000Z",
+        expectedRevision: "saved-revision",
+      },
+    ]);
+    expect(model.getSnapshot()).toMatchObject({ status: "clean", content: "latest edit" });
+  });
+
+  test("preserves an edit back to the original content during a slow save", async () => {
+    const { model, session, clock } = makeModel();
+    session.holdNextWrite();
+    model.edit("first save");
+    const saving = model.save();
+
+    model.edit("one");
+    observeFile(model, {
+      content: "first save",
+      hasBom: false,
+      version: ready("2026-07-18T00:00:01.000Z", 10),
+    });
+    expect(model.getSnapshot()).toMatchObject({ status: "saving", content: "one" });
+
+    session.finishHeldWrite({
+      status: "written",
+      modifiedAt: "2026-07-18T00:00:01.000Z",
+      size: 10,
+    });
+    await saving;
+    expect(model.getSnapshot()).toMatchObject({ status: "dirty", content: "one", modified: true });
+    clock.fire();
+    await Promise.resolve();
+
+    expect(session.writes.at(-1)).toEqual({
+      content: "one",
+      expectedModifiedAt: "2026-07-18T00:00:01.000Z",
+    });
+    expect(model.getSnapshot()).toMatchObject({ status: "clean", content: "one", modified: false });
+  });
+
+  test("still conflicts with an external edit received while saving newer local input", async () => {
+    const { model, session, clock } = makeModel();
+    session.holdNextWrite();
+    model.edit("first save");
+    const saving = model.save();
+    model.edit("latest edit");
+    const externalVersion = ready("2026-07-18T00:00:02.000Z", 8);
+    observeFile(model, { content: "external", hasBom: false, version: externalVersion });
+
+    session.finishHeldWrite({
+      status: "written",
+      modifiedAt: "2026-07-18T00:00:01.000Z",
+      size: 10,
+    });
+    await saving;
+    clock.fire();
+
+    expect(session.writes).toHaveLength(1);
+    expect(model.getSnapshot()).toMatchObject({
+      status: "conflict",
+      content: "latest edit",
+      modified: true,
+      observedVersion: externalVersion,
+    });
+  });
+
   test("keeps CRLF content in file form", async () => {
     const { model, session } = makeModel({ content: "one\r\ntwo\r\n" });
 

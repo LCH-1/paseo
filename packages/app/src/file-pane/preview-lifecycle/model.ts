@@ -74,7 +74,9 @@ export class FilePreviewLifecycleModel {
 
     const source = getReadySource(input);
     if (source) {
-      if (source.key === this.preparedSourceKey) {
+      const retryFailedPreparation =
+        this.snapshot.status === "error" && input.liveFileSnapshot.read.status === "idle";
+      if (source.key === this.preparedSourceKey && !retryFailedPreparation) {
         return;
       }
       this.preparedSourceKey = source.key;

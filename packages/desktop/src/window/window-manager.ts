@@ -288,7 +288,7 @@ export function setupWindowStatePersistence(win: BrowserWindow, store: WindowSta
     persist();
   }
 
-  // Final synchronous flush. Runs on window close AND on app quit: the app's
+  // Final synchronous flush. Runs after the window closes AND on app quit: the app's
   // before-quit handler calls app.exit(0), which bypasses the window close
   // event (see daemon/quit-lifecycle.ts), so close alone would miss Cmd+Q.
   function flushFinal(): void {
@@ -297,7 +297,9 @@ export function setupWindowStatePersistence(win: BrowserWindow, store: WindowSta
     }
     flushed = true;
     clearTimer();
-    captureState();
+    if (!win.isDestroyed()) {
+      captureState();
+    }
     if (latestState) {
       try {
         store.saveSync(latestState);
@@ -311,11 +313,13 @@ export function setupWindowStatePersistence(win: BrowserWindow, store: WindowSta
   win.on("move", scheduleSave);
   win.on("maximize", saveNow);
   win.on("unmaximize", saveNow);
-  win.on("close", flushFinal);
+  // A close request can be cancelled by beforeunload. Keep saving until the
+  // window actually closes, while capturing geometry before it is destroyed.
+  win.on("close", captureState);
   app.on("before-quit", flushFinal);
 
   win.on("closed", () => {
-    clearTimer();
+    flushFinal();
     app.removeListener("before-quit", flushFinal);
   });
 }

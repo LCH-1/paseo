@@ -1,4 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { app, BrowserWindow } from "electron";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createWindowStateStore } from "../settings/window-state";
 
 import {
   applyMacWindowControlsUpdate,
@@ -9,7 +15,92 @@ import {
   readWindowChromeUpdate,
   readWindowTheme,
   resolveWindowBounds,
+  setupWindowStatePersistence,
 } from "./window-manager";
+
+vi.mock("electron", () => ({
+  app: new EventEmitter(),
+  BrowserWindow: class extends EventEmitter {
+    getNormalBounds = vi.fn(() => ({ x: 20, y: 30, width: 1000, height: 700 }));
+    isMinimized = vi.fn(() => false);
+    isFullScreen = vi.fn(() => false);
+    isMaximized = vi.fn(() => false);
+    isDestroyed = vi.fn(() => false);
+  },
+}));
+
+describe("window state persistence", () => {
+  const directories: string[] = [];
+
+  afterEach(async () => {
+    app.removeAllListeners("before-quit");
+    vi.useRealTimers();
+    await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
+  });
+
+  it("keeps saving geometry after a close request is cancelled", async () => {
+    vi.useFakeTimers();
+    const userDataPath = await mkdtemp(path.join(os.tmpdir(), "paseo-window-persist-"));
+    directories.push(userDataPath);
+    const store = createWindowStateStore({ userDataPath });
+    const save = vi.spyOn(store, "save");
+    const win = new BrowserWindow();
+    setupWindowStatePersistence(win, store);
+
+    win.emit("close", { preventDefault: vi.fn() });
+    const resized = { x: 150, y: 170, width: 1200, height: 800 };
+    vi.mocked(win.getNormalBounds).mockReturnValue(resized);
+    win.emit("resize");
+    await vi.advanceTimersByTimeAsync(400);
+    await save.mock.results[0].value;
+
+    expect(await store.load()).toEqual({ ...resized, isMaximized: false });
+  });
+
+  it("flushes the latest geometry after the window is destroyed and clears pending saves", async () => {
+    vi.useFakeTimers();
+    const userDataPath = await mkdtemp(path.join(os.tmpdir(), "paseo-window-persist-"));
+    directories.push(userDataPath);
+    const store = createWindowStateStore({ userDataPath });
+    const save = vi.spyOn(store, "save");
+    const saveSync = vi.spyOn(store, "saveSync");
+    const win = new BrowserWindow();
+    setupWindowStatePersistence(win, store);
+    win.emit("resize");
+    win.emit("close", { preventDefault: vi.fn() });
+    const finalBounds = { x: 200, y: 250, width: 1300, height: 900 };
+    vi.mocked(win.getNormalBounds).mockReturnValue(finalBounds);
+    win.emit("close", { preventDefault: vi.fn() });
+    vi.mocked(win.isDestroyed).mockReturnValue(true);
+    vi.mocked(win.getNormalBounds).mockImplementation(() => {
+      throw new Error("Window has been destroyed");
+    });
+    win.emit("closed");
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(await store.load()).toEqual({ ...finalBounds, isMaximized: false });
+    expect(saveSync).toHaveBeenCalledTimes(1);
+    expect(save).not.toHaveBeenCalled();
+    expect(app.listenerCount("before-quit")).toBe(0);
+  });
+
+  it("flushes on app quit even when the window close event is bypassed", async () => {
+    const userDataPath = await mkdtemp(path.join(os.tmpdir(), "paseo-window-persist-"));
+    directories.push(userDataPath);
+    const store = createWindowStateStore({ userDataPath });
+    const saveSync = vi.spyOn(store, "saveSync");
+    const win = new BrowserWindow();
+    setupWindowStatePersistence(win, store);
+    const finalBounds = { x: 300, y: 350, width: 1400, height: 1000 };
+    vi.mocked(win.getNormalBounds).mockReturnValue(finalBounds);
+
+    app.emit("before-quit");
+    win.emit("closed");
+
+    expect(await store.load()).toEqual({ ...finalBounds, isMaximized: false });
+    expect(saveSync).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("window-manager", () => {
   describe("readBadgeCount", () => {

@@ -125,8 +125,8 @@ export class FileEditorModel {
     this.reloadRequested = false;
     const modified = content !== this.persistedContent;
     let status: FileEditorStatus = modified ? "dirty" : "clean";
-    if (this.snapshot.status === "conflict") {
-      status = "conflict";
+    if (this.snapshot.status === "conflict" || this.snapshot.status === "saving") {
+      status = this.snapshot.status;
     }
     this.setSnapshot({ ...this.snapshot, status, content, modified, error: null });
     if (status === "dirty") this.scheduleAutosave();
