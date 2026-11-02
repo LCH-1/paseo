@@ -933,6 +933,7 @@ async function bootstrap(): Promise<void> {
   }
 
   await app.whenReady();
+  session.defaultSession.setDownloadPath(app.getPath("desktop"));
 
   if (app.isPackaged) {
     const home = resolvePaseoHome();

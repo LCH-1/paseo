@@ -8,7 +8,7 @@ import {
 import { explorerFileFromReadResult } from "@/file-explorer/read-result";
 import { usePanelStore } from "@/stores/panel-store";
 import { revealExplorerDirectory } from "@/file-explorer/tree";
-import { parentExplorerPath } from "@/utils/explorer-paths";
+import { parentExplorerPath, resolveExplorerDownloadPath } from "@/utils/explorer-paths";
 
 function createExplorerState(): AgentFileExplorerState {
   return {
@@ -267,7 +267,8 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
       if (!client) {
         throw new Error(t("workspace.terminal.hostDisconnected"));
       }
-      const payload = await client.requestDownloadToken(normalizedWorkspaceRoot, path);
+      const target = resolveExplorerDownloadPath(normalizedWorkspaceRoot, path);
+      const payload = await client.requestDownloadToken(target.cwd, target.path);
       if (payload.error) {
         throw new Error(payload.error);
       }
@@ -286,7 +287,8 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
       }
       // No request timeout: a large file over a slow relay legitimately takes longer than the
       // 60 s default, and a dead connection still rejects on disconnect.
-      return client.readFile(normalizedWorkspaceRoot, path, undefined, maxBytes, 0);
+      const target = resolveExplorerDownloadPath(normalizedWorkspaceRoot, path);
+      return client.readFile(target.cwd, target.path, undefined, maxBytes, 0);
     },
     [client, normalizedWorkspaceRoot, t],
   );

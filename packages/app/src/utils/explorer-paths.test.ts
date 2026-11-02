@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAbsoluteExplorerPath } from "./explorer-paths";
+import { buildAbsoluteExplorerPath, resolveExplorerDownloadPath } from "./explorer-paths";
 
 describe("buildAbsoluteExplorerPath", () => {
   it("builds a POSIX absolute path from a relative explorer path", () => {
@@ -46,4 +46,27 @@ describe("buildAbsoluteExplorerPath", () => {
       }),
     ).toBe("/tmp/another/location.txt");
   });
+});
+
+describe("resolveExplorerDownloadPath", () => {
+  it.each([
+    ["/srv/project/backend", "/srv/project/deployment.zip", "/srv/project", "deployment.zip"],
+    ["/srv/project", "/deployment.zip", "/", "deployment.zip"],
+    ["C:\\project", "D:\\exports\\배포 자료.zip", "D:/exports", "배포 자료.zip"],
+    ["C:\\project", "D:\\deployment.zip", "D:/", "deployment.zip"],
+    ["C:\\project", "\\\\server\\share\\deployment.zip", "//server/share", "deployment.zip"],
+    ["/srv/project", "/srv/project/docs/report.zip", "/srv/project/docs", "report.zip"],
+  ])("scopes %s → %s to the exact file parent", (workspace, file, cwd, path) => {
+    expect(resolveExplorerDownloadPath(workspace, file)).toEqual({ cwd, path });
+  });
+
+  it.each(["docs/report.zip", "../deployment.zip", "~/deployment.zip", ".", "/", "D:/exports/"])(
+    "preserves workspace scoping for relative or non-file target %s",
+    (path) => {
+      expect(resolveExplorerDownloadPath("/srv/project", path)).toEqual({
+        cwd: "/srv/project",
+        path,
+      });
+    },
+  );
 });
