@@ -49,6 +49,7 @@ import { setupDarwinCompositorWatchdog } from "./window/compositor-watchdog/inde
 import { showWindowWhenReady } from "./window/show-when-ready.js";
 import { resolveDesktopWindowChromeMode, windowChromeModeArgument } from "./window/chrome.js";
 import { registerDialogHandlers } from "./features/dialogs.js";
+import { configureDesktopDownloads } from "./features/downloads.js";
 import {
   registerNotificationHandlers,
   ensureNotificationCenterRegistration,
@@ -933,7 +934,7 @@ async function bootstrap(): Promise<void> {
   }
 
   await app.whenReady();
-  session.defaultSession.setDownloadPath(app.getPath("desktop"));
+  configureDesktopDownloads(session.defaultSession, app.getPath("desktop"));
 
   if (app.isPackaged) {
     const home = resolvePaseoHome();
