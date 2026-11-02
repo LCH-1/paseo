@@ -141,9 +141,6 @@ async function persistProviderPreferences(input: {
       updates: {
         model: modelId || undefined,
         mode: formState.modeId || undefined,
-        ...(modelId && formState.thinkingOptionId
-          ? { thinkingByModel: { [modelId]: formState.thinkingOptionId } }
-          : {}),
       },
     }),
   );
@@ -439,22 +436,8 @@ export function useAgentFormState(options: UseAgentFormStateOptions): UseAgentFo
   const setThinkingOptionFromUser = useCallback(
     (thinkingOptionId: string) => {
       dispatch({ type: "SET_THINKING_OPTION_FROM_USER", thinkingOptionId });
-      const { provider, model: modelId } = formState;
-      if (provider && modelId) {
-        void updateCurrentPreferences((current) =>
-          mergeSelectedComposerPreferences({
-            preferences: current,
-            provider,
-            updates: {
-              thinkingByModel: {
-                [modelId]: thinkingOptionId,
-              },
-            },
-          }),
-        );
-      }
     },
-    [formState, updateCurrentPreferences, dispatch],
+    [dispatch],
   );
 
   const refreshProviderModels = useCallback(

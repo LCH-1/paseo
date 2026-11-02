@@ -169,7 +169,6 @@ export function mergeCreateAgentSelectionPreferences(args: {
 
   const modelId = args.modelId?.trim() ?? "";
   const modeId = args.modeId?.trim() ?? "";
-  const thinkingOptionId = args.thinkingOptionId?.trim() ?? "";
   const featureValues = featureValuesSchema.safeParse(args.featureValues);
 
   return mergeProviderPreferences({
@@ -178,7 +177,6 @@ export function mergeCreateAgentSelectionPreferences(args: {
     updates: {
       model: modelId || undefined,
       mode: args.modeId === undefined ? undefined : modeId || null,
-      ...(modelId && thinkingOptionId ? { thinkingByModel: { [modelId]: thinkingOptionId } } : {}),
       ...(featureValues.success ? { featureValues: featureValues.data } : {}),
     },
   });
@@ -212,9 +210,6 @@ export function applyAgentProfilePreferences(args: {
     updates: {
       model: args.modelId || undefined,
       mode: args.modeId || null,
-      ...(args.modelId && args.thinkingOptionId
-        ? { thinkingByModel: { [args.modelId]: args.thinkingOptionId } }
-        : {}),
       featureValues: args.featureValues,
     },
   });

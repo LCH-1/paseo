@@ -163,7 +163,6 @@ function updateSelectionPreferences(input: {
 }): FormPreferences {
   const model = input.model.trim();
   const mode = input.mode.trim();
-  const thinkingOptionId = input.thinkingOptionId.trim();
   return {
     ...mergeProviderPreferences({
       preferences: input.preferences,
@@ -171,7 +170,6 @@ function updateSelectionPreferences(input: {
       updates: {
         model: model || undefined,
         mode: mode || undefined,
-        ...(model && thinkingOptionId ? { thinkingByModel: { [model]: thinkingOptionId } } : {}),
       },
     }),
     isolation: input.isolation,

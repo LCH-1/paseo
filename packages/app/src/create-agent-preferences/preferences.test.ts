@@ -366,8 +366,13 @@ describe("create agent preferences", () => {
     expect(storage.savedPreferences()).toEqual({ isolation: "worktree" });
   });
 
-  it("flushes the full create-agent selection into provider preferences", async () => {
-    const storage = new FakeCreateAgentPreferenceStorage();
+  it("preserves the bulk thinking default when saving a session selection", async () => {
+    const storage = new FakeCreateAgentPreferenceStorage({
+      stored: {
+        provider: "codex",
+        providerPreferences: { codex: { thinkingByModel: { "gpt-5.5": "low" } } },
+      },
+    });
     const preferences = new CreateAgentPreferencesService(storage);
 
     const saveSelection = preferences.update((current) =>
@@ -391,7 +396,7 @@ describe("create agent preferences", () => {
         codex: {
           model: "gpt-5.5",
           mode: "full-access",
-          thinkingByModel: { "gpt-5.5": "high" },
+          thinkingByModel: { "gpt-5.5": "low" },
           featureValues: { fast_mode: true },
         },
       },
@@ -473,6 +478,34 @@ describe("create agent preferences", () => {
         mock: { model: "one-minute-stream", mode: "approval-test", featureValues: {} },
       },
     });
+  });
+
+  it("keeps an explicit bulk effort default when applying a different session profile", () => {
+    const preferences = saveSessionDefaults({
+      preferences: {},
+      provider: "codex",
+      selection: { ...EMPTY_SESSION_SETTINGS, model: "gpt-5.5", thinking: "low" },
+      features: [],
+    });
+    const selected = applyAgentProfilePreferences({
+      preferences,
+      previousProvider: "codex",
+      previousProviderModeIds: ["full-access"],
+      provider: "codex",
+      modelId: "gpt-5.5",
+      modeId: "full-access",
+      thinkingOptionId: "high",
+      featureValues: {},
+    });
+    expect(selected.providerPreferences?.codex?.thinkingByModel).toEqual({ "gpt-5.5": "low" });
+    expect(
+      saveSessionDefaults({
+        preferences: selected,
+        provider: "codex",
+        selection: { ...EMPTY_SESSION_SETTINGS, thinking: "medium" },
+        features: [],
+      }).providerPreferences?.codex?.thinkingByModel,
+    ).toEqual({ "gpt-5.5": "medium" });
   });
 
   it("loads invalid stored preferences as empty preferences", () => {

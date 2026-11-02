@@ -6,17 +6,23 @@ import {
   submitDraftAgent,
   waitForDraftComposer,
 } from "../support/helpers/command-center-agent-controls";
-import { openCommandCenter } from "../support/helpers/command-center";
-import { runWorkspaceActionFromCommandCenter } from "../support/helpers/command-center-workspace-actions";
 import { selectModel } from "../support/helpers/app";
 
 const DISABLE_DEFAULT_SEED_ONCE_KEY = "@paseo:e2e-disable-default-seed-once";
 const SEED_NONCE_KEY = "@paseo:e2e-seed-nonce";
 
 async function openNewAgentTab(page: Page): Promise<void> {
-  // Preference persistence does not depend on the animated tab-creation menu.
-  await runWorkspaceActionFromCommandCenter(page, "New agent");
+  const panel = await openCommandCenter(page);
+  await panel.getByTestId("command-center-input").fill("New agent");
+  await panel.getByRole("button", { name: /^New agent(?:\s|$)/ }).click();
   await waitForDraftComposer(page);
+}
+
+async function openCommandCenter(page: Page) {
+  await page.keyboard.press("ControlOrMeta+Shift+f");
+  const panel = page.getByTestId("command-center-panel");
+  await expect(panel).toBeVisible();
+  return panel;
 }
 
 async function chooseDraftControl(page: Page, query: string, choice: string): Promise<void> {
@@ -87,9 +93,8 @@ async function seedLegacyModelPreference(page: Page): Promise<void> {
 test.describe("Workspace draft thinking preferences", () => {
   test.describe.configure({ timeout: 180_000 });
 
-  test("restores a model's remembered thinking after another model and a reload", async ({
-    page,
-  }) => {
+  test("keeps draft and live effort changes local to their session", async ({ page }) => {
+    page.setDefaultTimeout(15_000);
     const workspace = await seedWorkspace({ repoPrefix: "draft-thinking-preferences-" });
 
     try {
@@ -100,40 +105,21 @@ test.describe("Workspace draft thinking preferences", () => {
         "five minute stream",
         "Model › Mock Load Test › Five minute stream",
       );
+      await expectThinkingSelected(page, "Low");
+      const defaultThinking = await readRememberedThinking(page, "five-minute-stream");
       await chooseDraftControl(page, "medium", "Thinking › Medium");
       await expectThinkingSelected(page, "Medium");
-      await chooseDraftControl(
-        page,
-        "ten second stream",
-        "Model › Mock Load Test › Ten second stream",
-      );
-      await chooseDraftControl(
-        page,
-        "five minute stream",
-        "Model › Mock Load Test › Five minute stream",
-      );
+      expect(await readRememberedThinking(page, "five-minute-stream")).toBe(defaultThinking);
+      await submitDraftAgent(page, "Use medium effort only for this session");
       await expectThinkingSelected(page, "Medium");
-      await submitDraftAgent(page, "Remember medium thinking for this model");
-
+      await chooseDraftControl(page, "high", "Thinking › High");
+      await expectThinkingSelected(page, "High");
+      expect(await readRememberedThinking(page, "five-minute-stream")).toBe(defaultThinking);
       await openNewAgentTab(page);
-      await expectThinkingSelected(page, "Medium");
-      await chooseDraftControl(
-        page,
-        "ten second stream",
-        "Model › Mock Load Test › Ten second stream",
-      );
-      await submitDraftAgent(page, "Hello from the other model");
-
-      await openNewAgentTab(page);
+      await expectThinkingSelected(page, "Low");
       await reloadWithPersistedPreferences(page);
-      await expect.poll(() => readRememberedThinking(page, "five-minute-stream")).toBe("medium");
-      await chooseDraftControl(
-        page,
-        "five minute stream",
-        "Model › Mock Load Test › Five minute stream",
-      );
-
-      await expectThinkingSelected(page, "Medium");
+      await expectThinkingSelected(page, "Low");
+      expect(await readRememberedThinking(page, "five-minute-stream")).toBe(defaultThinking);
     } finally {
       await workspace.cleanup();
     }
