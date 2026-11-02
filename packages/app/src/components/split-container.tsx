@@ -39,6 +39,7 @@ import { useTranslation } from "react-i18next";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { ResizeHandle } from "@/components/resize-handle";
 import {
+  readRenderedContainerSize,
   resolveExplorerSidebarDockSizes,
   resolveExplorerSidebarWidth,
 } from "@/components/explorer-sidebar-layout";
@@ -446,7 +447,11 @@ export function SplitContainer({
     [explorerSidebarWidth],
   );
   const handleWorkspaceShellLayout = useCallback((event: LayoutChangeEvent) => {
-    const nextWidth = event.nativeEvent.layout.width;
+    const nextWidth = readRenderedContainerSize({
+      ...event.nativeEvent.layout,
+      direction: "horizontal",
+    });
+    if (nextWidth === null) return;
     setWorkspaceShellWidth((current) => (current === nextWidth ? current : nextWidth));
   }, []);
   const previewExplorerSidebarResize = useCallback(
@@ -994,10 +999,11 @@ function SplitNodeView({
   );
   const handleGroupLayout = useCallback(
     (event: LayoutChangeEvent) => {
-      const nextSize =
-        groupDirection === "horizontal"
-          ? event.nativeEvent.layout.width
-          : event.nativeEvent.layout.height;
+      const nextSize = readRenderedContainerSize({
+        ...event.nativeEvent.layout,
+        direction: groupDirection === "horizontal" ? "horizontal" : "vertical",
+      });
+      if (nextSize === null) return;
       setGroupContainerSize((current) => (current === nextSize ? current : nextSize));
     },
     [groupDirection],

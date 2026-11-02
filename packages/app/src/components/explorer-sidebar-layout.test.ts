@@ -1,17 +1,48 @@
 import { describe, expect, it } from "vitest";
 import {
   explorerSidebarCloseButtonLayout,
+  readRenderedContainerSize,
   resolveExplorerSidebarDockSizes,
   resolveExplorerSidebarWidth,
 } from "@/components/explorer-sidebar-layout";
 
 describe("Explorer sidebar layout", () => {
+  it("preserves the previous dock measurement while a retained workspace is hidden", () => {
+    const requestedWidth = 900;
+    let containerWidth = 1200;
+    expect(resolveExplorerSidebarWidth({ requestedWidth, containerWidth })).toBe(800);
+    for (const hiddenSize of [
+      { width: 0, height: 500 },
+      { width: 1200, height: 0 },
+      { width: 0, height: 0 },
+    ]) {
+      containerWidth =
+        readRenderedContainerSize({ ...hiddenSize, direction: "horizontal" }) ?? containerWidth;
+      expect(resolveExplorerSidebarWidth({ requestedWidth, containerWidth })).toBe(800);
+      expect(resolveExplorerSidebarDockSizes({ requestedWidth, containerWidth })[1]).toBeCloseTo(
+        2 / 3,
+      );
+    }
+    containerWidth =
+      readRenderedContainerSize({ width: 1520, height: 500, direction: "horizontal" }) ??
+      containerWidth;
+    expect(resolveExplorerSidebarWidth({ requestedWidth, containerWidth })).toBe(900);
+  });
+
   it("keeps the sidebar width fixed when the workspace body changes size", () => {
     const narrow = resolveExplorerSidebarDockSizes({ requestedWidth: 320, containerWidth: 1200 });
     const wide = resolveExplorerSidebarDockSizes({ requestedWidth: 320, containerWidth: 1520 });
 
     expect(narrow[1] * 1200).toBeCloseTo(320);
     expect(wide[1] * 1520).toBeCloseTo(320);
+  });
+
+  it("accepts vertical split geometry only while both dimensions are rendered", () => {
+    expect(readRenderedContainerSize({ width: 1200, height: 500, direction: "vertical" })).toBe(
+      500,
+    );
+    expect(readRenderedContainerSize({ width: 0, height: 500, direction: "vertical" })).toBeNull();
+    expect(readRenderedContainerSize({ width: 1200, height: 0, direction: "vertical" })).toBeNull();
   });
 
   it("has no fixed maximum while preserving room for the workspace body", () => {

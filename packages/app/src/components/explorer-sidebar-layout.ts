@@ -27,6 +27,19 @@ const DEFAULT_EXPLORER_SIDEBAR_WIDTH = 320;
 const MIN_EXPLORER_SIDEBAR_WIDTH = 240;
 const MIN_WORKSPACE_BODY_WIDTH = 400;
 
+interface RenderedContainerSizeInput {
+  width: number;
+  height: number;
+  direction: "horizontal" | "vertical";
+}
+
+export function readRenderedContainerSize(input: RenderedContainerSizeInput): number | null {
+  // A retained surface under display:none has no geometry. Keep its last
+  // rendered measurement so revealing it does not first paint a collapsed dock.
+  if (input.width <= 0 || input.height <= 0) return null;
+  return input.direction === "horizontal" ? input.width : input.height;
+}
+
 export function resolveExplorerSidebarWidth(input: {
   requestedWidth?: number;
   containerWidth: number;
