@@ -10,6 +10,7 @@ import React, {
 import {
   defaultRangeExtractor,
   observeElementOffset,
+  observeElementRect,
   measureElement as measureVirtualElement,
   useVirtualizer,
   type Range as VirtualRange,
@@ -364,6 +365,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
   const wasFollowOutputLayoutActiveRef = useRef(false);
   const resumedUnchangedLayoutRef = useRef(false);
   const pendingResumeGeometryCheckRef = useRef(false);
+  const lastBottomAnchorActivationRef = useRef<string | null>(null);
   const shouldUseVirtualizer = segments.historyVirtualized.length > 0;
   const {
     renderHistoryVirtualizedRow,
@@ -440,6 +442,11 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
       unsubscribe?.();
     };
   }, []);
+  const observeVirtualRect = useCallback<typeof observeElementRect>((instance, onRect) => {
+    return observeElementRect(instance, (rect) => {
+      if (rect.width > 0 && rect.height > 0) onRect(rect);
+    });
+  }, []);
   const contentWidth = contentRef.current?.getBoundingClientRect().width;
   const rowVirtualizer = useVirtualizer({
     count: segments.historyVirtualized.length,
@@ -457,6 +464,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
       return row ? estimateStreamItemHeight({ item: row, contentMaxWidth }) : 120;
     },
     observeElementOffset: observeVirtualOffset,
+    observeElementRect: observeVirtualRect,
     rangeExtractor,
     scrollMargin: VIRTUALIZER_SCROLL_MARGIN_PX,
     overscan: 8,
@@ -839,9 +847,14 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
     if (!isActiveRef.current || !isActivationReady) {
       return;
     }
+    // Freeze restores layout effects on reveal without creating a new route activation.
+    if (lastBottomAnchorActivationRef.current === activationKey) {
+      return;
+    }
     if (hasRouteBottomAnchorRequest && !followOutputRef.current) {
       return;
     }
+    lastBottomAnchorActivationRef.current = activationKey;
     setFollowOutput(true);
     forceStickToBottom();
     const timeout = window.setTimeout(() => {

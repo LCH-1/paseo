@@ -84,6 +84,7 @@ describe("createWebStreamStrategy", () => {
   let container: HTMLDivElement | null = null;
   let originalScrollTo: HTMLElement["scrollTo"] | undefined;
   let originalOffsetHeight: PropertyDescriptor | undefined;
+  let originalOffsetWidth: PropertyDescriptor | undefined;
 
   beforeEach(() => {
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
@@ -107,6 +108,13 @@ describe("createWebStreamStrategy", () => {
         return 24;
       },
     });
+    originalOffsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth");
+    Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+      configurable: true,
+      get() {
+        return 800;
+      },
+    });
   });
 
   afterEach(() => {
@@ -127,6 +135,11 @@ describe("createWebStreamStrategy", () => {
       Object.defineProperty(HTMLElement.prototype, "offsetHeight", originalOffsetHeight);
     } else {
       Reflect.deleteProperty(HTMLElement.prototype, "offsetHeight");
+    }
+    if (originalOffsetWidth) {
+      Object.defineProperty(HTMLElement.prototype, "offsetWidth", originalOffsetWidth);
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, "offsetWidth");
     }
     vi.restoreAllMocks();
   });
