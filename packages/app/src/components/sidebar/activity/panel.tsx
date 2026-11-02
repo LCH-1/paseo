@@ -95,6 +95,7 @@ export function SidebarActivityPanel({
         {view === "unreviewed" ? <ActivityMarkAllRead agents={sessions} /> : null}
         {showingAll ? null : (
           <ActivitySessionList
+            key={view}
             active={active}
             agents={sessions}
             emptyState={emptyState}
@@ -157,6 +158,30 @@ function ActivitySessionList({
   onSessionPress?: () => void;
 }) {
   const { rows } = useHistoryConversations(active ? agents : EMPTY_AGENTS);
+  const [pressed, setPressed] = useState<{ row: ActivityRow; index: number } | null>(null);
+  const releasePressed = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (releasePressed.current) clearTimeout(releasePressed.current);
+    },
+    [],
+  );
+  const retainPressed = useCallback(
+    (row: ActivityRow) => {
+      if (releasePressed.current) clearTimeout(releasePressed.current);
+      setPressed({ row, index: rows.findIndex((item) => sessionKey(item) === sessionKey(row)) });
+      // Reading a conversation removes it from Unreviewed. Keep the clicked DOM
+      // row stable through the second click, even if its attention clears first.
+      releasePressed.current = setTimeout(() => setPressed(null), 600);
+    },
+    [rows],
+  );
+  const displayedRows = useMemo(() => {
+    if (!pressed || rows.some((row) => sessionKey(row) === sessionKey(pressed.row))) return rows;
+    const next = [...rows];
+    next.splice(Math.max(0, Math.min(pressed.index, next.length)), 0, pressed.row);
+    return next;
+  }, [rows, pressed]);
   const [width, setWidth] = useState(0);
   const onLayout = useCallback((event: LayoutChangeEvent) => {
     const nextWidth = event.nativeEvent.layout.width;
@@ -165,16 +190,21 @@ function ActivitySessionList({
   const compact = width < 280;
   const renderSession = useCallback(
     ({ item }: { item: ActivityRow }) => (
-      <ActivitySessionRow row={item} compact={compact} onSessionPress={onSessionPress} />
+      <ActivitySessionRow
+        row={item}
+        compact={compact}
+        onSessionPress={onSessionPress}
+        onOpen={retainPressed}
+      />
     ),
-    [compact, onSessionPress],
+    [compact, onSessionPress, retainPressed],
   );
   return (
     <FlatList
       testID="sidebar-activity-sessions"
       onLayout={onLayout}
       extraData={compact}
-      data={rows}
+      data={displayedRows}
       keyExtractor={sessionKey}
       renderItem={renderSession}
       contentContainerStyle={styles.listContent}
@@ -226,10 +256,12 @@ const ActivitySessionRow = memo(function ActivitySessionRow({
   row,
   compact,
   onSessionPress,
+  onOpen,
 }: {
   row: ActivityRow;
   compact: boolean;
   onSessionPress?: () => void;
+  onOpen: (row: ActivityRow) => void;
 }) {
   const { t } = useTranslation();
   const { agent } = row;
@@ -237,6 +269,7 @@ const ActivitySessionRow = memo(function ActivitySessionRow({
   const hoverIn = useCallback(() => setHovered(true), []);
   const hoverOut = useCallback(() => setHovered(false), []);
   const open = useCallback(() => {
+    onOpen(row);
     navigateToAgent({
       serverId: agent.serverId,
       agentId: agent.id,
@@ -244,7 +277,7 @@ const ActivitySessionRow = memo(function ActivitySessionRow({
       pin: true,
     });
     onSessionPress?.();
-  }, [agent.serverId, agent.id, agent.workspaceId, onSessionPress]);
+  }, [agent.serverId, agent.id, agent.workspaceId, onSessionPress, onOpen, row]);
   const title = agent.title || t("sidebar.activity.untitled");
   const tabTitle = useAgentTabTitle({
     serverId: agent.serverId,

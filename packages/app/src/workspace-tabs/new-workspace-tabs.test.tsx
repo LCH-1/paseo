@@ -24,7 +24,7 @@ import {
 
 const route = vi.hoisted(() => ({ focused: true, pathname: "/new" }));
 vi.mock("expo-router", () => ({
-  router: { push: vi.fn(), navigate: vi.fn() },
+  router: { push: vi.fn(), navigate: vi.fn(), replace: vi.fn() },
   usePathname: () => route.pathname,
   useLocalSearchParams: () => ({ serverId: "host-a" }),
 }));
@@ -65,6 +65,43 @@ it("keeps one history tab across navigation and closes it without clearing a com
 });
 
 describe("new workspace tab ownership", () => {
+  it("does not resurrect a closed draft when the still focused form changes its host or remounts", () => {
+    const draftId = bridge.open({ serverId: "host-a" });
+    const href = bridge.getSnapshot().entries[0].href;
+    const view = renderHook(
+      ({ serverId }) => useNewWorkspaceTabPresence({ draftId, href, serverId }),
+      {
+        initialProps: { serverId: "host-a" },
+      },
+    );
+    act(() => bridge.close(draftId));
+    view.rerender({ serverId: "host-b" });
+    expect(bridge.getSnapshot().entries).toEqual([]);
+    expect(bridge.getSnapshot().activeDraftId).toBeNull();
+    view.unmount();
+    const remounted = renderHook(() =>
+      useNewWorkspaceTabPresence({ draftId, href, serverId: "host-b" }),
+    );
+    expect(bridge.getSnapshot().entries).toEqual([]);
+    remounted.unmount();
+    act(() => bridge.restore({ draftId, href, serverId: "host-b" }));
+    expect(bridge.getSnapshot().entries.map((entry) => entry.draftId)).toEqual([draftId]);
+  });
+
+  it("distinguishes saved input from an empty draft and dismisses an empty tab view", () => {
+    const draftId = bridge.open();
+    expect(bridge.hasInput(draftId)).toBe(false);
+    useDraftStore.getState().saveDraftInput({
+      draftKey: buildNewWorkspaceDraftKey(draftId),
+      draft: { text: "입력 중", attachments: [] },
+    });
+    expect(bridge.hasInput(draftId)).toBe(true);
+    bridge.close(draftId, { preserveDraft: true });
+    expect(bridge.hasInput(draftId)).toBe(true);
+    bridge.dismiss();
+    expect(router.replace).toHaveBeenCalledWith("/");
+  });
+
   it("opens independent drafts and keeps snapshots stable until a change", () => {
     const before = bridge.getSnapshot();
     expect(bridge.getSnapshot()).toBe(before);

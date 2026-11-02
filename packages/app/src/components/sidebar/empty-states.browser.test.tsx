@@ -219,7 +219,13 @@ describe("sidebar activity tabs", () => {
     setAgents([{ ...agent("completed-session", false), requiresAttention: false }]);
     act(render);
     expect(getByRole(container, "tab", { name: "미확인 0" })).toBeVisible();
-    expect(container.textContent).toContain("완료 후 확인하지 않은 세션이 없습니다.");
+    const retained = getByRole(container, "button", { name: "Paseo-작업탭, completed-session" });
+    // The second click must still hit the same row after clearing attention.
+    act(() => retained.click());
+    expect(onSessionPress).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain("완료 후 확인하지 않은 세션이 없습니다.");
+    });
     act(() => getByRole(container, "tab", { name: "전체" }).click());
     expect(getByRole(container, "button", { name: "workspace-list" })).toBe(workspaceList);
   });

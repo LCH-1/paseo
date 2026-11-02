@@ -50,6 +50,7 @@ interface TabBarRegistration {
 const listeners = new Set<() => void>();
 const tabBars: TabBarRegistration[] = [];
 const knownDrafts = new Set<string>();
+const closedDrafts = new Set<string>();
 let snapshot: NewWorkspaceTabsSnapshot = { entries: [], activeDraftId: null, completions: [] };
 let sequence = 0;
 const adoptedLegacyVersions = new Set<number>();
@@ -87,13 +88,22 @@ export const newWorkspaceTabsBridge = {
     if (entry) router.navigate(entry.href as never);
   },
   restore(entry: NewWorkspaceTabEntry): void {
+    closedDrafts.delete(entry.draftId);
     registerDraft(entry);
+  },
+  hasInput(draftId: string): boolean {
+    const draft = useDraftStore.getState().getDraftInput(buildNewWorkspaceDraftKey(draftId));
+    return Boolean(draft?.text || draft?.attachments.length);
+  },
+  dismiss(): void {
+    router.replace("/");
   },
   close(draftId: string, options?: { preserveDraft?: boolean }): void {
     const entry = snapshot.entries.find((item) => item.draftId === draftId);
     const entries = snapshot.entries.filter((item) => item.draftId !== draftId);
     if (entry?.kind !== "history" && !options?.preserveDraft) clearNewWorkspaceDraftState(draftId);
     knownDrafts.delete(draftId);
+    closedDrafts.add(draftId);
     if (entries.length === snapshot.entries.length) return;
     publish({
       ...snapshot,
@@ -194,7 +204,7 @@ export function useNewWorkspaceTabPresence(input: {
   const pathname = usePathname();
   const { draftId, serverId, href } = input;
   useEffect(() => {
-    if (!focused || pathname !== "/new") return;
+    if (!focused || pathname !== "/new" || closedDrafts.has(draftId)) return;
     const existing = snapshot.entries.find((entry) => entry.draftId === draftId);
     registerDraft({ draftId, serverId: existing?.serverId || serverId, href });
     if (focused && pathname === "/new" && snapshot.activeDraftId !== draftId) {
