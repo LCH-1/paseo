@@ -1,5 +1,5 @@
-import { useCallback, useMemo, type ReactNode } from "react";
-import { View } from "react-native";
+import { useCallback, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import { View, type StyleProp, type ViewStyle } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { RetainedPanel } from "@/components/retained-panel";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
@@ -34,6 +34,8 @@ interface ExplorerSidebarDockProps extends Pick<
   onCloseTabsToRight: (tabId: string, tabs: WorkspaceTabDescriptor[]) => Promise<void> | void;
   onCloseOtherTabs: (tabId: string, tabs: WorkspaceTabDescriptor[]) => Promise<void> | void;
   pane: SplitPane;
+  active: boolean;
+  style?: StyleProp<ViewStyle>;
   uiTabs: WorkspaceTab[];
   normalizedServerId: string;
   normalizedWorkspaceId: string;
@@ -54,6 +56,8 @@ interface ExplorerSidebarDockProps extends Pick<
 /** A dock shell over the shared panel host. It owns no workspace-pane capabilities. */
 export function ExplorerSidebarDock({
   pane,
+  active,
+  style,
   uiTabs,
   normalizedServerId,
   normalizedWorkspaceId,
@@ -80,6 +84,11 @@ export function ExplorerSidebarDock({
   buildPaneContentModel,
   headerAction,
 }: ExplorerSidebarDockProps) {
+  const [hasOpened, setHasOpened] = useState(active);
+  useLayoutEffect(() => {
+    if (active) setHasOpened(true);
+  }, [active]);
+  const containerStyle = useMemo(() => [style, !active && styles.hidden], [active, style]);
   const paneState = useMemo(() => deriveWorkspacePaneState({ pane, tabs: uiTabs }), [pane, uiTabs]);
   const tabs = useMemo(() => paneState.tabs.map((tab) => tab.descriptor), [paneState.tabs]);
   const activeTabId = paneState.activeTabId;
@@ -120,67 +129,72 @@ export function ExplorerSidebarDock({
     [onCloseOtherTabs, tabs],
   );
 
+  if (!active && !hasOpened) return null;
+
   return (
-    <RetainedPanel active>
-      <WindowChromeRegion corners="top-right">
-        <View style={styles.dock} testID="workspace-explorer-sidebar">
-          <WindowChromeSafeArea placement="inline" style={styles.tabRail}>
-            <TitlebarDragRegion />
-            <View style={styles.tabRow}>
-              <WorkspaceDesktopTabsRow
-                host="explorer"
-                launchPurpose="supporting"
-                isFocused={isWorkspaceFocused}
-                ownsKeyboardShortcuts={false}
-                setHoveredCloseTabKey={setHoveredCloseTabKey}
-                onCopyResumeCommand={onCopyResumeCommand}
-                onCopyAgentId={onCopyAgentId}
-                onCopyTerminalId={onCopyTerminalId}
-                onCopyFilePath={onCopyFilePath}
-                onReloadAgent={onReloadAgent}
-                onRenameTab={onRenameTab}
-                onCloseTabsToLeft={handleCloseTabsToLeft}
-                onCloseTabsToRight={handleCloseTabsToRight}
-                onCloseOtherTabs={handleCloseOtherTabs}
-                focusModeEnabled={false}
-                onExitFocusMode={onExitFocusMode}
-                externalDndContext
+    <View style={containerStyle} testID="workspace-explorer-sidebar-retained-host">
+      <RetainedPanel active={active}>
+        <WindowChromeRegion corners="top-right">
+          <View style={styles.dock} testID="workspace-explorer-sidebar">
+            <WindowChromeSafeArea placement="inline" style={styles.tabRail}>
+              <TitlebarDragRegion />
+              <View style={styles.tabRow}>
+                <WorkspaceDesktopTabsRow
+                  host="explorer"
+                  launchPurpose="supporting"
+                  isFocused={active && isWorkspaceFocused}
+                  ownsKeyboardShortcuts={false}
+                  setHoveredCloseTabKey={setHoveredCloseTabKey}
+                  onCopyResumeCommand={onCopyResumeCommand}
+                  onCopyAgentId={onCopyAgentId}
+                  onCopyTerminalId={onCopyTerminalId}
+                  onCopyFilePath={onCopyFilePath}
+                  onReloadAgent={onReloadAgent}
+                  onRenameTab={onRenameTab}
+                  onCloseTabsToLeft={handleCloseTabsToLeft}
+                  onCloseTabsToRight={handleCloseTabsToRight}
+                  onCloseOtherTabs={handleCloseOtherTabs}
+                  focusModeEnabled={false}
+                  onExitFocusMode={onExitFocusMode}
+                  externalDndContext
+                  paneId={pane.id}
+                  tabs={tabItems}
+                  normalizedServerId={normalizedServerId}
+                  normalizedWorkspaceId={normalizedWorkspaceId}
+                  activeDragTabId={activeDragTabId}
+                  tabDropPreviewIndex={
+                    tabDropPreview?.paneId === pane.id ? tabDropPreview.indicatorIndex : null
+                  }
+                  onNavigateTab={handleSelectTab}
+                  onCloseTab={onCloseTab}
+                  onCreateNewTab={onCreateNewTab}
+                  onReorderTabs={handleReorderTabs}
+                />
+              </View>
+              {headerAction ? <View style={styles.headerAction}>{headerAction}</View> : null}
+              <View pointerEvents="none" style={styles.tabRailDivider} />
+            </WindowChromeSafeArea>
+            <View style={styles.content}>
+              <WorkspacePanelHost
                 paneId={pane.id}
-                tabs={tabItems}
+                tabs={tabs}
+                activeTabId={activeTabId}
                 normalizedServerId={normalizedServerId}
                 normalizedWorkspaceId={normalizedWorkspaceId}
-                activeDragTabId={activeDragTabId}
-                tabDropPreviewIndex={
-                  tabDropPreview?.paneId === pane.id ? tabDropPreview.indicatorIndex : null
-                }
-                onNavigateTab={handleSelectTab}
-                onCloseTab={onCloseTab}
-                onCreateNewTab={onCreateNewTab}
-                onReorderTabs={handleReorderTabs}
+                isWorkspaceFocused={active && isWorkspaceFocused}
+                isPaneFocused={active}
+                buildPaneContentModel={buildPaneContentModel}
               />
             </View>
-            {headerAction ? <View style={styles.headerAction}>{headerAction}</View> : null}
-            <View pointerEvents="none" style={styles.tabRailDivider} />
-          </WindowChromeSafeArea>
-          <View style={styles.content}>
-            <WorkspacePanelHost
-              paneId={pane.id}
-              tabs={tabs}
-              activeTabId={activeTabId}
-              normalizedServerId={normalizedServerId}
-              normalizedWorkspaceId={normalizedWorkspaceId}
-              isWorkspaceFocused={isWorkspaceFocused}
-              isPaneFocused
-              buildPaneContentModel={buildPaneContentModel}
-            />
           </View>
-        </View>
-      </WindowChromeRegion>
-    </RetainedPanel>
+        </WindowChromeRegion>
+      </RetainedPanel>
+    </View>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
+  hidden: { display: "none" },
   dock: {
     flex: 1,
     minWidth: 0,

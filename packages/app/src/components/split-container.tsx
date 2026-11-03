@@ -702,49 +702,52 @@ export function SplitContainer({
                 ) : null}
               </View>
             </WindowChromeRegion>
-            {renderExplorerSidebarDock && explorerSidebarPane ? (
+            {explorerSidebarPane ? (
               <>
-                <ResizeHandle
-                  testID="workspace-explorer-sidebar-resize-handle"
-                  direction="horizontal"
-                  hitAreaAlignment="end"
-                  groupId={EXPLORER_SIDEBAR_RESIZE_GROUP_ID}
-                  index={0}
-                  sizes={explorerSidebarDockSizes}
-                  containerSize={workspaceShellWidth}
-                  onPreviewResizeSplit={previewExplorerSidebarResize}
-                  onResizeSplit={commitExplorerSidebarResize}
-                />
-                <View style={explorerSidebarDockStyle}>
-                  <ExplorerSidebarDock
-                    pane={explorerSidebarPane}
-                    uiTabs={uiTabs}
-                    normalizedServerId={normalizedServerId}
-                    normalizedWorkspaceId={normalizedWorkspaceId}
-                    isWorkspaceFocused={isWorkspaceFocused}
-                    closingTabIds={closingTabIds}
-                    onSelectTab={onSelectTabInPane}
-                    onCloseTab={onCloseTab}
-                    onCreateNewTab={onCreateNewTab}
-                    hoveredCloseTabKey={hoveredCloseTabKey}
-                    setHoveredCloseTabKey={setHoveredCloseTabKey}
-                    onCopyResumeCommand={onCopyResumeCommand}
-                    onCopyAgentId={onCopyAgentId}
-                    onCopyTerminalId={onCopyTerminalId}
-                    onCopyFilePath={onCopyFilePath}
-                    onReloadAgent={onReloadAgent}
-                    onRenameTab={onRenameTab}
-                    onCloseTabsToLeft={onCloseTabsToLeft}
-                    onCloseTabsToRight={onCloseTabsToRight}
-                    onCloseOtherTabs={onCloseOtherTabs}
-                    onExitFocusMode={onExitFocusMode}
-                    buildPaneContentModel={buildPaneContentModel}
-                    onReorderTabsInPane={onReorderTabsInPane}
-                    activeDragTabId={activeDragTabId}
-                    tabDropPreview={tabDropPreview}
-                    headerAction={renderExplorerSidebarHeaderAction?.()}
+                {renderExplorerSidebarDock ? (
+                  <ResizeHandle
+                    testID="workspace-explorer-sidebar-resize-handle"
+                    direction="horizontal"
+                    hitAreaAlignment="end"
+                    groupId={EXPLORER_SIDEBAR_RESIZE_GROUP_ID}
+                    index={0}
+                    sizes={explorerSidebarDockSizes}
+                    containerSize={workspaceShellWidth}
+                    onPreviewResizeSplit={previewExplorerSidebarResize}
+                    onResizeSplit={commitExplorerSidebarResize}
                   />
-                </View>
+                ) : null}
+                <ExplorerSidebarDock
+                  key={`${workspaceKey}:${explorerSidebarPane.id}`}
+                  active={renderExplorerSidebarDock}
+                  style={explorerSidebarDockStyle}
+                  pane={explorerSidebarPane}
+                  uiTabs={uiTabs}
+                  normalizedServerId={normalizedServerId}
+                  normalizedWorkspaceId={normalizedWorkspaceId}
+                  isWorkspaceFocused={isWorkspaceFocused}
+                  closingTabIds={closingTabIds}
+                  onSelectTab={onSelectTabInPane}
+                  onCloseTab={onCloseTab}
+                  onCreateNewTab={onCreateNewTab}
+                  hoveredCloseTabKey={hoveredCloseTabKey}
+                  setHoveredCloseTabKey={setHoveredCloseTabKey}
+                  onCopyResumeCommand={onCopyResumeCommand}
+                  onCopyAgentId={onCopyAgentId}
+                  onCopyTerminalId={onCopyTerminalId}
+                  onCopyFilePath={onCopyFilePath}
+                  onReloadAgent={onReloadAgent}
+                  onRenameTab={onRenameTab}
+                  onCloseTabsToLeft={onCloseTabsToLeft}
+                  onCloseTabsToRight={onCloseTabsToRight}
+                  onCloseOtherTabs={onCloseOtherTabs}
+                  onExitFocusMode={onExitFocusMode}
+                  buildPaneContentModel={buildPaneContentModel}
+                  onReorderTabsInPane={onReorderTabsInPane}
+                  activeDragTabId={activeDragTabId}
+                  tabDropPreview={tabDropPreview}
+                  headerAction={renderExplorerSidebarHeaderAction?.()}
+                />
               </>
             ) : null}
           </View>

@@ -1,6 +1,6 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
-import { View, Text, ScrollView as RNScrollView } from "react-native";
+import { View, Text, ScrollView as RNScrollView, type LayoutChangeEvent } from "react-native";
 import { ScrollView as GHScrollView } from "react-native-gesture-handler";
 import { StyleSheet } from "react-native-unistyles";
 import type { DiffLine } from "@/utils/tool-call-parsers";
@@ -126,11 +126,11 @@ export function DiffViewer({
   const { t } = useTranslation();
   const [scrollViewWidth, setScrollViewWidth] = React.useState(0);
   const resolvedEmptyLabel = emptyLabel ?? t("diffViewer.empty");
-  const handleInnerLayout = React.useCallback(
-    (e: { nativeEvent: { layout: { width: number } } }) =>
-      setScrollViewWidth(e.nativeEvent.layout.width),
-    [],
-  );
+  const handleInnerLayout = React.useCallback((event: LayoutChangeEvent) => {
+    const { width, height } = event.nativeEvent.layout;
+    if (width <= 0 || height <= 0) return;
+    setScrollViewWidth((current) => (current === width ? current : width));
+  }, []);
 
   const outerScrollStyle = React.useMemo(
     () => [

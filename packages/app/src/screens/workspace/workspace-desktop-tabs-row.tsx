@@ -12,6 +12,7 @@ import {
 } from "@/workspace-tabs/use-grouped-workspace-tabs";
 import { TAB_GROUP_COLORS, type TabGroup } from "@/workspace-tabs/tab-groups";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { useRetainedPanelActive } from "@/components/retained-panel";
 import React, {
   useCallback,
   useEffect,
@@ -1140,8 +1141,11 @@ function ResolvedWorkspaceDesktopTabsRow({
   onExitFocusMode,
 }: ResolvedWorkspaceDesktopTabsRowProps) {
   const groups = useTabGroupRow();
+  const retainedPanelActive = useRetainedPanelActive();
   const { t } = useTranslation();
   const newTabKeys = useShortcutKeys("workspace-tab-new");
+  const tabsContainerRef = useRef<View>(null);
+  const tabLabelMeasurementsRef = useRef<View>(null);
   const [tabsContainerWidth, setTabsContainerWidth] = useState<number>(0);
   const [exitFocusModeWidth, setExitFocusModeWidth] = useState<number>(0);
   const tabScrollBoundary = useHorizontalScrollBoundary();
@@ -1250,10 +1254,40 @@ function ResolvedWorkspaceDesktopTabsRow({
     });
   }, [currentTabLabelKeys]);
   const publishMeasuredTrack = useCallback(() => {
-    if (tabsContainerWidth <= 0) {
+    let containerWidth = tabsContainerWidth;
+    let measurements = labelMeasurements;
+    if (isWeb) {
+      const container = tabsContainerRef.current;
+      const labels = tabLabelMeasurementsRef.current;
+      if (!(container instanceof HTMLElement) || !(labels instanceof HTMLElement)) {
+        return;
+      }
+      const size = container.getBoundingClientRect();
+      if (size.width <= 0 || size.height <= 0) {
+        return;
+      }
+      containerWidth = Math.round(size.width);
+      measurements = new Map();
+      for (let index = 0; index < tabLabels.length; index++) {
+        const node = labels.children.item(index);
+        if (!node) {
+          return;
+        }
+        const labelSize = node.getBoundingClientRect();
+        if (labelSize.width <= 0 || labelSize.height <= 0) {
+          return;
+        }
+        const label = tabLabels[index];
+        measurements.set(label.key, { label: label.signature, width: Math.ceil(labelSize.width) });
+      }
+      // RN Web onLayout waits for ResizeObserver and a timer. Measure the same
+      // hidden labels before paint so a newly mounted row never paints empty.
+      setTabsContainerWidth((current) => retainWorkspaceTabMeasuredWidth(current, containerWidth));
+    }
+    if (containerWidth <= 0) {
       return;
     }
-    const labelWidths = completeWorkspaceTabLabelWidths(tabLabels, labelMeasurements);
+    const labelWidths = completeWorkspaceTabLabelWidths(tabLabels, measurements);
     if (!labelWidths) {
       return;
     }
@@ -1276,7 +1310,7 @@ function ResolvedWorkspaceDesktopTabsRow({
 
   useLayoutEffect(() => {
     publishMeasuredTrack();
-  }, [publishMeasuredTrack]);
+  }, [publishMeasuredTrack, retainedPanelActive]);
 
   const handleTabLabelLayout = useCallback(
     (key: string, label: string, event: LayoutChangeEvent) => {
@@ -1478,11 +1512,13 @@ function ResolvedWorkspaceDesktopTabsRow({
 
   const row = (
     <View
+      ref={tabsContainerRef}
       style={styles.tabsContainer}
       testID="workspace-tabs-row"
       onLayout={handleTabsContainerLayout}
     >
       <View
+        ref={tabLabelMeasurementsRef}
         style={styles.tabLabelMeasurements}
         pointerEvents="none"
         accessibilityElementsHidden
