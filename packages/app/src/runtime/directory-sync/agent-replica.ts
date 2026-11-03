@@ -98,14 +98,13 @@ export class AgentDirectoryReplica {
   }
 
   applyDelta(delta: AgentDirectoryDelta): void {
-    const before = this.members.has(delta.kind === "remove" ? delta.agentId : delta.agent.id);
     const result = this.storeProjection.applyDelta(delta);
     if (delta.kind === "remove") {
       this.members.delete(delta.agentId);
       this.advance(delta.agentId);
     } else {
       this.members.add(delta.agent.id);
-      if (!before) this.advance(delta.agent.id);
+      this.advance(delta.agent.id);
     }
     if (result.stoppedRunning) this.onStoppedRunning(result.agentId);
     this.persist(
@@ -116,7 +115,9 @@ export class AgentDirectoryReplica {
   }
 
   accept(agent: Agent): Agent {
+    const previous = this.storeProjection.get(agent.id);
     const accepted = this.storeProjection.accept(agent);
+    if (accepted !== previous) this.advance(agent.id);
     this.members.add(accepted.id);
     this.persist([this.agentUpsert(accepted)]);
     return accepted;
@@ -146,6 +147,10 @@ export class AgentDirectoryReplica {
     this.pendingCacheReads.clear();
     for (const agentId of nextIds) this.members.add(agentId);
     const agents = this.storeProjection.replaceFetched(reconciled);
+    for (const [agentId, agent] of agents) {
+      const previousAgent = previous.get(agentId);
+      if (previousAgent && previousAgent !== agent) this.advance(agentId);
+    }
     for (const [agentId, previousAgent] of previous) {
       if (previousAgent.turn.phase === "open" && agents.get(agentId)?.turn.phase === "idle") {
         this.onStoppedRunning(agentId);
@@ -217,6 +222,7 @@ export class AgentDirectoryReplica {
     const wasRunning = this.storeProjection.get(agentId)?.turn.phase === "open";
     const accepted = this.storeProjection.applyTurn(agentId, transition);
     if (!accepted) return;
+    this.advance(agentId);
     this.persist([this.agentUpsert(accepted)]);
     if (wasRunning && accepted.turn.phase === "idle") this.onStoppedRunning(agentId);
   }

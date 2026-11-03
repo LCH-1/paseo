@@ -143,6 +143,98 @@ describe("AgentDirectoryReplica", () => {
     store.clearSession(serverId);
   });
 
+  it("does not reopen a completed turn when an older history request finishes later", () => {
+    const serverId = "agent-replica-late-running-history";
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, null);
+    const replica = new AgentDirectoryReplica(
+      serverId,
+      () => undefined,
+      () => undefined,
+    );
+    const running = {
+      ...payload("running"),
+      status: "running" as const,
+      activeTurn: { turnId: "turn-1", startedAt: null },
+    };
+    replica.commitSnapshot([entry(running)], []);
+    const request = replica.captureTimeline("agent");
+
+    replica.applyTurnLiveness("agent", { type: "stream_close", turnId: "turn-1" });
+    replica.submitTimelineAgent(request, running);
+
+    expect(selectAgentTurnPresentation(store.getSession(serverId), "agent").isActive).toBe(false);
+    store.clearSession(serverId);
+  });
+
+  it.each(["delta", "snapshot", "accept"] as const)(
+    "preserves completion from %s when a previous history response arrives",
+    (source) => {
+      const serverId = `agent-replica-late-history-${source}`;
+      const store = useSessionStore.getState();
+      store.initializeSession(serverId, null);
+      const replica = new AgentDirectoryReplica(
+        serverId,
+        () => undefined,
+        () => undefined,
+      );
+      const running = {
+        ...payload("running"),
+        status: "running" as const,
+        activeTurn: { turnId: "turn-1", startedAt: null },
+      };
+      const completed = { ...payload("completed"), activeTurn: null };
+      replica.commitSnapshot([entry(running)], []);
+      const request = replica.captureTimeline("agent");
+      const complete = {
+        delta: () =>
+          replica.applyDelta({
+            kind: "upsert",
+            agent: completed,
+            project: entry(completed).project,
+          }),
+        snapshot: () => replica.commitSnapshot([entry(completed)], []),
+        accept: () => replica.accept(normalizeAgentSnapshot(completed, serverId)),
+      };
+      complete[source]();
+      replica.submitTimelineAgent(request, running);
+
+      expect(selectAgentTurnPresentation(store.getSession(serverId), "agent").isActive).toBe(false);
+      expect(store.getSession(serverId)?.agents.get("agent")?.title).toBe("completed");
+      store.clearSession(serverId);
+    },
+  );
+
+  it("keeps a new turn active when an earlier idle history response arrives", () => {
+    const serverId = "agent-replica-late-idle-history";
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, null);
+    const replica = new AgentDirectoryReplica(
+      serverId,
+      () => undefined,
+      () => undefined,
+    );
+    replica.commitSnapshot([entry(payload("idle"))], []);
+    const request = replica.captureTimeline("agent");
+    replica.applyTurnLiveness("agent", {
+      type: "stream_open",
+      turn: { turnId: "turn-new", startedAt: null },
+    });
+    replica.submitTimelineAgent(request, payload("old idle"));
+    expect(selectAgentTurnPresentation(store.getSession(serverId), "agent").turnId).toBe(
+      "turn-new",
+    );
+    const currentRequest = replica.captureTimeline("agent");
+    expect(
+      replica.submitTimelineAgent(currentRequest, {
+        ...payload("fresh"),
+        activeTurn: { turnId: "turn-new", startedAt: null },
+      }),
+    ).toBe(true);
+    expect(store.getSession(serverId)?.agents.get("agent")?.title).toBe("fresh");
+    store.clearSession(serverId);
+  });
+
   it("persists stream-only turn transitions through the agent owner", () => {
     const serverId = "agent-replica-stream-turn";
     const store = useSessionStore.getState();
