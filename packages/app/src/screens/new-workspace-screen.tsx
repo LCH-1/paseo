@@ -61,6 +61,10 @@ import {
 import { normalizeWorkspaceDescriptor, type WorkspaceDescriptor } from "@/stores/session-store";
 import { useWorkspace } from "@/stores/session-store-hooks";
 import { buildNewWorkspaceDraftKey, generateDraftId } from "@/stores/draft-keys";
+import {
+  buildDraftCreationKey,
+  resolveDraftCreationRetry,
+} from "@/composer/draft/workspace-tab-core";
 import { useOpenAddProject } from "@/hooks/use-open-add-project";
 import { isActiveCreateFlowForDraft, useCreateFlowStore } from "@/stores/create-flow-store";
 import {
@@ -342,24 +346,27 @@ async function createMultiplicityWorkspace(input: {
     prompt: input.prompt,
     attachments: input.attachments,
   });
-  const payload = await input.client.createWorkspace({
-    idempotencyKey: input.idempotencyKey,
+  const intent = {
     agent: input.agent,
-    onEvent: input.onEvent,
     source: isWorktree
       ? {
-          kind: "worktree",
+          kind: "worktree" as const,
           cwd: input.sourceDirectory,
           projectId,
           worktreeSlug: input.worktreeSlug,
           ...input.checkoutRequest,
         }
       : {
-          kind: "directory",
+          kind: "directory" as const,
           path: input.sourceDirectory,
           projectId,
         },
     ...(firstAgentContext ? { firstAgentContext } : {}),
+  };
+  const payload = await input.client.createWorkspace({
+    idempotencyKey: buildDraftCreationKey(input.idempotencyKey, intent),
+    onEvent: input.onEvent,
+    ...intent,
   });
   if (payload.error || !payload.workspace) {
     throw new Error(payload.error ?? input.createFailedMessage);
@@ -482,6 +489,7 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
   const images = await encodeImages(wirePayload.images);
   let navigated = false;
   let createdWorkspaceId: string | null = null;
+  let creationOutcomeUnknown = false;
   let outcome: SubmitOutcome = "background";
   const initialAgent: NonNullable<CreateWorkspaceRequestOptions["agent"]> = {
     config: {
@@ -505,6 +513,7 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
       withInitialAgent: true,
       agent: requestedAgent,
       onEvent: (snapshot) => {
+        if (snapshot.outcomeUnknown) creationOutcomeUnknown = true;
         if (!snapshot.workspace || navigated) return;
         navigated = true;
         if (!input.isStillOnCreateScreen()) return;
@@ -546,15 +555,22 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
   };
   const agentCreation = {
     result: Promise.resolve().then(() => execute()),
-    retry: (request: CreateAgentRequestOptions) =>
-      execute({
+    retry: (request: CreateAgentRequestOptions) => {
+      const mode = resolveDraftCreationRetry({
+        createdWorkspaceId,
+        outcomeUnknown: creationOutcomeUnknown,
+      });
+      if (mode === "create-agent") return input.resolveClient().createAgent(request);
+      if (mode === "rejoin-original") return execute();
+      return execute({
         ...initialAgent,
         config: { ...request.config!, cwd },
         initialPrompt: request.initialPrompt ?? "",
         clientMessageId: initialAgent.clientMessageId,
         images: request.images,
         attachments: request.attachments,
-      }),
+      });
+    },
   };
   const createdAgent = await agentCreation.result;
   if (input.draftId && createdWorkspaceId) {

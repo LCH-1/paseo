@@ -1,6 +1,11 @@
 import { describe, expect, test } from "vitest";
 
-import { shouldAllowEmptyDraftText, validateDraftSubmission } from "./workspace-tab-core";
+import {
+  buildDraftCreationKey,
+  resolveDraftCreationRetry,
+  shouldAllowEmptyDraftText,
+  validateDraftSubmission,
+} from "./workspace-tab-core";
 
 const baseComposerState = {
   providerDefinitions: [{ id: "codewhale" }],
@@ -81,5 +86,40 @@ describe("workspace draft empty text readiness", () => {
         attachments: [],
       }),
     ).toBe(false);
+  });
+});
+
+describe("failed draft resubmission", () => {
+  const intent = { config: { provider: "codex", model: "a" }, initialPrompt: "hello" };
+
+  test("keeps one key for the same intent regardless of property order", () => {
+    expect(buildDraftCreationKey("draft", intent)).toBe(
+      buildDraftCreationKey("draft", {
+        initialPrompt: "hello",
+        config: { model: "a", provider: "codex" },
+      }),
+    );
+  });
+
+  test("uses a new key when the provider or prompt changes", () => {
+    const original = buildDraftCreationKey("draft", intent);
+    expect(
+      buildDraftCreationKey("draft", { ...intent, config: { ...intent.config, provider: "claude" } }),
+    ).not.toBe(original);
+    expect(buildDraftCreationKey("draft", { ...intent, initialPrompt: "edited" })).not.toBe(
+      original,
+    );
+  });
+
+  test("adds an agent to the created workspace unless the outcome is unknown", () => {
+    expect(resolveDraftCreationRetry({ createdWorkspaceId: "wks_1", outcomeUnknown: false })).toBe(
+      "create-agent",
+    );
+    expect(resolveDraftCreationRetry({ createdWorkspaceId: "wks_1", outcomeUnknown: true })).toBe(
+      "rejoin-original",
+    );
+    expect(resolveDraftCreationRetry({ createdWorkspaceId: null, outcomeUnknown: false })).toBe(
+      "create-workspace",
+    );
   });
 });

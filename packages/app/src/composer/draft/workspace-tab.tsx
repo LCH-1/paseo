@@ -29,6 +29,7 @@ import { encodeImages } from "@/utils/encode-images";
 import type { WorkspaceFileOpenRequest } from "@/workspace/file-open";
 import { shouldAutoFocusWorkspaceDraftComposer } from "@/screens/workspace/workspace-draft-pane-focus";
 import {
+  buildDraftCreationKey,
   shouldAllowEmptyDraftText,
   validateDraftSubmission,
 } from "@/composer/draft/workspace-tab-core";
@@ -176,8 +177,7 @@ async function submitDraftCreateRequest(input: {
 
   const attachmentsArray = Array.isArray(attachments) ? attachments : undefined;
   const imagesData = await encodeImages(images);
-  const options = {
-    idempotencyKey: input.draftId,
+  const intent = {
     config,
     workspaceId,
     initialPrompt: text,
@@ -185,6 +185,7 @@ async function submitDraftCreateRequest(input: {
     ...(imagesData && imagesData.length > 0 ? { images: imagesData } : {}),
     ...(attachmentsArray && attachmentsArray.length > 0 ? { attachments: attachmentsArray } : {}),
   };
+  const options = { idempotencyKey: buildDraftCreationKey(input.draftId, intent), ...intent };
   const creation = useWorkspaceDraftSubmissionStore.getState().creationByDraftId[input.draftId];
   const result = creation ? await creation.retry(options) : await client.createAgent(options);
 

@@ -1,6 +1,7 @@
 import { KeyboardTranslateView } from "@/keyboard/shift";
 import type { CreateWorkspaceRequestOptions } from "@getpaseo/client/internal/daemon-client";
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
+import { buildDraftCreationKey } from "@/composer/draft/workspace-tab-core";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Text, View } from "react-native";
@@ -96,13 +97,16 @@ async function callWorkspaceCreation({
   worktreeSlug: string;
   input: { cwd: string; agent?: CreateWorkspaceRequestOptions["agent"] };
 }) {
-  return connectedClient.createWorkspace({
-    idempotencyKey: creationId,
+  const intent = {
     agent: input.agent,
     source:
       creationMethod === "create_worktree"
-        ? { kind: "worktree", cwd: input.cwd, worktreeSlug }
-        : { kind: "directory", path: input.cwd },
+        ? { kind: "worktree" as const, cwd: input.cwd, worktreeSlug }
+        : { kind: "directory" as const, path: input.cwd },
+  };
+  return connectedClient.createWorkspace({
+    idempotencyKey: buildDraftCreationKey(creationId, intent),
+    ...intent,
   });
 }
 

@@ -5,6 +5,42 @@ export interface WorkspaceDraftAutoSubmitConfig {
   model: string | null;
 }
 
+function stableIntentJson(intent: unknown): string {
+  return (
+    JSON.stringify(intent, (_key, value: unknown) =>
+      value && typeof value === "object" && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
+        : value,
+    ) ?? ""
+  );
+}
+
+/**
+ * The daemon binds an idempotency key to one request. Resubmitting the same intent joins it, while
+ * editing a failed draft (another provider, model or prompt) is a new request, not a key conflict.
+ */
+export function buildDraftCreationKey(draftId: string, intent: unknown): string {
+  const json = stableIntentJson(intent);
+  let hash = 2166136261;
+  for (let index = 0; index < json.length; index += 1) {
+    hash ^= json.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${draftId}:${(hash >>> 0).toString(36)}`;
+}
+
+/**
+ * Once creation has produced a workspace, a retry only needs a new agent inside it. An unknown
+ * outcome may have reached the provider, so it rejoins the original request instead.
+ */
+export function resolveDraftCreationRetry(input: {
+  createdWorkspaceId: string | null;
+  outcomeUnknown: boolean;
+}): "create-agent" | "rejoin-original" | "create-workspace" {
+  if (input.outcomeUnknown) return "rejoin-original";
+  return input.createdWorkspaceId ? "create-agent" : "create-workspace";
+}
+
 export function shouldAllowEmptyDraftText(input: {
   allowsEmptyAutoSubmit: boolean;
   attachments: readonly unknown[];
