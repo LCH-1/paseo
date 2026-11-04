@@ -323,6 +323,7 @@ export class DirectorySync {
         if (!requestedIds.has(agent.id)) continue;
         const session = useSessionStore.getState().sessions[this.serverId];
         const current = session?.agents.get(agent.id) ?? session?.agentDetails.get(agent.id);
+        if (current && Date.parse(agent.updatedAt) < current.updatedAt.getTime()) continue;
         this.receiveAgentDelta(source, {
           kind: "upsert",
           agent,

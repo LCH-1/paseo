@@ -335,6 +335,46 @@ describe("DirectorySync attention acknowledgements", () => {
     }
   });
 
+  it("does not shadow a newer archived detail with an older read acknowledgement", () => {
+    const serverId = "attention-ack-newer-detail";
+    const { client, directory } = createDirectory(serverId);
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+    const detail = {
+      ...createAgent(serverId, "agent"),
+      updatedAt: new Date("2026-08-26T00:00:02.000Z"),
+      archivedAt: new Date("2026-08-26T00:00:02.000Z"),
+      requiresAttention: true,
+      attentionReason: "finished" as const,
+      attentionTimestamp: new Date("2026-08-26T00:00:02.000Z"),
+    };
+    store.setAgentDetails(serverId, new Map([[detail.id, detail]]));
+    try {
+      client.emit({
+        type: "clear_agent_attention_response",
+        payload: {
+          requestId: "older-read",
+          agentId: detail.id,
+          agents: [
+            {
+              ...createAgentSnapshot(detail.id),
+              updatedAt: "2026-08-26T00:00:01.000Z",
+              requiresAttention: false,
+              archivedAt: null,
+            },
+          ],
+        },
+      });
+      const session = useSessionStore.getState().sessions[serverId];
+      expect(session.agents.has(detail.id)).toBe(false);
+      expect(session.agentDetails.get(detail.id)).toBe(detail);
+      expect(session.agentDetails.get(detail.id)?.requiresAttention).toBe(true);
+      expect(session.agentDetails.get(detail.id)?.archivedAt).toBe(detail.archivedAt);
+    } finally {
+      directory.dispose();
+    }
+  });
+
   it("replays read acknowledgement over a stale in-flight directory snapshot", async () => {
     const serverId = "attention-ack-inflight";
     const { client, directory } = createDirectory(serverId);
