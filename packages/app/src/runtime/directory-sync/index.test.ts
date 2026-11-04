@@ -17,6 +17,7 @@ import {
   useSessionStore,
 } from "@/stores/session-store";
 import { normalizeAgentSnapshot } from "@/utils/agent-snapshots";
+import { deriveProjectPlacementFromCwd } from "@/utils/project-placement";
 import { selectWorkspaceDirectoryServerIds } from "@/stores/session-store-hooks/selectors";
 import { useWorkspaceLabels } from "@/workspace-labels";
 import type { DirectoryReplicaMutation } from "@/runtime/replica-cache";
@@ -70,6 +71,17 @@ class FakeDirectoryClient {
     message: Extract<SessionOutboundMessage, { type: TType }>,
   ): void {
     for (const handler of this.handlers.get(message.type) ?? []) handler(message);
+  }
+
+  capture<TType extends SessionOutboundMessage["type"]>(type: TType) {
+    const handlers = [...(this.handlers.get(type) ?? [])];
+    return (message: Extract<SessionOutboundMessage, { type: TType }>) => {
+      for (const handler of handlers) handler(message);
+    };
+  }
+
+  listenerCount(type: SessionOutboundMessage["type"]): number {
+    return this.handlers.get(type)?.size ?? 0;
   }
 
   holdWorkspaceFetch(): (result: WorkspaceFetchResult) => void {
@@ -221,35 +233,36 @@ function createDirectory(
   return { client, directory };
 }
 
+function createAgentSnapshot(id: string): AgentFetchResult["entries"][number]["agent"] {
+  return {
+    id,
+    provider: "codex",
+    cwd: "/repo",
+    model: null,
+    createdAt: "2026-08-26T00:00:00.000Z",
+    updatedAt: "2026-08-26T00:00:00.000Z",
+    lastUserMessageAt: null,
+    status: "idle",
+    capabilities: {
+      supportsStreaming: true,
+      supportsSessionPersistence: true,
+      supportsDynamicModes: true,
+      supportsMcpServers: true,
+      supportsReasoningStream: true,
+      supportsToolInvocations: true,
+    },
+    currentModeId: null,
+    availableModes: [],
+    pendingPermissions: [],
+    persistence: null,
+    title: "Cached",
+    labels: {},
+  };
+}
+
 function createAgent(serverId: string, id: string) {
   return {
-    ...normalizeAgentSnapshot(
-      {
-        id,
-        provider: "codex",
-        cwd: "/repo",
-        model: null,
-        createdAt: "2026-08-26T00:00:00.000Z",
-        updatedAt: "2026-08-26T00:00:00.000Z",
-        lastUserMessageAt: null,
-        status: "idle",
-        capabilities: {
-          supportsStreaming: true,
-          supportsSessionPersistence: true,
-          supportsDynamicModes: true,
-          supportsMcpServers: true,
-          supportsReasoningStream: true,
-          supportsToolInvocations: true,
-        },
-        currentModeId: null,
-        availableModes: [],
-        pendingPermissions: [],
-        persistence: null,
-        title: "Cached",
-        labels: {},
-      },
-      serverId,
-    ),
+    ...normalizeAgentSnapshot(createAgentSnapshot(id), serverId),
     projectPlacement: null,
   };
 }
@@ -277,6 +290,276 @@ afterEach(() => {
   for (const serverId of serverIds) useSessionStore.getState().clearSession(serverId);
   serverIds.clear();
   useWorkspaceLabels.setState({ hosts: {} });
+});
+
+describe("DirectorySync attention acknowledgements", () => {
+  it("applies read snapshots without directory demand and preserves project placement", () => {
+    const serverId = "attention-ack-no-demand";
+    const { client, directory } = createDirectory(serverId);
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+    directory.setDemand({}, false);
+    const projectPlacement = {
+      ...deriveProjectPlacementFromCwd("/repo"),
+      projectName: "Repository",
+    };
+    store.setAgents(
+      serverId,
+      new Map([
+        [
+          "agent",
+          {
+            ...createAgent(serverId, "agent"),
+            projectPlacement,
+            requiresAttention: true,
+            attentionReason: "finished",
+          },
+        ],
+      ]),
+    );
+    try {
+      client.emit({
+        type: "clear_agent_attention_response",
+        payload: {
+          requestId: "read",
+          agentId: "agent",
+          agents: [{ ...createAgentSnapshot("agent"), requiresAttention: false }],
+        },
+      });
+      const agent = useSessionStore.getState().sessions[serverId].agents.get("agent");
+      expect(agent?.requiresAttention).toBe(false);
+      expect(agent?.projectPlacement).toEqual(projectPlacement);
+      expect(client.fetchAgentsCalls).toBe(0);
+    } finally {
+      directory.dispose();
+    }
+  });
+
+  it("replays read acknowledgement over a stale in-flight directory snapshot", async () => {
+    const serverId = "attention-ack-inflight";
+    const { client, directory } = createDirectory(serverId);
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+    const unread = {
+      ...createAgentSnapshot("agent"),
+      requiresAttention: true,
+      attentionReason: "finished" as const,
+    };
+    const project = deriveProjectPlacementFromCwd("/repo");
+    store.setAgents(
+      serverId,
+      new Map([
+        ["agent", { ...normalizeAgentSnapshot(unread, serverId), projectPlacement: project }],
+      ]),
+    );
+    const finish = client.holdAgentFetch();
+    const refresh = directory.refreshAgents({ subscribe: {} });
+    try {
+      await expect.poll(() => client.fetchAgentsCalls).toBe(1);
+      client.emit({
+        type: "clear_agent_attention_response",
+        payload: {
+          requestId: "read",
+          agentId: "agent",
+          agents: [
+            {
+              ...createAgentSnapshot("agent"),
+              updatedAt: "2026-08-26T00:00:01.000Z",
+              requiresAttention: false,
+            },
+          ],
+        },
+      });
+      finish({
+        requestId: "older-directory",
+        entries: [{ agent: unread, project }],
+        pageInfo: { hasMore: false, nextCursor: null, prevCursor: null },
+      });
+      await refresh;
+      const agent = useSessionStore.getState().sessions[serverId].agents.get("agent");
+      expect(agent?.requiresAttention).toBe(false);
+      expect(agent?.updatedAt).toEqual(new Date("2026-08-26T00:00:01.000Z"));
+      expect(agent?.projectPlacement).toEqual(project);
+    } finally {
+      directory.dispose();
+    }
+  });
+
+  it("keeps a newer queued completion when an older acknowledgement arrives later", async () => {
+    const serverId = "attention-ack-newer-queued";
+    const { client, directory } = createDirectory(serverId);
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+    const project = deriveProjectPlacementFromCwd("/repo");
+    const finish = client.holdAgentFetch();
+    const refresh = directory.refreshAgents({ subscribe: {} });
+    try {
+      await expect.poll(() => client.fetchAgentsCalls).toBe(1);
+      client.emit({
+        type: "agent_update",
+        payload: {
+          kind: "upsert",
+          project,
+          agent: {
+            ...createAgentSnapshot("agent"),
+            title: "New completion",
+            updatedAt: "2026-08-26T00:00:02.000Z",
+            requiresAttention: true,
+            attentionReason: "finished",
+            attentionTimestamp: "2026-08-26T00:00:02.000Z",
+          },
+        },
+      });
+      client.emit({
+        type: "clear_agent_attention_response",
+        payload: {
+          requestId: "older-read",
+          agentId: "agent",
+          agents: [
+            {
+              ...createAgentSnapshot("agent"),
+              updatedAt: "2026-08-26T00:00:01.000Z",
+              requiresAttention: false,
+            },
+          ],
+        },
+      });
+      finish({
+        requestId: "directory",
+        entries: [{ agent: createAgentSnapshot("agent"), project }],
+        pageInfo: { hasMore: false, nextCursor: null, prevCursor: null },
+      });
+      await refresh;
+      expect(useSessionStore.getState().sessions[serverId].agents.get("agent")).toMatchObject({
+        title: "New completion",
+        requiresAttention: true,
+        attentionReason: "finished",
+        updatedAt: new Date("2026-08-26T00:00:02.000Z"),
+        attentionTimestamp: new Date("2026-08-26T00:00:02.000Z"),
+      });
+    } finally {
+      directory.dispose();
+    }
+  });
+
+  it.each(["client", "epoch", "offline", "dispose"] as const)(
+    "ignores a queued acknowledgement after %s ends its connection lifetime",
+    (transition) => {
+      const serverId = `attention-ack-late-${transition}`;
+      const { client, directory } = createDirectory(serverId);
+      const store = useSessionStore.getState();
+      store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+      store.setAgents(
+        serverId,
+        new Map([
+          [
+            "agent",
+            {
+              ...createAgent(serverId, "agent"),
+              requiresAttention: true,
+              attentionReason: "finished",
+            },
+          ],
+        ]),
+      );
+      const queued = client.capture("clear_agent_attention_response");
+      const acknowledgement: Extract<
+        SessionOutboundMessage,
+        { type: "clear_agent_attention_response" }
+      > = {
+        type: "clear_agent_attention_response",
+        payload: {
+          requestId: "late-read",
+          agentId: "agent",
+          agents: [{ ...createAgentSnapshot("agent"), requiresAttention: false }],
+        },
+      };
+      let currentClient = client;
+      try {
+        if (transition === "client") {
+          currentClient = new FakeDirectoryClient();
+          directory.connectionChanged({
+            client: currentClient as unknown as DaemonClient,
+            status: "online",
+            source: { clientGeneration: 2, connectionEpoch: 1 },
+          });
+        } else if (transition === "epoch") {
+          directory.connectionChanged({
+            client: client as unknown as DaemonClient,
+            status: "online",
+            source: { clientGeneration: 1, connectionEpoch: 2 },
+          });
+        } else if (transition === "offline") {
+          directory.connectionChanged({
+            client: null,
+            status: "offline",
+            source: { clientGeneration: 1, connectionEpoch: 1 },
+          });
+        } else directory.dispose();
+        expect(client.listenerCount("clear_agent_attention_response")).toBe(
+          transition === "epoch" ? 1 : 0,
+        );
+        queued(acknowledgement);
+        expect(
+          useSessionStore.getState().sessions[serverId].agents.get("agent")?.requiresAttention,
+        ).toBe(true);
+        if (transition === "client" || transition === "epoch") {
+          currentClient.emit({
+            ...acknowledgement,
+            payload: { ...acknowledgement.payload, requestId: "current-read" },
+          });
+          expect(
+            useSessionStore.getState().sessions[serverId].agents.get("agent")?.requiresAttention,
+          ).toBe(false);
+        }
+      } finally {
+        directory.dispose();
+        expect(currentClient.listenerCount("clear_agent_attention_response")).toBe(0);
+      }
+    },
+  );
+
+  it("applies only returned snapshots named by a bulk acknowledgement", () => {
+    const serverId = "attention-ack-bulk-partial";
+    const { client, directory } = createDirectory(serverId);
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+    store.setAgents(
+      serverId,
+      new Map(
+        ["returned", "omitted", "unrequested"].map((id) => [
+          id,
+          { ...createAgent(serverId, id), requiresAttention: true, attentionReason: "finished" },
+        ]),
+      ),
+    );
+    try {
+      client.emit({
+        type: "clear_agent_attention_response",
+        payload: {
+          requestId: "bulk-read",
+          agentId: ["returned", "omitted"],
+          agents: ["returned", "unrequested"].map((id) => {
+            const agent = createAgentSnapshot(id);
+            agent.requiresAttention = false;
+            return agent;
+          }),
+        },
+      });
+      expect(
+        [...useSessionStore.getState().sessions[serverId].agents].map(([id, agent]) => [
+          id,
+          agent.requiresAttention,
+        ]),
+      ).toEqual([
+        ["returned", false],
+        ["omitted", true],
+        ["unrequested", true],
+      ]);
+    } finally {
+      directory.dispose();
+    }
+  });
 });
 
 describe("DirectorySync session readiness", () => {

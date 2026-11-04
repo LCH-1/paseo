@@ -151,6 +151,7 @@ export class DirectorySync {
   private workspaceSubscription: OwnedSubscription<FetchWorkspacesPayload> | null = null;
   private eventSubscription: ReturnType<DaemonClient["observeEvents"]> | null = null;
   private scriptStatusSubscription: ReturnType<DaemonClient["observeEvents"]> | null = null;
+  private releaseAttentionAcknowledgements: (() => void) | null = null;
   private readonly abortSessionWaits = new Set<() => void>();
   private cacheLoad: Promise<void> | null = null;
   private cacheAccepted = false;
@@ -192,10 +193,13 @@ export class DirectorySync {
     this.flushAbortedTransactions();
     this.releaseSubscriptions();
     this.releaseScriptStatusEvents();
+    this.releaseAttentionAcknowledgements?.();
+    this.releaseAttentionAcknowledgements = null;
     workspaceLabels.disconnect(this.serverId);
     this.connection = connection;
     this.abortPendingSessionWaits();
     if (!connection.client || connection.status !== "online") return true;
+    this.observeAttentionAcknowledgements();
     if (this.scriptStatusDemand.size > 0) this.observeScriptStatusEvents();
     // Reattach labels here because route-only demand can satisfy the epoch before full demand requests them.
     void this.connectWorkspaceLabels().catch(() => undefined);
@@ -256,6 +260,8 @@ export class DirectorySync {
     this.scriptStatusDemand.clear();
     this.releaseSubscriptions();
     this.releaseScriptStatusEvents();
+    this.releaseAttentionAcknowledgements?.();
+    this.releaseAttentionAcknowledgements = null;
     this.fullDemandSources.clear();
     this.routeDemandIds.clear();
     workspaceLabels.disconnect(this.serverId);
@@ -303,6 +309,31 @@ export class DirectorySync {
         delta,
       );
     this.persistCheckpoint();
+  }
+
+  private observeAttentionAcknowledgements(): void {
+    const { client, source } = this.requireOnline();
+    let active = true;
+    const unsubscribe = client.on("clear_agent_attention_response", ({ payload }) => {
+      if (!active || !this.isCurrent(client, source)) return;
+      const requestedIds = new Set(
+        typeof payload.agentId === "string" ? [payload.agentId] : payload.agentId,
+      );
+      for (const agent of payload.agents) {
+        if (!requestedIds.has(agent.id)) continue;
+        const session = useSessionStore.getState().sessions[this.serverId];
+        const current = session?.agents.get(agent.id) ?? session?.agentDetails.get(agent.id);
+        this.receiveAgentDelta(source, {
+          kind: "upsert",
+          agent,
+          project: current?.projectPlacement ?? null,
+        });
+      }
+    });
+    this.releaseAttentionAcknowledgements = () => {
+      active = false;
+      unsubscribe();
+    };
   }
 
   private observeDirectoryEvents(): void {

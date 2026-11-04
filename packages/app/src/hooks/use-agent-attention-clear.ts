@@ -16,6 +16,7 @@ interface UseAgentAttentionClearParams {
   isConnected: boolean;
   requiresAttention: boolean | null | undefined;
   attentionReason: AttentionReason;
+  attentionTimestamp?: Date | number | null;
   isScreenFocused: boolean;
   isContentReady: boolean;
 }
@@ -26,12 +27,23 @@ interface AgentAttentionClearController {
   clearOnAgentBlur: () => void;
 }
 
+interface AttentionClearRequest {
+  agentId: string;
+  client: DaemonClient;
+  attentionTimestamp: number | null;
+  attentionReason: AttentionReason;
+  promise: Promise<boolean>;
+}
+
+const COMPLETION_ACK_RETRY_DELAYS_MS = [500, 1500, 4000];
+
 export function useAgentAttentionClear({
   agentId,
   client,
   isConnected,
   requiresAttention,
   attentionReason,
+  attentionTimestamp,
   isScreenFocused,
   isContentReady,
 }: UseAgentAttentionClearParams): AgentAttentionClearController {
@@ -41,6 +53,11 @@ export function useAgentAttentionClear({
   const prevActivelyViewedRef = useRef(isScreenFocused && getIsAppActivelyVisible());
   const prevScreenFocusedRef = useRef(false);
   const prevAppVisibleRef = useRef(getIsAppActivelyVisible());
+  const requests = useRef(new Set<AttentionClearRequest>());
+  const attentionTimestampMs =
+    attentionTimestamp instanceof Date
+      ? attentionTimestamp.getTime()
+      : (attentionTimestamp ?? null);
 
   const clearAttention = useCallback(
     (trigger: AgentAttentionClearTrigger) => {
@@ -61,9 +78,29 @@ export function useAgentAttentionClear({
         return;
       }
       deferredFocusEntryClearRef.current = false;
-      client.clearAgentAttention(resolvedAgentId).catch(() => {});
+      const pending = [...requests.current].find(
+        (request) =>
+          request.client === client &&
+          request.agentId === resolvedAgentId &&
+          request.attentionTimestamp === attentionTimestampMs &&
+          request.attentionReason === attentionReason,
+      );
+      if (pending) return pending.promise;
+      const request: AttentionClearRequest = {
+        client,
+        agentId: resolvedAgentId,
+        attentionTimestamp: attentionTimestampMs,
+        attentionReason,
+        promise: client.clearAgentAttention(resolvedAgentId).then(
+          () => true,
+          () => false,
+        ),
+      };
+      requests.current.add(request);
+      void request.promise.then(() => requests.current.delete(request));
+      return request.promise;
     },
-    [agentId, attentionReason, client, isConnected, requiresAttention],
+    [agentId, attentionReason, attentionTimestampMs, client, isConnected, requiresAttention],
   );
 
   useEffect(() => {
@@ -124,10 +161,43 @@ export function useAgentAttentionClear({
   }, [attentionReason, clearAttention, isAppVisible, isScreenFocused]);
 
   useEffect(() => {
-    if (isScreenFocused && isAppVisible && isContentReady && attentionReason === "finished") {
-      clearAttention("viewed-completion");
+    if (
+      !isScreenFocused ||
+      !isAppVisible ||
+      !isContentReady ||
+      !isConnected ||
+      !requiresAttention ||
+      attentionReason !== "finished"
+    ) {
+      return;
     }
-  }, [attentionReason, clearAttention, isAppVisible, isContentReady, isScreenFocused]);
+    let cancelled = false;
+    let retry = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    async function acknowledgeCompletion() {
+      const acknowledged = await clearAttention("viewed-completion");
+      if (cancelled || acknowledged !== false || retry === COMPLETION_ACK_RETRY_DELAYS_MS.length) {
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        void acknowledgeCompletion();
+      }, COMPLETION_ACK_RETRY_DELAYS_MS[retry++]);
+    }
+    void acknowledgeCompletion();
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [
+    attentionReason,
+    clearAttention,
+    isAppVisible,
+    isConnected,
+    isContentReady,
+    isScreenFocused,
+    requiresAttention,
+  ]);
 
   return {
     clearOnInputFocus: useCallback(() => {

@@ -126,6 +126,7 @@ interface ChatAgentSelectedState extends ChatAgentStateShape {
   archivedAt: Date | null;
   requiresAttention: boolean;
   attentionReason: Agent["attentionReason"] | null;
+  attentionTimestampMs: number | null;
 }
 
 function resolveChatAgentFromSession(
@@ -156,6 +157,7 @@ const EMPTY_CHAT_AGENT_STATE: ChatAgentSelectedState = {
   archivedAt: null,
   requiresAttention: false,
   attentionReason: null,
+  attentionTimestampMs: null,
 };
 
 function selectChatAgentState(
@@ -182,6 +184,7 @@ function selectChatAgentState(
     archivedAt: agent.archivedAt ?? null,
     requiresAttention: agent.requiresAttention ?? false,
     attentionReason: agent.attentionReason ?? null,
+    attentionTimestampMs: agent.attentionTimestamp?.getTime() ?? null,
   };
 }
 
@@ -899,6 +902,7 @@ function ChatAgentContent({
     isConnected,
     requiresAttention: agentState.requiresAttention,
     attentionReason: agentState.attentionReason,
+    attentionTimestamp: agentState.attentionTimestampMs,
     isScreenFocused: isPaneFocused,
     isContentReady:
       isPaneVisible && viewState.tag === "ready" && visibilityCatchUpStatus === "ready",
