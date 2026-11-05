@@ -10,7 +10,11 @@ import type {
 import { relative } from "node:path";
 import { isAbsolute } from "node:path";
 import { CreationService, type CreatedAgent } from "./creation/index.js";
-import type { CreationSnapshot, AgentCreateRequest } from "@getpaseo/protocol/messages";
+import type {
+  CreationFailure,
+  CreationSnapshot,
+  AgentCreateRequest,
+} from "@getpaseo/protocol/messages";
 import type { MessageReceipts } from "./message-receipts/index.js";
 import equal from "fast-deep-equal";
 import { SessionDelivery, type OwnedSubscription } from "./session/owned-subscriptions/index.js";
@@ -3996,7 +4000,7 @@ export class Session {
     request: Extract<SessionInboundMessage, { type: "creation.find_failed.request" }>,
     source?: object,
   ): Promise<void> {
-    const { requestId, workspaceId } = request;
+    const { requestId, workspaceId, provider } = request;
     try {
       // Any session in the workspace supersedes an earlier failed start.
       const hasSession =
@@ -4004,9 +4008,14 @@ export class Session {
           .listAgents()
           .some((agent) => agent.workspaceId === workspaceId && !agent.internal) ||
         (await this.agentStorage.listByWorkspace(workspaceId)).some((record) => !record.internal);
-      const failure = hasSession
+      const stored = hasSession
         ? null
         : await this.creationService.findFailedForWorkspace(workspaceId);
+      const recheck =
+        stored && provider
+          ? await this.recheckCreationFailure(stored.error, workspaceId, provider)
+          : undefined;
+      const failure = stored && (recheck ? { ...stored, recheck } : stored);
       this.emitForSource(
         { type: "creation.find_failed.response", payload: { requestId, failure, error: null } },
         source,
@@ -4023,6 +4032,26 @@ export class Session {
         },
         source,
       );
+    }
+  }
+
+  // Only a session-open hook can be asked again without starting anything.
+  private async recheckCreationFailure(
+    error: string,
+    workspaceId: string,
+    provider: string,
+  ): Promise<NonNullable<CreationFailure["recheck"]> | undefined> {
+    if (!/^Plugin \S+ before agent\.session_open failed/.test(error)) return undefined;
+    const workspace = await this.workspaceRegistry.get(workspaceId);
+    if (!workspace) return undefined;
+    try {
+      await this.agentManager.preflightSessionOpen({ provider, cwd: workspace.cwd, workspaceId });
+      return { status: "ready" };
+    } catch (blocked) {
+      return {
+        status: "blocked",
+        error: blocked instanceof Error ? blocked.message : String(blocked),
+      };
     }
   }
 

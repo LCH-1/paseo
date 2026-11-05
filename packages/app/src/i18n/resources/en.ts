@@ -1674,9 +1674,11 @@ export const en = {
   },
   workspaceSetup: {
     creationFailure: {
-      title: "This session couldn't start",
+      titleBlocked: "Sessions can't start right now",
+      titlePrevious: "A previous attempt to start this session failed",
+      resolved: "This has since been resolved. Type below to start a session.",
       restore: "Restore message",
-      retype: "The original message wasn't saved. Type it again below to start a session.",
+      retype: "The original message wasn't saved, so type it again below.",
     },
     title: "Create workspace",
     errors: {

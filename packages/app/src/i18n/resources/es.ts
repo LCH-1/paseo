@@ -1674,9 +1674,11 @@ export const es: TranslationResources = {
   },
   workspaceSetup: {
     creationFailure: {
-      title: "No se pudo iniciar esta sesión",
+      titleBlocked: "Ahora no se pueden iniciar sesiones",
+      titlePrevious: "Un intento anterior de iniciar esta sesión falló",
+      resolved: "Ya está resuelto. Escribe abajo para iniciar una sesión.",
       restore: "Restaurar mensaje",
-      retype: "El mensaje original no se guardó. Escríbelo de nuevo abajo para iniciar una sesión.",
+      retype: "El mensaje original no se guardó, así que escríbelo de nuevo abajo.",
     },
     title: "Crear espacio de trabajo",
     errors: {

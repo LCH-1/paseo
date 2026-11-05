@@ -37,6 +37,8 @@ export interface PluginSessionOpenRequest {
   reason: "create" | "resume" | "refresh" | "import";
   purpose: "interactive" | "history";
   env: Record<string, string>;
+  /** Asks whether a session could open now. No session follows, so hooks must not reserve anything. */
+  preflight?: boolean;
 }
 
 export type PluginTurnOutcome =

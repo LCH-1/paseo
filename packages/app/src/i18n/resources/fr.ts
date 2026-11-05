@@ -1670,10 +1670,12 @@ export const fr: TranslationResources = {
   },
   workspaceSetup: {
     creationFailure: {
-      title: "Impossible de démarrer cette session",
+      titleBlocked: "Impossible de démarrer une session pour le moment",
+      titlePrevious: "Une tentative précédente de démarrage de cette session a échoué",
+      resolved:
+        "Le problème est résolu. Saisissez un message ci-dessous pour démarrer une session.",
       restore: "Restaurer le message",
-      retype:
-        "Le message d'origine n'a pas été enregistré. Saisissez-le à nouveau ci-dessous pour démarrer une session.",
+      retype: "Le message d'origine n'a pas été enregistré. Saisissez-le à nouveau ci-dessous.",
     },
     title: "Créer un espace de travail",
     errors: {

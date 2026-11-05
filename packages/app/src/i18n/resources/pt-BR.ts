@@ -1659,10 +1659,11 @@ export const ptBR: TranslationResources = {
   },
   workspaceSetup: {
     creationFailure: {
-      title: "Não foi possível iniciar esta sessão",
+      titleBlocked: "Não é possível iniciar sessões agora",
+      titlePrevious: "Uma tentativa anterior de iniciar esta sessão falhou",
+      resolved: "Isso já foi resolvido. Digite abaixo para iniciar uma sessão.",
       restore: "Restaurar mensagem",
-      retype:
-        "A mensagem original não foi salva. Digite-a novamente abaixo para iniciar uma sessão.",
+      retype: "A mensagem original não foi salva. Digite-a novamente abaixo.",
     },
     title: "Criar workspace",
     errors: {

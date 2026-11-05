@@ -6,19 +6,33 @@ export interface WorkspaceDraftAutoSubmitConfig {
 }
 
 export interface CreationFailureNotice {
-  error: string;
+  /** blocked: fails right now. resolved: failed before, passes now. previous: could not be re-evaluated. */
+  state: "blocked" | "resolved" | "previous";
+  error: string | null;
   prompt: string | null;
 }
 
 /** A live attempt reports its own outcome, so the stored failure only speaks for an idle draft. */
 export function resolveCreationFailureNotice(input: {
-  failure: { error: string; prompt?: string } | null | undefined;
+  failure:
+    | {
+        error: string;
+        prompt?: string;
+        recheck?: { status: "ready" | "blocked"; error?: string };
+      }
+    | null
+    | undefined;
   isSubmitting: boolean;
   formErrorMessage: string | null | undefined;
 }): CreationFailureNotice | null {
   const { failure, isSubmitting, formErrorMessage } = input;
   if (!failure || isSubmitting || formErrorMessage) return null;
-  return { error: failure.error, prompt: failure.prompt?.trim() ? failure.prompt : null };
+  const prompt = failure.prompt?.trim() ? failure.prompt : null;
+  if (failure.recheck?.status === "ready") return { state: "resolved", error: null, prompt };
+  if (failure.recheck?.status === "blocked") {
+    return { state: "blocked", error: failure.recheck.error ?? failure.error, prompt };
+  }
+  return { state: "previous", error: failure.error, prompt };
 }
 
 function stableIntentJson(intent: unknown): string {

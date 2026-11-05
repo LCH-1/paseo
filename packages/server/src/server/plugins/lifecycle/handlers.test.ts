@@ -75,6 +75,29 @@ test("teardown aborts an active callback and removes its registrations", async (
   expect(hooks.catalog()).toEqual({ events: [], before: [] });
 });
 
+test("session-open hooks see a dry run and cannot turn it into a real open", async () => {
+  const hooks = new PluginHookHandlers(() => {});
+  const request = {
+    agentId: "agent",
+    workspaceId: "workspace",
+    provider: "claude",
+    cwd: "/project",
+    reason: "create" as const,
+    purpose: "interactive" as const,
+    env: {},
+    preflight: true,
+  };
+  const remove = hooks.before("agent.session_open", ({ request: seen }) => seen);
+  await expect(
+    hooks.invoke("operation", "before", "agent.session_open", request, paseo),
+  ).resolves.toMatchObject({ preflight: true });
+  remove();
+  hooks.before("agent.session_open", ({ request: seen }) => ({ ...seen, preflight: false }));
+  await expect(
+    hooks.invoke("operation", "before", "agent.session_open", request, paseo),
+  ).rejects.toThrow("agent.session_open hooks can only change env");
+});
+
 test("session-open hooks reject changes to session identity instead of silently ignoring them", async () => {
   const hooks = new PluginHookHandlers(() => {});
   hooks.before("agent.session_open", ({ request }) => {

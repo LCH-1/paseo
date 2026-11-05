@@ -1611,9 +1611,11 @@ export const zhCN: TranslationResources = {
   },
   workspaceSetup: {
     creationFailure: {
-      title: "无法启动此会话",
+      titleBlocked: "当前无法启动会话",
+      titlePrevious: "此前未能启动此会话",
+      resolved: "目前已确认解决。在下方输入即可启动会话。",
       restore: "恢复消息",
-      retype: "原始消息未保存。请在下方重新输入以启动会话。",
+      retype: "原始消息未保存,请在下方重新输入。",
     },
     title: "创建 workspace",
     errors: {

@@ -2901,13 +2901,16 @@ export class DaemonClient {
   }
 
   /** Why a workspace has no session. Hosts without the lookup report nothing rather than failing. */
-  async findCreationFailure(workspaceId: string): Promise<CreationFailure | null> {
+  async findCreationFailure(
+    workspaceId: string,
+    provider?: string,
+  ): Promise<CreationFailure | null> {
     // COMPAT(creationFailureLookup): added in v0.12.1; remove gate after 2027-11-05.
     if (this.lastServerInfoMessage?.features?.creationFailureLookup !== true) return null;
     const payload = await this.sendCorrelatedSessionRequest({
-      message: { type: "creation.find_failed.request", workspaceId },
+      message: { type: "creation.find_failed.request", workspaceId, provider },
       responseType: "creation.find_failed.response",
-      timeout: 10000,
+      timeout: 30000,
     });
     if (payload.error) throw new Error(payload.error);
     return payload.failure;

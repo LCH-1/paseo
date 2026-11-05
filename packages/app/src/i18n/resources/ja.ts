@@ -1645,9 +1645,11 @@ export const ja: TranslationResources = {
   },
   workspaceSetup: {
     creationFailure: {
-      title: "このセッションを開始できませんでした",
+      titleBlocked: "現在セッションを開始できません",
+      titlePrevious: "以前このセッションを開始できませんでした",
+      resolved: "現在は解決済みです。下に入力するとセッションを開始します。",
       restore: "メッセージを復元",
-      retype: "元のメッセージは保存されていません。下に再入力するとセッションが開始されます。",
+      retype: "元のメッセージは保存されていないため、下に再入力してください。",
     },
     title: "ワークスペースを作成",
     errors: {

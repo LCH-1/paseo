@@ -316,6 +316,42 @@ test("a workspace left without a session reports why until a session starts", as
   }
 }, 60000);
 
+test("a failure from a session-open hook is re-evaluated for the provider asked about", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "creation-failure-recheck-"));
+  const daemon = await createCreationDaemon({
+    agentClients: createTestAgentClients({
+      beforeCreateSession: async (config) => {
+        if (!config.internal) throw new Error("Plugin gate before agent.session_open failed: no");
+      },
+    }),
+  });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    appVersion: "0.7.2",
+    clientId: "creation-failure-recheck",
+  });
+  const workspaceId = "wks_00000000feedface";
+  try {
+    await client.connect();
+    await client.createWorkspace({
+      idempotencyKey: "gated-start",
+      workspaceId,
+      source: { kind: "directory", path: directory },
+      agent: { provider: "codex", cwd: directory, initialPrompt: "hello" },
+    });
+    // No plugin blocks this daemon now, so the stored reason no longer holds.
+    await expect(client.findCreationFailure(workspaceId, "codex")).resolves.toMatchObject({
+      recheck: { status: "ready" },
+    });
+    const unchecked = await client.findCreationFailure(workspaceId);
+    expect(unchecked?.recheck).toBeUndefined();
+  } finally {
+    await client.close();
+    await daemon.close();
+    await rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  }
+}, 60000);
+
 test("legacy keyed creation preserves checkout error codes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "creation-checkout-error-"));
   execFileSync("git", ["init", "-b", "main", directory], { stdio: "pipe" });

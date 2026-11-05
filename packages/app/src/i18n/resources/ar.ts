@@ -1628,9 +1628,11 @@ export const ar: TranslationResources = {
   },
   workspaceSetup: {
     creationFailure: {
-      title: "تعذر بدء هذه الجلسة",
+      titleBlocked: "لا يمكن بدء الجلسات الآن",
+      titlePrevious: "فشلت محاولة سابقة لبدء هذه الجلسة",
+      resolved: "تم حل المشكلة. اكتب أدناه لبدء جلسة.",
       restore: "استعادة الرسالة",
-      retype: "لم يتم حفظ الرسالة الأصلية. اكتبها مرة أخرى أدناه لبدء جلسة.",
+      retype: "لم يتم حفظ الرسالة الأصلية، لذا اكتبها مرة أخرى أدناه.",
     },
     title: "إنشاء مساحة عمل",
     errors: {

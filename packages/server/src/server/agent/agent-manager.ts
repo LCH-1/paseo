@@ -5442,6 +5442,22 @@ export class AgentManager {
       : next;
   }
 
+  /** Runs the session-open hooks as a dry run. Rejects with the reason a new session would fail. */
+  async preflightSessionOpen(input: {
+    provider: string;
+    cwd: string;
+    workspaceId: string;
+  }): Promise<void> {
+    await this.pluginLifecycle?.before("agent.session_open", {
+      ...input,
+      agentId: randomUUID(),
+      reason: "create",
+      purpose: "interactive",
+      env: {},
+      preflight: true,
+    });
+  }
+
   private async buildLaunchContext(
     agentId: string,
     client: AgentClient,

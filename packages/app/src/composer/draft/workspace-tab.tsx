@@ -282,18 +282,23 @@ function useCreationFailureNotice(input: {
   workspaceId: string;
   client: DaemonClient | null;
   isConnected: boolean;
+  provider: string | null;
   hasPendingCreation: boolean;
   isSubmitting: boolean;
   formErrorMessage: string | null | undefined;
 }): CreationFailureNotice | null {
-  const { serverId, workspaceId, client, isConnected, hasPendingCreation } = input;
+  const { serverId, workspaceId, client, isConnected, provider, hasPendingCreation } = input;
   const query = useFetchQuery({
-    queryKey: ["creationFailure", serverId, workspaceId],
+    queryKey: ["creationFailure", serverId, workspaceId, provider],
     dataShape: "value",
     staleTimeMs: 0,
     enabled: Boolean(client && isConnected && !hasPendingCreation),
     retry: false,
-    queryFn: async () => (client ? client.findCreationFailure(workspaceId) : null),
+    // Only a recorded failure is worth re-evaluating; accounts recover without any app event.
+    refetchInterval: (current) => (current.state.data ? 60_000 : false),
+    refetchOnWindowFocus: true,
+    queryFn: async () =>
+      client ? client.findCreationFailure(workspaceId, provider ?? undefined) : null,
   });
   return resolveCreationFailureNotice({
     failure: query.data,
@@ -315,10 +320,24 @@ function CreationFailureCard({
     if (prompt) onRestore(prompt);
   }, [onRestore, prompt]);
   if (!notice) return null;
+  const blocked = notice.state === "blocked";
   return (
-    <View style={styles.errorContainer} testID="workspace-creation-failure">
-      <Text style={styles.failureTitle}>{t("workspaceSetup.creationFailure.title")}</Text>
-      <Text style={styles.errorText}>{notice.error}</Text>
+    <View
+      style={notice.state === "resolved" ? styles.resolvedContainer : styles.errorContainer}
+      testID="workspace-creation-failure"
+    >
+      <Text style={styles.failureTitle}>
+        {t(
+          blocked
+            ? "workspaceSetup.creationFailure.titleBlocked"
+            : "workspaceSetup.creationFailure.titlePrevious",
+        )}
+      </Text>
+      {notice.error ? (
+        <Text style={styles.errorText}>{notice.error}</Text>
+      ) : (
+        <Text style={styles.failureHint}>{t("workspaceSetup.creationFailure.resolved")}</Text>
+      )}
       {prompt ? (
         <Button variant="secondary" size="sm" style={styles.failureAction} onPress={handleRestore}>
           {t("workspaceSetup.creationFailure.restore")}
@@ -665,6 +684,7 @@ export function WorkspaceDraftAgentTab({
     workspaceId,
     client,
     isConnected,
+    provider: draftProvider,
     hasPendingCreation: Boolean(pendingAutoSubmit || pendingCreateAttempt),
     isSubmitting,
     formErrorMessage,
@@ -818,6 +838,15 @@ const styles = StyleSheet.create((theme) => ({
   },
   errorText: {
     color: theme.colors.destructive,
+  },
+  resolvedContainer: {
+    marginTop: theme.spacing[2],
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+    borderRadius: theme.borderRadius.md,
+    backgroundColor: theme.colors.surface2,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
   },
   failureTitle: {
     color: theme.colors.foreground,

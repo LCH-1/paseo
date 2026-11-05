@@ -95,7 +95,7 @@ describe("resolveCreationFailureNotice", () => {
   test("shows a stored failure on an idle draft and offers its prompt", () => {
     expect(
       resolveCreationFailureNotice({ failure: { error: "blocked", prompt: "hello" }, ...idle }),
-    ).toEqual({ error: "blocked", prompt: "hello" });
+    ).toEqual({ state: "previous", error: "blocked", prompt: "hello" });
   });
   test("treats a missing or blank prompt as unrecoverable", () => {
     expect(resolveCreationFailureNotice({ failure: { error: "blocked" }, ...idle })?.prompt).toBe(
@@ -105,6 +105,20 @@ describe("resolveCreationFailureNotice", () => {
       resolveCreationFailureNotice({ failure: { error: "blocked", prompt: "  " }, ...idle })
         ?.prompt,
     ).toBe(null);
+  });
+  test("prefers the re-evaluated state over the stored failure", () => {
+    expect(
+      resolveCreationFailureNotice({
+        failure: { error: "old", recheck: { status: "ready" } },
+        ...idle,
+      }),
+    ).toEqual({ state: "resolved", error: null, prompt: null });
+    expect(
+      resolveCreationFailureNotice({
+        failure: { error: "old", recheck: { status: "blocked", error: "new" } },
+        ...idle,
+      }),
+    ).toEqual({ state: "blocked", error: "new", prompt: null });
   });
   test("yields to a live attempt", () => {
     const failure = { error: "blocked" };

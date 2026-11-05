@@ -1659,9 +1659,11 @@ export const ko: TranslationResources = {
   },
   workspaceSetup: {
     creationFailure: {
-      title: "이 세션을 시작하지 못했습니다",
+      titleBlocked: "지금은 세션을 시작할 수 없습니다",
+      titlePrevious: "이전에 이 세션을 시작하지 못했습니다",
+      resolved: "지금은 해결된 것으로 확인됐습니다. 아래에 입력하면 세션을 시작합니다.",
       restore: "메시지 다시 넣기",
-      retype: "원래 메시지는 저장되어 있지 않습니다. 아래에 다시 입력하면 세션이 시작됩니다.",
+      retype: "원래 메시지는 저장되어 있지 않아 아래에 다시 입력해야 합니다.",
     },
     title: "워크스페이스 생성",
     errors: {

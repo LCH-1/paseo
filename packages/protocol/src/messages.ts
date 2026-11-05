@@ -1766,6 +1766,8 @@ export const CreationFindFailedRequestSchema = z.object({
   type: z.literal("creation.find_failed.request"),
   requestId: z.string(),
   workspaceId: z.string().min(1),
+  // Provider a new session would use; asks the host to re-evaluate the stored failure for it.
+  provider: z.string().optional(),
 });
 
 export const ListProviderModelsRequestMessageSchema = z.object({
@@ -4919,6 +4921,10 @@ export const CreationFailureSchema = z.object({
   error: z.string(),
   outcomeUnknown: z.boolean().optional(),
   prompt: z.string().optional(),
+  // Present only when the stored failure could be re-evaluated just now.
+  recheck: z
+    .object({ status: z.enum(["ready", "blocked"]), error: z.string().optional() })
+    .optional(),
 });
 export type CreationFailure = z.infer<typeof CreationFailureSchema>;
 export const CreationFindFailedResponseSchema = z.object({

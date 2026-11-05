@@ -39,6 +39,7 @@ const beforeSchemas = {
       reason: z.enum(["create", "resume", "refresh", "import"]),
       purpose: z.enum(["interactive", "history"]),
       env: z.record(z.string(), z.string()),
+      preflight: z.boolean().optional(),
     })
     .strict(),
   "workspace.create": WorkspaceCreateRequestSchema.omit({ type: true, requestId: true }).strict(),
@@ -145,7 +146,8 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
       previous.provider !== next.provider ||
       previous.cwd !== next.cwd ||
       previous.reason !== next.reason ||
-      previous.purpose !== next.purpose
+      previous.purpose !== next.purpose ||
+      previous.preflight !== next.preflight
     ) {
       throw new Error("agent.session_open hooks can only change env");
     }
