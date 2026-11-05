@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildHiddenProviderEntry,
   getFeatureHighlightColor,
   getFeatureTooltip,
   getAgentControlHintKey,
@@ -290,5 +291,25 @@ describe("resolveAgentModelSelection", () => {
     expect(selection.activeModelId).toBe("gpt-6.1-sol");
     expect(selection.displayModel).toBe("gpt-6.1-sol");
     expect(selection.displayThinking).toBe("Max");
+  });
+});
+
+describe("buildHiddenProviderEntry", () => {
+  const model = { provider: "claude-abc", id: "claude-opus-5-5", label: "Opus 5.5" };
+  const claude = { provider: "claude", status: "ready", enabled: true, label: "Claude" } as const;
+
+  it("makes a selectable entry that carries the provider's own models", () => {
+    expect(buildHiddenProviderEntry("claude-abc", [model], [claude])).toEqual({
+      provider: "claude-abc",
+      status: "ready",
+      enabled: true,
+      models: [model],
+      label: "Claude",
+    });
+  });
+
+  it("does not take a label from a provider that only shares a prefix", () => {
+    const entry = buildHiddenProviderEntry("claudette", [], [claude]);
+    expect(entry.label).toBe("claudette");
   });
 });

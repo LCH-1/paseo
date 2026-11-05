@@ -1,4 +1,8 @@
-import type { AgentFeature, AgentModelDefinition } from "@getpaseo/protocol/agent-types";
+import type {
+  AgentFeature,
+  AgentModelDefinition,
+  ProviderSnapshotEntry,
+} from "@getpaseo/protocol/agent-types";
 import { i18n } from "@/i18n/i18next";
 import { formatThinkingOptionLabel } from "@/agent-controls/labels";
 import {
@@ -207,5 +211,24 @@ export function resolveAgentModelSelection(input: {
     thinkingOptions,
     selectedThinkingId,
     displayThinking,
+  };
+}
+
+/**
+ * A provider hidden from pickers (selectable: false) is left out of the snapshot,
+ * but sessions already running on it still need their own models.
+ */
+export function buildHiddenProviderEntry(
+  provider: string,
+  models: AgentModelDefinition[],
+  snapshotEntries: ProviderSnapshotEntry[] | undefined,
+): ProviderSnapshotEntry {
+  const family = snapshotEntries?.find((entry) => provider.startsWith(`${entry.provider}-`));
+  return {
+    provider,
+    status: "ready",
+    enabled: true,
+    models,
+    label: family?.label ?? provider,
   };
 }

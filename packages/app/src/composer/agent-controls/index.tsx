@@ -53,7 +53,9 @@ import type {
   AgentProvider,
 } from "@getpaseo/protocol/agent-types";
 import type { AgentProviderDefinition } from "@getpaseo/protocol/provider-manifest";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import {
+  buildHiddenProviderEntry,
   getFeatureHighlightColor,
   isFeatureActive,
   getFeatureTooltip,
@@ -1549,6 +1551,62 @@ function ThinkingComboboxOption({
   );
 }
 
+function useAgentProviderEntry({
+  client,
+  agent,
+  snapshotEntries,
+}: {
+  client: DaemonClient | null;
+  agent: { provider: string; cwd?: string | null } | null | undefined;
+  snapshotEntries: ReturnType<typeof useProvidersSnapshot>["entries"];
+}) {
+  const provider = agent?.provider;
+  const cwd = agent?.cwd;
+  const visibleEntry = useMemo(
+    () => resolveSnapshotSelectedEntry(snapshotEntries, provider),
+    [snapshotEntries, provider],
+  );
+  const hiddenProvider = snapshotEntries && !visibleEntry ? provider : undefined;
+  const [loaded, setLoaded] = useState<{
+    provider: string;
+    models: AgentModelDefinition[];
+  } | null>(null);
+  useEffect(() => {
+    if (!client || !hiddenProvider) {
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const { models, error } = await client.listProviderModels(
+          hiddenProvider,
+          cwd ? { cwd } : undefined,
+        );
+        if (error) {
+          throw new Error(error);
+        }
+        if (!cancelled) {
+          setLoaded({ provider: hiddenProvider, models: models ?? [] });
+        }
+      } catch (error) {
+        console.warn("[AgentControls] listProviderModels failed", error);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, hiddenProvider, cwd]);
+  const hiddenEntry = useMemo(
+    () =>
+      hiddenProvider && loaded?.provider === hiddenProvider
+        ? buildHiddenProviderEntry(hiddenProvider, loaded.models, snapshotEntries)
+        : null,
+    [hiddenProvider, loaded, snapshotEntries],
+  );
+  return visibleEntry ?? hiddenEntry;
+}
+
 export const AgentControls = memo(function AgentControls({
   agentId,
   serverId,
@@ -1573,10 +1631,11 @@ export const AgentControls = memo(function AgentControls({
     refetchIfStale: refetchSnapshotIfStale,
   } = useProvidersSnapshot(serverId, { cwd: agent?.cwd });
 
-  const snapshotSelectedEntry = useMemo(
-    () => resolveSnapshotSelectedEntry(snapshotEntries, agent?.provider),
-    [snapshotEntries, agent?.provider],
-  );
+  const snapshotSelectedEntry = useAgentProviderEntry({
+    client,
+    agent,
+    snapshotEntries,
+  });
 
   const models = filterSelectableModels(snapshotSelectedEntry?.models ?? null);
   const selectedProviderIsLoading = snapshotSelectedEntry?.status === "loading";
