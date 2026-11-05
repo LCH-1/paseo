@@ -1658,6 +1658,11 @@ export const ko: TranslationResources = {
     dialogFilterName: "이미지",
   },
   workspaceSetup: {
+    creationFailure: {
+      title: "이 세션을 시작하지 못했습니다",
+      restore: "메시지 다시 넣기",
+      retype: "원래 메시지는 저장되어 있지 않습니다. 아래에 다시 입력하면 세션이 시작됩니다.",
+    },
     title: "워크스페이스 생성",
     errors: {
       failedCreateWorktree: "워크트리를 생성하지 못했습니다",

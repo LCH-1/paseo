@@ -1,6 +1,6 @@
 import pino from "pino";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -68,6 +68,79 @@ const agent: AgentSnapshotPayload = {
   title: "Start once",
   labels: {},
 };
+test("reports the newest failure for a workspace and restores its prompt", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "creation-lookup-"));
+  directories.push(directory);
+  const service = new CreationService(directory, silentLogger);
+  const createAgent = (message: string) => async () => {
+    throw new Error(message);
+  };
+
+  expect(await service.findFailedForWorkspace(workspace.id)).toBeNull();
+  // A failed new workspace, then a failed retry from its draft tab.
+  await service.create({
+    kind: "workspace",
+    key: "first",
+    request: { key: "first" },
+    workspaceId: workspace.id,
+    hasAgent: true,
+    hasPrompt: false,
+    exists: async () => false,
+    provision: async () => ({ workspace }),
+    createAgent: createAgent("older failure"),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await service.create({
+    kind: "agent",
+    key: "second",
+    request: { key: "second" },
+    workspaceId: workspace.id,
+    hasAgent: true,
+    hasPrompt: true,
+    prompt: "hello",
+    exists: async () => false,
+    readAgent: async () => null,
+    createAgent: createAgent("account blocked"),
+  });
+  await writeFile(join(directory, "corrupt.json"), "{");
+
+  expect(await service.findFailedForWorkspace(workspace.id)).toEqual({
+    error: "account blocked",
+    outcomeUnknown: false,
+    prompt: "hello",
+  });
+  expect(await service.findFailedForWorkspace("wks_other")).toBeNull();
+});
+
+test("forgets the kept prompt once a retry succeeds", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "creation-lookup-"));
+  directories.push(directory);
+  const service = new CreationService(directory, silentLogger);
+  let blocked = true;
+  const input: CreationInput = {
+    kind: "workspace",
+    key: "retry",
+    request: { key: "retry" },
+    workspaceId: workspace.id,
+    hasAgent: true,
+    hasPrompt: true,
+    prompt: "private text",
+    exists: async () => false,
+    provision: async () => ({ workspace }),
+    createAgent: async () => {
+      if (blocked) throw new Error("blocked");
+      return { agent, initialPromptStarted: true };
+    },
+  };
+  await service.create(input);
+  blocked = false;
+  expect(await service.create(input)).toMatchObject({ phase: "completed" });
+
+  expect(await service.findFailedForWorkspace(workspace.id)).toBeNull();
+  const receipt = (await readdir(directory)).find((name) => name.endsWith(".json"));
+  expect(await readFile(join(directory, receipt!), "utf8")).not.toContain("private text");
+});
+
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), "creation-lifecycle-"));
   directories.push(directory);

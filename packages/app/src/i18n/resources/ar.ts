@@ -1627,6 +1627,11 @@ export const ar: TranslationResources = {
     dialogFilterName: "الصور",
   },
   workspaceSetup: {
+    creationFailure: {
+      title: "تعذر بدء هذه الجلسة",
+      restore: "استعادة الرسالة",
+      retype: "لم يتم حفظ الرسالة الأصلية. اكتبها مرة أخرى أدناه لبدء جلسة.",
+    },
     title: "إنشاء مساحة عمل",
     errors: {
       failedCreateWorktree: "فشل في إنشاء شجرة العمل",

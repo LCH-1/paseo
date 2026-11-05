@@ -1673,6 +1673,11 @@ export const en = {
     dialogFilterName: "Images",
   },
   workspaceSetup: {
+    creationFailure: {
+      title: "This session couldn't start",
+      restore: "Restore message",
+      retype: "The original message wasn't saved. Type it again below to start a session.",
+    },
     title: "Create workspace",
     errors: {
       failedCreateWorktree: "Failed to create worktree",

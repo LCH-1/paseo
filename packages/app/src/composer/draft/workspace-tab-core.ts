@@ -5,6 +5,22 @@ export interface WorkspaceDraftAutoSubmitConfig {
   model: string | null;
 }
 
+export interface CreationFailureNotice {
+  error: string;
+  prompt: string | null;
+}
+
+/** A live attempt reports its own outcome, so the stored failure only speaks for an idle draft. */
+export function resolveCreationFailureNotice(input: {
+  failure: { error: string; prompt?: string } | null | undefined;
+  isSubmitting: boolean;
+  formErrorMessage: string | null | undefined;
+}): CreationFailureNotice | null {
+  const { failure, isSubmitting, formErrorMessage } = input;
+  if (!failure || isSubmitting || formErrorMessage) return null;
+  return { error: failure.error, prompt: failure.prompt?.trim() ? failure.prompt : null };
+}
+
 function stableIntentJson(intent: unknown): string {
   return (
     JSON.stringify(intent, (_key, value: unknown) =>

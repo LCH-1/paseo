@@ -1673,6 +1673,11 @@ export const es: TranslationResources = {
     dialogFilterName: "Imágenes",
   },
   workspaceSetup: {
+    creationFailure: {
+      title: "No se pudo iniciar esta sesión",
+      restore: "Restaurar mensaje",
+      retype: "El mensaje original no se guardó. Escríbelo de nuevo abajo para iniciar una sesión.",
+    },
     title: "Crear espacio de trabajo",
     errors: {
       failedCreateWorktree: "No se pudo crear el árbol de trabajo",

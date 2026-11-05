@@ -1795,6 +1795,8 @@ export class VoiceAssistantWebSocketServer {
         agentRequestReceipts: true,
         workspaceRequestReceipts: true,
         creationLifecycle: true,
+        // COMPAT(creationFailureLookup): added in v0.12.1; remove gate after 2027-11-05.
+        creationFailureLookup: true,
         hubAgentRpc: true,
         backgroundWorkspaces: true,
         // COMPAT(directorySync): added in v0.3.x, remove gate after 2027-02-12.

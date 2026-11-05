@@ -1658,6 +1658,12 @@ export const ptBR: TranslationResources = {
     dialogFilterName: "Imagens",
   },
   workspaceSetup: {
+    creationFailure: {
+      title: "Não foi possível iniciar esta sessão",
+      restore: "Restaurar mensagem",
+      retype:
+        "A mensagem original não foi salva. Digite-a novamente abaixo para iniciar uma sessão.",
+    },
     title: "Criar workspace",
     errors: {
       failedCreateWorktree: "Falha ao criar worktree",

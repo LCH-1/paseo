@@ -269,6 +269,53 @@ test.each(["create_agent_request", "agent.create.request"] as const)(
   60000,
 );
 
+test("a workspace left without a session reports why until a session starts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "creation-failure-lookup-"));
+  let blocked = true;
+  const daemon = await createCreationDaemon({
+    agentClients: createTestAgentClients({
+      beforeCreateSession: async (config) => {
+        if (!config.internal && blocked) throw new Error("account blocked");
+      },
+    }),
+  });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    appVersion: "0.7.2",
+    clientId: "creation-failure-lookup",
+  });
+  const workspaceId = "wks_00000000deadbeef";
+  try {
+    await client.connect();
+    const created = await client.createWorkspace({
+      idempotencyKey: "blocked-start",
+      workspaceId,
+      source: { kind: "directory", path: directory },
+      agent: { provider: "codex", cwd: directory, initialPrompt: "Keep this message" },
+    });
+    expect(created.error).toContain("account blocked");
+    await expect(client.findCreationFailure(workspaceId)).resolves.toMatchObject({
+      error: expect.stringContaining("account blocked"),
+      outcomeUnknown: false,
+      prompt: "Keep this message",
+    });
+
+    blocked = false;
+    await client.createAgent({
+      idempotencyKey: "second-start",
+      workspaceId,
+      provider: "codex",
+      cwd: directory,
+      initialPrompt: "Keep this message",
+    });
+    await expect(client.findCreationFailure(workspaceId)).resolves.toBeNull();
+  } finally {
+    await client.close();
+    await daemon.close();
+    await rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  }
+}, 60000);
+
 test("legacy keyed creation preserves checkout error codes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "creation-checkout-error-"));
   execFileSync("git", ["init", "-b", "main", directory], { stdio: "pipe" });

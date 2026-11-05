@@ -1762,6 +1762,12 @@ export const CreationSubscribeRequestSchema = z.object({
   subscribe: z.boolean().optional(),
 });
 
+export const CreationFindFailedRequestSchema = z.object({
+  type: z.literal("creation.find_failed.request"),
+  requestId: z.string(),
+  workspaceId: z.string().min(1),
+});
+
 export const ListProviderModelsRequestMessageSchema = z.object({
   type: z.literal("list_provider_models_request"),
   provider: AgentProviderSchema,
@@ -3347,6 +3353,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   WorkspaceCreateRequestSchema,
   AgentCreateRequestSchema,
   CreationSubscribeRequestSchema,
+  CreationFindFailedRequestSchema,
   WorkspaceClearAttentionRequestSchema,
   WorkspaceMarkUnreadRequestSchema,
   FileExplorerRequestSchema,
@@ -3577,6 +3584,8 @@ export const ServerInfoStatusPayloadSchema = z
         // COMPAT(workspaceRequestReceipts): added in v0.8.0; remove gate after 2027-03-07.
         workspaceRequestReceipts: z.boolean().optional(),
         creationLifecycle: z.boolean().optional(),
+        // COMPAT(creationFailureLookup): added in v0.12.1; remove gate after 2027-11-05.
+        creationFailureLookup: z.boolean().optional(),
         // COMPAT(hubAgentRpc): added in v0.8.0; remove gate after 2027-03-05.
         hubAgentRpc: z.boolean().optional(),
         // COMPAT(internalAgents): added in v0.9.0; remove gate after 2027-03-17.
@@ -4903,6 +4912,20 @@ export const CreationSubscribeResponseSchema = z.object({
     requestId: z.string(),
     subscriptionId: z.string().optional(),
     snapshot: CreationSnapshotSchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
+export const CreationFailureSchema = z.object({
+  error: z.string(),
+  outcomeUnknown: z.boolean().optional(),
+  prompt: z.string().optional(),
+});
+export type CreationFailure = z.infer<typeof CreationFailureSchema>;
+export const CreationFindFailedResponseSchema = z.object({
+  type: z.literal("creation.find_failed.response"),
+  payload: z.object({
+    requestId: z.string(),
+    failure: CreationFailureSchema.nullable(),
     error: z.string().nullable(),
   }),
 });
@@ -6946,6 +6969,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   WorkspaceCreationUpdateSchema,
   AgentCreationUpdateSchema,
   CreationSubscribeResponseSchema,
+  CreationFindFailedResponseSchema,
   WorkspaceClearAttentionResponseSchema,
   WorkspaceMarkUnreadResponseSchema,
   SendAgentMessageResponseMessageSchema,

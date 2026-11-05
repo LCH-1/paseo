@@ -9,7 +9,7 @@ import {
   type TimelineSubscription,
 } from "./connection/index.js";
 import { CreationClient } from "./creation/index.js";
-import type { CreationSnapshot } from "@getpaseo/protocol/messages";
+import type { CreationFailure, CreationSnapshot } from "@getpaseo/protocol/messages";
 import type { z } from "zod";
 import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
 import type { ClientCapability } from "@getpaseo/protocol/client-capabilities";
@@ -2898,6 +2898,19 @@ export class DaemonClient {
 
   supportsBackgroundWorkspaces(): boolean {
     return this.lastServerInfoMessage?.features?.backgroundWorkspaces === true;
+  }
+
+  /** Why a workspace has no session. Hosts without the lookup report nothing rather than failing. */
+  async findCreationFailure(workspaceId: string): Promise<CreationFailure | null> {
+    // COMPAT(creationFailureLookup): added in v0.12.1; remove gate after 2027-11-05.
+    if (this.lastServerInfoMessage?.features?.creationFailureLookup !== true) return null;
+    const payload = await this.sendCorrelatedSessionRequest({
+      message: { type: "creation.find_failed.request", workspaceId },
+      responseType: "creation.find_failed.response",
+      timeout: 10000,
+    });
+    if (payload.error) throw new Error(payload.error);
+    return payload.failure;
   }
 
   async createAgent(options: CreateAgentRequestOptions): Promise<AgentSnapshotPayload> {

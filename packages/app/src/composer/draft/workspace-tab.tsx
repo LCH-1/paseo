@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { Keyboard, ScrollView, StyleSheet as RNStyleSheet, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
+import { useFetchQuery } from "@/data/query";
+import { Button } from "@/components/ui/button";
 import { StyleSheet } from "react-native-unistyles";
 import { ComposerDock } from "@/composer/dock";
 import { useContainerWidthBelow } from "@/hooks/use-container-width";
@@ -30,6 +32,8 @@ import type { WorkspaceFileOpenRequest } from "@/workspace/file-open";
 import { shouldAutoFocusWorkspaceDraftComposer } from "@/screens/workspace/workspace-draft-pane-focus";
 import {
   buildDraftCreationKey,
+  type CreationFailureNotice,
+  resolveCreationFailureNotice,
   shouldAllowEmptyDraftText,
   validateDraftSubmission,
 } from "@/composer/draft/workspace-tab-core";
@@ -270,6 +274,60 @@ function resolveDraftWorkingDirectory(input: {
     return input.initialSetup.cwd;
   }
   return input.workspaceDirectory;
+}
+
+// The daemon is the only owner of this failure: the draft that hit it may be long gone.
+function useCreationFailureNotice(input: {
+  serverId: string;
+  workspaceId: string;
+  client: DaemonClient | null;
+  isConnected: boolean;
+  hasPendingCreation: boolean;
+  isSubmitting: boolean;
+  formErrorMessage: string | null | undefined;
+}): CreationFailureNotice | null {
+  const { serverId, workspaceId, client, isConnected, hasPendingCreation } = input;
+  const query = useFetchQuery({
+    queryKey: ["creationFailure", serverId, workspaceId],
+    dataShape: "value",
+    staleTimeMs: 0,
+    enabled: Boolean(client && isConnected && !hasPendingCreation),
+    retry: false,
+    queryFn: async () => (client ? client.findCreationFailure(workspaceId) : null),
+  });
+  return resolveCreationFailureNotice({
+    failure: query.data,
+    isSubmitting: input.isSubmitting,
+    formErrorMessage: input.formErrorMessage,
+  });
+}
+
+function CreationFailureCard({
+  notice,
+  onRestore,
+}: {
+  notice: CreationFailureNotice | null;
+  onRestore: (prompt: string) => void;
+}) {
+  const { t } = useTranslation();
+  const prompt = notice?.prompt ?? null;
+  const handleRestore = useCallback(() => {
+    if (prompt) onRestore(prompt);
+  }, [onRestore, prompt]);
+  if (!notice) return null;
+  return (
+    <View style={styles.errorContainer} testID="workspace-creation-failure">
+      <Text style={styles.failureTitle}>{t("workspaceSetup.creationFailure.title")}</Text>
+      <Text style={styles.errorText}>{notice.error}</Text>
+      {prompt ? (
+        <Button variant="secondary" size="sm" style={styles.failureAction} onPress={handleRestore}>
+          {t("workspaceSetup.creationFailure.restore")}
+        </Button>
+      ) : (
+        <Text style={styles.failureHint}>{t("workspaceSetup.creationFailure.retype")}</Text>
+      )}
+    </View>
+  );
 }
 
 interface WorkspaceDraftAgentTabProps {
@@ -602,6 +660,22 @@ export function WorkspaceDraftAgentTab({
     focusInputRef.current?.();
   }, []);
   const importPillPress = resolveImportPillPress(onOpenImportSheet, isSubmitting);
+  const creationFailure = useCreationFailureNotice({
+    serverId,
+    workspaceId,
+    client,
+    isConnected,
+    hasPendingCreation: Boolean(pendingAutoSubmit || pendingCreateAttempt),
+    isSubmitting,
+    formErrorMessage,
+  });
+  const handleRestoreFailedPrompt = useCallback(
+    (prompt: string) => {
+      replaceDraftText(prompt);
+      focusInputRef.current?.();
+    },
+    [replaceDraftText],
+  );
   const composerAgentControls = useMemo(
     () => ({
       ...composerState.agentControls,
@@ -633,6 +707,7 @@ export function WorkspaceDraftAgentTab({
                 <Text style={styles.errorText}>{formErrorMessage}</Text>
               </View>
             ) : null}
+            <CreationFailureCard notice={creationFailure} onRestore={handleRestoreFailedPrompt} />
           </View>
         </ScrollView>
       )}
@@ -743,5 +818,18 @@ const styles = StyleSheet.create((theme) => ({
   },
   errorText: {
     color: theme.colors.destructive,
+  },
+  failureTitle: {
+    color: theme.colors.foreground,
+    fontWeight: theme.fontWeight.medium,
+    marginBottom: theme.spacing[1],
+  },
+  failureHint: {
+    color: theme.colors.foregroundMuted,
+    marginTop: theme.spacing[2],
+  },
+  failureAction: {
+    alignSelf: "flex-start",
+    marginTop: theme.spacing[2],
   },
 }));

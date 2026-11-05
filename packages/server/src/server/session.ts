@@ -462,7 +462,7 @@ export interface SessionOptions {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   messageReceipts: Pick<MessageReceipts, "send">;
-  creationService: Pick<CreationService, "create" | "subscribe">;
+  creationService: Pick<CreationService, "create" | "subscribe" | "findFailedForWorkspace">;
   projectRegistry: ProjectRegistry;
   workspaceRegistry: WorkspaceRegistry;
   directorySync?: DirectorySyncService;
@@ -800,7 +800,10 @@ export class Session {
   private readonly workspaceScripts: WorkspaceScriptsService;
   private readonly messageReceipts: Pick<MessageReceipts, "send">;
   private readonly createAgentLifecycleDispatch: CreateAgentLifecycleDispatch;
-  private readonly creationService: Pick<CreationService, "create" | "subscribe">;
+  private readonly creationService: Pick<
+    CreationService,
+    "create" | "subscribe" | "findFailedForWorkspace"
+  >;
 
   constructor(options: SessionOptions) {
     const {
@@ -2740,6 +2743,8 @@ export class Session {
         return this.handleAgentCreation(msg, source);
       case "creation.subscribe.request":
         return this.handleCreationSubscription(msg, source);
+      case "creation.find_failed.request":
+        return this.handleCreationFailureLookup(msg, source);
       case "workspace.create.request":
         return this.handleWorkspaceCreation(msg, source);
       default:
@@ -3987,6 +3992,40 @@ export class Session {
     }
   }
 
+  private async handleCreationFailureLookup(
+    request: Extract<SessionInboundMessage, { type: "creation.find_failed.request" }>,
+    source?: object,
+  ): Promise<void> {
+    const { requestId, workspaceId } = request;
+    try {
+      // Any session in the workspace supersedes an earlier failed start.
+      const hasSession =
+        this.agentManager
+          .listAgents()
+          .some((agent) => agent.workspaceId === workspaceId && !agent.internal) ||
+        (await this.agentStorage.listByWorkspace(workspaceId)).some((record) => !record.internal);
+      const failure = hasSession
+        ? null
+        : await this.creationService.findFailedForWorkspace(workspaceId);
+      this.emitForSource(
+        { type: "creation.find_failed.response", payload: { requestId, failure, error: null } },
+        source,
+      );
+    } catch (error) {
+      this.emitForSource(
+        {
+          type: "creation.find_failed.response",
+          payload: {
+            requestId,
+            failure: null,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        },
+        source,
+      );
+    }
+  }
+
   private creationResourceExists = async (
     kind: "workspace" | "agent",
     id: string,
@@ -4009,6 +4048,7 @@ export class Session {
         agentId: request.agentId,
         hasAgent: true,
         hasPrompt: hasInitialCreationPrompt(request),
+        prompt: request.initialPrompt,
         exists: this.creationResourceExists,
         readAgent: async (id) => {
           const record = await this.agentStorage.get(id);
@@ -4098,6 +4138,7 @@ export class Session {
           agentId: agentInput?.agentId,
           hasAgent: Boolean(agentInput),
           hasPrompt: hasInitialCreationPrompt(agentInput),
+          prompt: agentInput?.initialPrompt,
           exists: this.creationResourceExists,
           provision: async (id) => {
             const descriptor = await this.createRequestedWorkspace(

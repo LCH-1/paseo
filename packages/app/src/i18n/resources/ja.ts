@@ -1644,6 +1644,11 @@ export const ja: TranslationResources = {
     dialogFilterName: "画像",
   },
   workspaceSetup: {
+    creationFailure: {
+      title: "このセッションを開始できませんでした",
+      restore: "メッセージを復元",
+      retype: "元のメッセージは保存されていません。下に再入力するとセッションが開始されます。",
+    },
     title: "ワークスペースを作成",
     errors: {
       failedCreateWorktree: "ワークツリーの作成に失敗しました",

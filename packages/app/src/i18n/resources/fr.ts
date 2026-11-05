@@ -1669,6 +1669,12 @@ export const fr: TranslationResources = {
     dialogFilterName: "Images",
   },
   workspaceSetup: {
+    creationFailure: {
+      title: "Impossible de démarrer cette session",
+      restore: "Restaurer le message",
+      retype:
+        "Le message d'origine n'a pas été enregistré. Saisissez-le à nouveau ci-dessous pour démarrer une session.",
+    },
     title: "Créer un espace de travail",
     errors: {
       failedCreateWorktree: "Impossible de créer le worktree",

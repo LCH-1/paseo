@@ -1,11 +1,12 @@
 import type { Logger } from "pino";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import {
   CreationSnapshotSchema,
   type AgentSnapshotPayload,
+  type CreationFailure,
   type CreationSnapshot,
   type WorkspaceDescriptorPayload,
 } from "@getpaseo/protocol/messages";
@@ -24,6 +25,8 @@ interface CreationRequest {
   agentId?: string;
   hasAgent: boolean;
   hasPrompt: boolean;
+  /** Kept only with a failed receipt, so the message can be restored after the client is gone. */
+  prompt?: string;
   exists: (kind: "workspace" | "agent", id: string) => Promise<boolean>;
   provision?: (
     workspaceId: string,
@@ -43,6 +46,7 @@ const RecordSchema = z.object({
   fingerprint: z.string(),
   snapshot: CreationSnapshotSchema,
   inFlight: z.enum(["workspace", "agent", "prompt"]).nullable(),
+  failedPrompt: z.string().optional(),
 });
 type Record = z.infer<typeof RecordSchema>;
 
@@ -148,11 +152,51 @@ export class CreationService {
     }
   }
 
+  /** The newest failure for a workspace. A workspace that outlives its failed agent has no other trace of it. */
+  async findFailedForWorkspace(workspaceId: string): Promise<CreationFailure | null> {
+    let names: string[];
+    try {
+      names = await readdir(this.directory);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+      throw error;
+    }
+    let latest: { modifiedAt: number; failure: CreationFailure } | null = null;
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      const record = await this.readForLookup(name.slice(0, -".json".length));
+      if (record?.snapshot.phase !== "failed" || record.snapshot.workspaceId !== workspaceId)
+        continue;
+      const { mtimeMs: modifiedAt } = await stat(join(this.directory, name));
+      if (latest && latest.modifiedAt >= modifiedAt) continue;
+      latest = {
+        modifiedAt,
+        failure: {
+          error: record.snapshot.error ?? `${record.snapshot.kind}_request_failed`,
+          outcomeUnknown: record.snapshot.outcomeUnknown,
+          prompt: record.failedPrompt,
+        },
+      };
+    }
+    return latest?.failure ?? null;
+  }
+
+  private async readForLookup(identity: string): Promise<Record | null> {
+    try {
+      return await this.read(identity);
+    } catch (err) {
+      // One unreadable receipt must not hide the failure this lookup exists to report.
+      this.logger.warn({ err, identity }, "Skipped unreadable creation receipt");
+      return null;
+    }
+  }
+
   private async run(
     identity: string,
     record: Record,
     input: CreationInput,
   ): Promise<CreationSnapshot> {
+    delete record.failedPrompt;
     try {
       if (input.provision && !record.snapshot.workspace) {
         record.inFlight = "workspace";
@@ -206,6 +250,7 @@ export class CreationService {
       // A failed provider startup with no registered resource can retry under the same ID.
       // A partially provisioned resource or an attempted prompt needs reconciliation.
       if (!unknown) record.inFlight = null;
+      record.failedPrompt = restorablePrompt(input.prompt);
       await this.publish(identity, record, {
         phase: "failed",
         error: error instanceof Error ? error.message : String(error),
@@ -337,6 +382,9 @@ export class CreationService {
     });
     return result;
   }
+}
+function restorablePrompt(prompt: string | undefined): string | undefined {
+  return prompt?.trim() ? prompt : undefined;
 }
 function initialRecord(input: CreationInput, fingerprint: string): Record {
   return {

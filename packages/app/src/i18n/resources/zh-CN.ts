@@ -1610,6 +1610,11 @@ export const zhCN: TranslationResources = {
     dialogFilterName: "图片",
   },
   workspaceSetup: {
+    creationFailure: {
+      title: "无法启动此会话",
+      restore: "恢复消息",
+      retype: "原始消息未保存。请在下方重新输入以启动会话。",
+    },
     title: "创建 workspace",
     errors: {
       failedCreateWorktree: "创建 worktree 失败",

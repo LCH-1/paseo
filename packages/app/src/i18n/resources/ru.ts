@@ -1656,6 +1656,11 @@ export const ru: TranslationResources = {
     dialogFilterName: "Изображения",
   },
   workspaceSetup: {
+    creationFailure: {
+      title: "Не удалось запустить этот сеанс",
+      restore: "Восстановить сообщение",
+      retype: "Исходное сообщение не сохранено. Введите его ещё раз ниже, чтобы запустить сеанс.",
+    },
     title: "Создать рабочее пространство",
     errors: {
       failedCreateWorktree: "Не удалось создать worktree.",

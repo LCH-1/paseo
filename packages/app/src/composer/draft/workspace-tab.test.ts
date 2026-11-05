@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import {
   buildDraftCreationKey,
+  resolveCreationFailureNotice,
   resolveDraftCreationRetry,
   shouldAllowEmptyDraftText,
   validateDraftSubmission,
@@ -89,6 +90,30 @@ describe("workspace draft empty text readiness", () => {
   });
 });
 
+describe("resolveCreationFailureNotice", () => {
+  const idle = { isSubmitting: false, formErrorMessage: null };
+  test("shows a stored failure on an idle draft and offers its prompt", () => {
+    expect(
+      resolveCreationFailureNotice({ failure: { error: "blocked", prompt: "hello" }, ...idle }),
+    ).toEqual({ error: "blocked", prompt: "hello" });
+  });
+  test("treats a missing or blank prompt as unrecoverable", () => {
+    expect(resolveCreationFailureNotice({ failure: { error: "blocked" }, ...idle })?.prompt).toBe(
+      null,
+    );
+    expect(
+      resolveCreationFailureNotice({ failure: { error: "blocked", prompt: "  " }, ...idle })
+        ?.prompt,
+    ).toBe(null);
+  });
+  test("yields to a live attempt", () => {
+    const failure = { error: "blocked" };
+    expect(resolveCreationFailureNotice({ failure, ...idle, isSubmitting: true })).toBe(null);
+    expect(resolveCreationFailureNotice({ failure, ...idle, formErrorMessage: "new" })).toBe(null);
+    expect(resolveCreationFailureNotice({ failure: null, ...idle })).toBe(null);
+  });
+});
+
 describe("failed draft resubmission", () => {
   const intent = { config: { provider: "codex", model: "a" }, initialPrompt: "hello" };
 
@@ -104,7 +129,10 @@ describe("failed draft resubmission", () => {
   test("uses a new key when the provider or prompt changes", () => {
     const original = buildDraftCreationKey("draft", intent);
     expect(
-      buildDraftCreationKey("draft", { ...intent, config: { ...intent.config, provider: "claude" } }),
+      buildDraftCreationKey("draft", {
+        ...intent,
+        config: { ...intent.config, provider: "claude" },
+      }),
     ).not.toBe(original);
     expect(buildDraftCreationKey("draft", { ...intent, initialPrompt: "edited" })).not.toBe(
       original,
