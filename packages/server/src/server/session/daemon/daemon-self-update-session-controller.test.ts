@@ -30,6 +30,7 @@ function createController(input: {
   const restartIntents: RestartIntent[] = [];
   const controller = new DaemonSelfUpdateSessionController({
     clientId: "client-1",
+    selfUpdateEnabled: true,
     daemonVersion: input.daemonVersion ?? "0.1.15",
     desktopManaged: input.desktopManaged,
     emit: (msg) => {
@@ -51,6 +52,43 @@ const updateRequest: SessionInboundMessage = {
 };
 
 describe("DaemonSelfUpdateSessionController", () => {
+  test("refuses updates unless they are explicitly enabled", async () => {
+    const emitted: unknown[] = [];
+    let updates = 0;
+    const controller = new DaemonSelfUpdateSessionController({
+      clientId: "pinned",
+      daemonVersion: "0.12.0",
+      emit: (msg) => {
+        emitted.push(msg);
+      },
+      emitLifecycleIntent: () => {
+        throw new Error("no restart expected");
+      },
+      sessionLogger: createTestLogger(),
+      updater: {
+        update: async () => {
+          updates++;
+          throw new Error("must not run");
+        },
+      },
+    });
+
+    await controller.dispatch({ type: "daemon.update.request", requestId: "r1" } as never);
+
+    expect(updates).toBe(0);
+    expect(emitted).toEqual([
+      {
+        type: "rpc_error",
+        payload: {
+          requestId: "r1",
+          requestType: "daemon.update.request",
+          error: "Daemon updates are disabled on this host.",
+          code: "updates_disabled",
+        },
+      },
+    ]);
+  });
+
   test("returns undefined synchronously for messages owned by another subsystem", () => {
     const updater: TestUpdater = {
       async update() {
@@ -193,6 +231,7 @@ test("self-update progress is request-owned through the final delivery boundary"
   let lateProgress: (() => void) | undefined;
   const controller = new DaemonSelfUpdateSessionController({
     clientId: "safe-update",
+    selfUpdateEnabled: true,
     daemonVersion: "0.8.0",
     sessionLogger: createTestLogger(),
     emit: (message) => {

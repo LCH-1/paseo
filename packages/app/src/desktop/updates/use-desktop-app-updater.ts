@@ -11,7 +11,6 @@ import {
 import { useDesktopSettings } from "@/desktop/settings/desktop-settings";
 import { useDesktopIpcErrorReporter } from "@/desktop/hooks/desktop-ipc-error";
 import {
-  PENDING_RECHECK_MS,
   createDesktopAppUpdater,
   formatStatusText,
   type DesktopAppUpdateStatus,
@@ -81,27 +80,6 @@ export function useDesktopAppUpdater(): UseDesktopAppUpdaterReturn {
     }
     return updater.installUpdate({ releaseChannel });
   }, [isDesktopApp, releaseChannel, updater]);
-
-  useEffect(() => {
-    if (!isDesktopApp) {
-      return;
-    }
-    void checkForUpdates({ intent: "automatic", silent: true });
-  }, [checkForUpdates, isDesktopApp]);
-
-  useEffect(() => {
-    if (!isDesktopApp || snapshot.status !== "pending") {
-      return undefined;
-    }
-
-    const intervalId = setInterval(() => {
-      void checkForUpdates({ intent: "automatic", silent: true });
-    }, PENDING_RECHECK_MS);
-
-    return () => {
-      clearInterval(intervalId);
-    };
-  }, [checkForUpdates, isDesktopApp, snapshot.status]);
 
   return {
     isDesktopApp,

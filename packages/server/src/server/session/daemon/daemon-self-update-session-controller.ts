@@ -22,6 +22,7 @@ interface DaemonSelfUpdateRestartIntent {
 }
 
 export interface DaemonSelfUpdateSessionControllerOptions {
+  selfUpdateEnabled?: boolean;
   clientId: string;
   daemonVersion: string | null;
   desktopManaged?: boolean;
@@ -43,6 +44,7 @@ export class DaemonSelfUpdateSessionController {
   private readonly emitLifecycleIntent: (intent: DaemonSelfUpdateRestartIntent) => void;
   private readonly sessionLogger: pino.Logger;
   private readonly updater: Pick<DaemonSelfUpdater, "update">;
+  private readonly selfUpdateEnabled: boolean;
 
   constructor(options: DaemonSelfUpdateSessionControllerOptions) {
     this.clientId = options.clientId;
@@ -52,6 +54,8 @@ export class DaemonSelfUpdateSessionController {
     this.emitLifecycleIntent = options.emitLifecycleIntent;
     this.sessionLogger = options.sessionLogger;
     this.updater = options.updater ?? daemonSelfUpdater;
+    // Suite pins its daemon build; a package-manager update would replace the verified one.
+    this.selfUpdateEnabled = options.selfUpdateEnabled === true;
   }
 
   dispatch(msg: SessionInboundMessage): Promise<void> | undefined {
@@ -62,6 +66,18 @@ export class DaemonSelfUpdateSessionController {
   }
 
   private async handleDaemonUpdateRequest(msg: DaemonUpdateRequest): Promise<void> {
+    if (!this.selfUpdateEnabled) {
+      this.emit({
+        type: "rpc_error",
+        payload: {
+          requestId: msg.requestId,
+          requestType: "daemon.update.request",
+          error: "Daemon updates are disabled on this host.",
+          code: "updates_disabled",
+        },
+      });
+      return;
+    }
     const previousVersion = this.daemonVersion;
 
     try {
