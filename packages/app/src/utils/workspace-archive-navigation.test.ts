@@ -2,6 +2,7 @@ import type { Href } from "expo-router";
 import { describe, expect, it } from "vitest";
 import { buildWorkspaceArchiveRedirectRoute } from "@/utils/workspace-archive-navigation";
 import type { WorkspaceDescriptor } from "@/stores/session-store";
+import { buildHostWorkspaceRoute } from "@/utils/host-routes";
 import {
   redirectIfArchivingActiveWorkspace,
   type RedirectIfArchivingActiveWorkspaceDeps,
@@ -28,7 +29,7 @@ function workspace(
 }
 
 describe("buildWorkspaceArchiveRedirectRoute", () => {
-  it("redirects an archived worktree to the new workspace screen for the same project", () => {
+  it("redirects an archived worktree to the remaining workspace of the same project", () => {
     const workspaces = [
       workspace({ id: "/repo", workspaceKind: "checkout", name: "main" }),
       workspace({ id: "/repo/.paseo/worktrees/feature", name: "feature" }),
@@ -40,7 +41,7 @@ describe("buildWorkspaceArchiveRedirectRoute", () => {
         archivedWorkspaceId: "/repo/.paseo/worktrees/feature",
         workspaces,
       }),
-    ).toBe("/new?serverId=server-1&dir=%2Frepo&name=Project&projectId=project-1");
+    ).toBe(buildHostWorkspaceRoute("server-1", "/repo"));
   });
 
   it("redirects to the new workspace route when no sibling workspace target exists", () => {
@@ -61,7 +62,53 @@ describe("buildWorkspaceArchiveRedirectRoute", () => {
     ).toBe("/new?serverId=server-1&dir=%2Frepo&name=Project&projectId=project-1");
   });
 
-  it("redirects to the new workspace route instead of another workspace", () => {
+  it("moves to another workspace of the same project before any other project", () => {
+    const workspaces = [
+      workspace({ id: "other", projectId: "project-2" }),
+      workspace({ id: "archived", projectId: "project-1" }),
+      workspace({ id: "sibling", projectId: "project-1" }),
+    ];
+
+    expect(
+      buildWorkspaceArchiveRedirectRoute({
+        serverId: "server-1",
+        archivedWorkspaceId: "archived",
+        workspaces,
+      }),
+    ).toBe(buildHostWorkspaceRoute("server-1", "sibling"));
+  });
+
+  it("moves to another project when the archived workspace was the last of its project", () => {
+    const workspaces = [
+      workspace({ id: "archived", projectId: "project-1" }),
+      workspace({ id: "other", projectId: "project-2" }),
+    ];
+
+    expect(
+      buildWorkspaceArchiveRedirectRoute({
+        serverId: "server-1",
+        archivedWorkspaceId: "archived",
+        workspaces,
+      }),
+    ).toBe(buildHostWorkspaceRoute("server-1", "other"));
+  });
+
+  it("skips a workspace that is also being archived", () => {
+    const workspaces = [
+      workspace({ id: "archived", projectId: "project-1" }),
+      workspace({ id: "leaving", projectId: "project-1", archivingAt: "2026-11-06T00:00:00.000Z" }),
+    ];
+
+    expect(
+      buildWorkspaceArchiveRedirectRoute({
+        serverId: "server-1",
+        archivedWorkspaceId: "archived",
+        workspaces,
+      }),
+    ).toBe("/new?serverId=server-1&dir=%2Frepo&name=Project&projectId=project-1");
+  });
+
+  it("opens the new workspace screen only when nothing else is open on the host", () => {
     const workspaces = [
       workspace({
         id: "/notes",
@@ -136,6 +183,6 @@ describe("redirectIfArchivingActiveWorkspace", () => {
       ),
     ).toBe(true);
 
-    expect(routes).toEqual(["/new?serverId=server-1&dir=%2Frepo&name=Project&projectId=project-1"]);
+    expect(routes).toEqual([buildHostWorkspaceRoute("server-1", "main")]);
   });
 });

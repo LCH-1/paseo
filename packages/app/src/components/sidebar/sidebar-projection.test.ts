@@ -251,6 +251,33 @@ describe("buildSidebarHostProjectGroups", () => {
 });
 
 describe("buildSidebarProjection", () => {
+  it("drops projects without workspaces from project and host groups", () => {
+    const kept = makeWorkspace("kept", "done", [], "project", "srv-a");
+    const shared = {
+      ...makeProject([kept.placement]),
+      hosts: [makeProjectHost("srv-a", "project"), makeProjectHost("srv-b", "project")],
+    };
+    const empty = {
+      ...makeProject([], "emptied"),
+      hosts: [makeProjectHost("srv-a", "emptied")],
+    };
+    const projection = buildSidebarProjection({
+      ...projectionInput({ groupMode: "host" }),
+      projects: [shared, empty],
+      serverIds: ["srv-a", "srv-b"],
+      pinnedKeys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+      workspaceEntriesByKey: new Map([[kept.entry.workspaceKey, kept.entry]]),
+    });
+
+    expect(projection.pinnedGroups.unpinnedProjects.map((project) => project.viewKey)).toEqual([
+      "project",
+    ]);
+    expect(projection.hostGroups.map((group) => group.serverId)).toEqual(["srv-a"]);
+    expect(projection.hostGroups[0]?.projects.map((project) => project.viewKey)).toEqual([
+      "project",
+    ]);
+  });
+
   // The rule that outlived the bug it was written for: a project icon is fetched per project, so
   // whatever a mode groups by, the rows it produces can only reference projects already covered.
   for (const groupMode of ["project", "status", "host"] as const) {

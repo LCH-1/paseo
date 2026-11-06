@@ -57,9 +57,15 @@ export interface SidebarProjectionInput {
   t: TFunction;
 }
 
+/** A project whose workspaces were all archived stays registered but leaves the sidebar. */
+function projectsWithWorkspaces(projects: SidebarProjectEntry[]): SidebarProjectEntry[] {
+  return projects.filter((project) => project.workspaces.length > 0);
+}
+
 export function buildSidebarProjection(input: SidebarProjectionInput): SidebarProjection {
+  const projects = projectsWithWorkspaces(input.projects);
   const pinnedGroups = splitPinnedSidebarGroups({
-    projects: input.projects,
+    projects,
     keys: input.pinnedKeys,
     pinnedWorkspaceOrder: input.pinnedWorkspaceOrder,
   });
@@ -71,10 +77,23 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
   // two cannot disagree and a new grouping mode is a compile error here rather than a silent
   // fall-through to the project rows.
   const workspaceGroups = buildWorkspaceGroups(input, unpinnedWorkspaces);
+  // A shared project also lists the hosts that have no workspace left in it.
   const hostGroups = buildSidebarHostProjectGroups({
     projects: pinnedGroups.unpinnedProjects,
     serverIds: input.serverIds,
-  });
+  })
+    .map((group) => ({
+      ...group,
+      // A project holding only pinned workspaces still has work; those rows sit in the pinned section.
+      projects: group.projects.filter(
+        (project) =>
+          project.workspaces.length > 0 ||
+          pinnedGroups.pinnedChats.some(
+            (chat) => chat.serverId === group.serverId && chat.projectViewKey === project.viewKey,
+          ),
+      ),
+    }))
+    .filter((group) => group.projects.length > 0);
 
   const sections: SidebarShortcutSection[] = [];
   if (!input.pinnedCollapsed) {
@@ -116,7 +135,7 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
     pinnedGroups,
     hostGroups,
     workspaceGroups,
-    projectIconTargets: resolveSidebarProjectIconTargets(input.projects),
+    projectIconTargets: resolveSidebarProjectIconTargets(projects),
     shortcutModel: buildSidebarShortcutSections({ sections }),
   };
 }
