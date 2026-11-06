@@ -93,6 +93,22 @@ describe("buildWorkspaceArchiveRedirectRoute", () => {
     ).toBe(buildHostWorkspaceRoute("server-1", "other"));
   });
 
+  it("never moves to a background workspace the sidebar hides", () => {
+    const workspaces = [
+      workspace({ id: "archived", projectId: "project-1" }),
+      { ...workspace({ id: "hidden", projectId: "project-1" }), background: true },
+      workspace({ id: "visible", projectId: "project-2" }),
+    ];
+
+    expect(
+      buildWorkspaceArchiveRedirectRoute({
+        serverId: "server-1",
+        archivedWorkspaceId: "archived",
+        workspaces,
+      }),
+    ).toBe(buildHostWorkspaceRoute("server-1", "visible"));
+  });
+
   it("skips a workspace that is also being archived", () => {
     const workspaces = [
       workspace({ id: "archived", projectId: "project-1" }),

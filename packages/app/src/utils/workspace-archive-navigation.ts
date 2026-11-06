@@ -24,7 +24,8 @@ export function buildWorkspaceArchiveRedirectRoute(input: {
     workspaces.find((workspace) => workspace.id === archivedWorkspaceId) ?? null;
   // Stay in the user's work: the same project first, then anything else still open on this host.
   const remaining = workspaces.filter(
-    (workspace) => workspace.id !== archivedWorkspaceId && !workspace.archivingAt,
+    (workspace) =>
+      workspace.id !== archivedWorkspaceId && !workspace.archivingAt && !workspace.background,
   );
   const next =
     remaining.find((workspace) => workspace.projectId === archivedWorkspace?.projectId) ??
