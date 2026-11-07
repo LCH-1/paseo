@@ -20,6 +20,16 @@ describe("plugin host navigation", () => {
     return { navigation, destinations, browsers, workspaces };
   }
 
+  it("focuses the requested terminal when opening a workspace", () => {
+    const { navigation, destinations } = setup(true);
+    navigation.openWorkspace({ workspaceId: "one", terminalId: "term-1" });
+    navigation.openWorkspace({ workspaceId: "one" });
+    expect(destinations).toEqual([
+      { serverId: "selected", workspaceId: "one", target: { kind: "terminal", terminalId: "term-1" } },
+      { serverId: "selected", workspaceId: "one" },
+    ]);
+  });
+
   it("creates and focuses a local browser in the selected or explicit host workspace", () => {
     const { navigation, destinations, browsers } = setup();
     navigation.openBrowser!({ url: "https://example.com/one", workspaceId: "one" });

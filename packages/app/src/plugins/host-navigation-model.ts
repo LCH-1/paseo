@@ -17,8 +17,12 @@ export function createPluginHostNavigation(
   return {
     openAgent: ({ agentId, serverId: targetServerId }) =>
       owner.openAgent({ serverId: targetServerId ?? serverId, agentId }),
-    openWorkspace: ({ workspaceId, serverId: targetServerId }) =>
-      owner.openWorkspace({ serverId: targetServerId ?? serverId, workspaceId }),
+    openWorkspace: ({ workspaceId, serverId: targetServerId, terminalId }) =>
+      owner.openWorkspace({
+        serverId: targetServerId ?? serverId,
+        workspaceId,
+        ...(terminalId ? { target: { kind: "terminal" as const, terminalId } } : {}),
+      }),
     openBrowser: owner.browserAvailable
       ? ({ url, workspaceId, serverId: targetServerId }) => {
           if (!isHttpUrl(url)) throw new Error("Only absolute HTTP(S) URLs are supported.");
