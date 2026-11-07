@@ -116,7 +116,14 @@ import {
   HostTerminalsPage,
 } from "@/screens/settings/host-page";
 import { PluginSettingsContent } from "@/plugins/settings";
+import { resolvePluginIcon } from "@/plugins/icons";
 import { useInstalledPlugins } from "@/plugins/registry";
+import { buildPluginSettingsRoute } from "@/plugins/settings/routes";
+import {
+  listSidebarPluginScreens,
+  selectedPluginScreenSection,
+  type SidebarPluginScreen,
+} from "@/plugins/settings/sidebar";
 import { HostPluginsPage } from "@/screens/settings/plugins-page";
 import { MetadataGenerationPage } from "@/screens/settings/metadata-generation-page";
 import ProjectsScreen from "@/screens/projects-screen";
@@ -796,21 +803,21 @@ function SidebarSectionButton({
   );
 }
 
-interface SidebarHostSectionButtonProps {
-  itemId: HostSectionSlug;
+interface SidebarHostSectionButtonProps<Item extends string> {
+  itemId: Item;
   label: string;
   icon: ComponentType<{ size: number; color: string; strokeWidth?: number }>;
   isSelected: boolean;
-  onSelect: (section: HostSectionSlug) => void;
+  onSelect: (section: Item) => void;
 }
 
-function SidebarHostSectionButton({
+function SidebarHostSectionButton<Item extends string>({
   itemId,
   label,
   icon: IconComponent,
   isSelected,
   onSelect,
-}: SidebarHostSectionButtonProps) {
+}: SidebarHostSectionButtonProps<Item>) {
   const { theme, rt } = useUnistyles();
   const handlePress = useCallback(() => {
     onSelect(itemId);
@@ -837,6 +844,40 @@ function SidebarHostSectionButton({
         {label}
       </Text>
     </Pressable>
+  );
+}
+
+function SidebarPluginScreens({
+  serverId,
+  selectedSection,
+}: {
+  serverId: string | null;
+  selectedSection: string | null;
+}) {
+  const router = useRouter();
+  const plugins = useInstalledPlugins();
+  const screens = listSidebarPluginScreens(plugins, serverId);
+  const openScreen = useCallback(
+    (key: string) => {
+      const screen = screens.find((item: SidebarPluginScreen) => item.key === key);
+      if (screen)
+        router.push(buildPluginSettingsRoute(screen.serverId, screen.pluginId, screen.screenId));
+    },
+    [router, screens],
+  );
+  return (
+    <>
+      {screens.map((screen) => (
+        <SidebarHostSectionButton
+          key={screen.key}
+          itemId={screen.key}
+          label={screen.title}
+          icon={resolvePluginIcon(screen.icon)}
+          isSelected={selectedSection === screen.key}
+          onSelect={openScreen}
+        />
+      ))}
+    </>
   );
 }
 
@@ -974,10 +1015,12 @@ function SettingsSidebar({
     [insets.top, isDesktop],
   );
   const selectedSectionId = view.kind === "section" ? view.section : null;
-  let selectedHostSection: HostSectionSlug | null = null;
+  const installedPlugins = useInstalledPlugins();
+  let selectedHostSection: string | null = null;
   if (view.kind === "host") selectedHostSection = view.section;
   if (view.kind === "project") selectedHostSection = "projects";
-  if (view.kind === "plugin") selectedHostSection = "plugins";
+  if (view.kind === "plugin")
+    selectedHostSection = selectedPluginScreenSection(view, installedPlugins);
 
   const sidebarBody = (
     <>
@@ -1001,6 +1044,10 @@ function SettingsSidebar({
             onSelectHost={onSelectHost}
             onAddHost={onAddHost}
             enableBuiltInDaemonOption={enableBuiltInDaemonOption}
+          />
+          <SidebarPluginScreens
+            serverId={activeHostServerId}
+            selectedSection={selectedHostSection}
           />
           {HOST_SECTION_ITEMS.map((item) => (
             <SidebarHostSectionButton

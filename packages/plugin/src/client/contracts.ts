@@ -204,6 +204,8 @@ export interface PluginSettingsScreenContribution {
   title: string;
   icon: string;
   Component: ComponentType<PluginSurfaceProps>;
+  /** Gives the screen its own row in the settings sidebar, under the host picker. */
+  showInSettingsSidebar?: boolean;
 }
 
 /** The screen header's title: fixed, or derived from the params the screen was opened with. */
