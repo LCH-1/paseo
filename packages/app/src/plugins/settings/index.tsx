@@ -11,6 +11,7 @@ import { useIsCompactFormFactor } from "@/constants/layout";
 import { useHostFeature } from "@/runtime/host-features";
 import { useHostRuntimeClient, useHostRuntimeIsConnected, useHosts } from "@/runtime/host-runtime";
 import type { Theme } from "@/styles/theme";
+import { usePluginHostNavigation } from "../host-navigation";
 import { useInstalledPlugin } from "../registry";
 import { PluginInstallationProvider } from "../installation-provider";
 import { SurfaceErrorBoundary } from "../surface-error-boundary";
@@ -99,6 +100,7 @@ function SettingsContent({
     }),
     [hosts, serverId],
   );
+  const navigation = usePluginHostNavigation(serverId);
   const platform = Platform.OS === "ios" || Platform.OS === "android" ? Platform.OS : "web";
   const layout = useMemo<PluginHostProps["layout"]>(
     () => ({ compact, platform }),
@@ -120,7 +122,7 @@ function SettingsContent({
         renderError={renderError}
       >
         <PluginInstallationProvider plugin={plugin}>
-          <Component theme={theme} layout={layout} host={host} />
+          <Component theme={theme} layout={layout} host={host} navigation={navigation} />
         </PluginInstallationProvider>
       </SurfaceErrorBoundary>
     </View>
