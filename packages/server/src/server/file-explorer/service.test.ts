@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promises as fileSystem } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { runGitCommand, snapshotGitCommandRuntimeMetrics } from "../../utils/run-git-command.js";
 import {
@@ -19,6 +20,7 @@ import {
   deleteExplorerEntry,
   duplicateExplorerEntry,
   getExplorerFileVersion,
+  listDirectoryEntries,
   readExplorerFile,
   renameExplorerEntry,
   streamExplorerFile,
@@ -34,6 +36,56 @@ async function createTempDir(prefix: string): Promise<string> {
 }
 
 describe("file explorer service", () => {
+  it.each(["EACCES", "EPERM"])(
+    "keeps readable siblings visible when one entry cannot be resolved (%s)",
+    async (code) => {
+      const root = await createTempDir("paseo-file-permission-");
+      const restricted = path.join(root, "restricted");
+      const originalRealpath = fileSystem.realpath;
+      const denied = Object.assign(new Error("Permission denied"), { code });
+      try {
+        await mkdir(restricted);
+        await writeFile(path.join(root, "visible.txt"), "visible", "utf8");
+        const realpath = vi.spyOn(fileSystem, "realpath").mockImplementation(async (target) => {
+          if (String(target) === restricted) throw denied;
+          return originalRealpath(target);
+        });
+        try {
+          const result = await listDirectoryEntries({ root });
+          expect(result.entries.map((entry) => entry.name)).toEqual(["visible.txt"]);
+        } finally {
+          realpath.mockRestore();
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("still reports permission errors for the requested directory and unexpected child failures", async () => {
+    const root = await createTempDir("paseo-file-permission-");
+    const target = path.join(root, "entry.txt");
+    const originalRealpath = fileSystem.realpath;
+    try {
+      await writeFile(target, "visible", "utf8");
+      const denied = Object.assign(new Error("Permission denied"), { code: "EACCES" });
+      const realpath = vi.spyOn(fileSystem, "realpath").mockRejectedValue(denied);
+      try {
+        await expect(listDirectoryEntries({ root })).rejects.toBe(denied);
+        const ioError = Object.assign(new Error("I/O failure"), { code: "EIO" });
+        realpath.mockImplementation(async (requested) => {
+          if (String(requested) === target) throw ioError;
+          return originalRealpath(requested);
+        });
+        await expect(listDirectoryEntries({ root })).rejects.toBe(ioError);
+      } finally {
+        realpath.mockRestore();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("atomically writes an existing text file at the expected revision", async () => {
     const root = await createTempDir("paseo-file-write-");
     try {

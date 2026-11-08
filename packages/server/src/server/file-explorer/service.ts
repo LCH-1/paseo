@@ -165,9 +165,15 @@ export async function listDirectoryEntries({
           kind,
         });
       } catch (error) {
-        // Directories can contain dangling links (e.g. AGENTS.md -> CLAUDE.md).
-        // Skip entries whose targets disappeared instead of failing the whole listing.
-        if (isMissingEntryError(error) || isOutsideWorkspaceError(error)) {
+        // One dangling link or inaccessible child must not hide readable siblings.
+        // Errors for the requested directory still propagate before this loop.
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        if (
+          isMissingEntryError(error) ||
+          isOutsideWorkspaceError(error) ||
+          code === "EACCES" ||
+          code === "EPERM"
+        ) {
           return null;
         }
         throw error;
