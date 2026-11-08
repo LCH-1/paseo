@@ -1,6 +1,20 @@
 import { expect, it, vi } from "vitest";
 import { agentTabPresenceBridge } from "./agent-tab-presence";
 
+it("closes a workspace through the current tab source only", () => {
+  const closeWorkspace = vi.fn();
+  const workspace = { serverId: "host", workspaceId: "workspace" };
+  const release = agentTabPresenceBridge.register({
+    read: () => ({ isOpen: true, lastClosedAt: null }),
+    subscribe: () => () => {},
+    closeWorkspace,
+  });
+  agentTabPresenceBridge.closeWorkspace(workspace);
+  release();
+  agentTabPresenceBridge.closeWorkspace(workspace);
+  expect(closeWorkspace.mock.calls).toEqual([[workspace]]);
+});
+
 it("releases old sources without letting their later cleanup remove the replacement", () => {
   const notify = vi.fn();
   const unsubscribe = agentTabPresenceBridge.subscribe(notify);

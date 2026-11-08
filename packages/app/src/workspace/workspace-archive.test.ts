@@ -7,6 +7,7 @@ import {
   isWorkspaceArchivePending,
 } from "@/contexts/session-workspace-upserts";
 import { useSessionStore, type WorkspaceDescriptor } from "@/stores/session-store";
+import { agentTabPresenceBridge } from "@/workspace-tabs/agent-tab-presence";
 import {
   archiveWorkspaceOptimistically,
   archiveWorkspacesOptimistically,
@@ -101,6 +102,36 @@ afterEach(() => {
 });
 
 describe("archiveWorkspaceOptimistically", () => {
+  it("closes the workspace tabs only after the daemon confirms archive", async () => {
+    const closeWorkspace = vi.fn();
+    const release = agentTabPresenceBridge.register({
+      read: () => ({ isOpen: true, lastClosedAt: null }),
+      subscribe: () => () => {},
+      closeWorkspace,
+    });
+    const pending = deferred<ArchiveWorkspacePayload>();
+    try {
+      const archive = archiveWorkspaceOptimistically({
+        client: createClient(async () => pending.promise),
+        workspace: target(),
+      });
+      expect(closeWorkspace).not.toHaveBeenCalled();
+      pending.resolve(archivePayload({ workspaceId: "workspace-1" }));
+      await archive;
+      expect(closeWorkspace.mock.calls).toEqual([[target()]]);
+      await expect(
+        archiveWorkspaceOptimistically({
+          client: createClient(async () =>
+            archivePayload({ workspaceId: "workspace-1", error: "denied" }),
+          ),
+          workspace: target(),
+        }),
+      ).rejects.toThrow("denied");
+      expect(closeWorkspace).toHaveBeenCalledOnce();
+    } finally {
+      release();
+    }
+  });
   it("hides the workspace and marks the archive pending while the daemon call runs", async () => {
     const archived = workspace();
     getHostRuntimeStore().acceptWorkspaceSnapshots(SERVER_ID, [archived]);

@@ -6,6 +6,7 @@ import {
 import { useSessionStore, type WorkspaceDescriptor } from "@/stores/session-store";
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 import { i18n } from "@/i18n/i18next";
+import { agentTabPresenceBridge } from "@/workspace-tabs/agent-tab-presence";
 
 export interface WorkspaceArchiveTarget {
   serverId: string;
@@ -98,6 +99,7 @@ export async function archiveWorkspaceOptimistically(input: {
     });
     throw error;
   }
+  agentTabPresenceBridge.closeWorkspace(input.workspace);
 }
 
 export async function archiveWorkspacesOptimistically(input: {

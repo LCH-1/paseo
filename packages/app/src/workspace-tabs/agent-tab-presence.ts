@@ -8,10 +8,15 @@ export interface RetainedAgentTab {
   agentId: string;
   tabId: string;
 }
+interface WorkspaceTabScope {
+  serverId: string;
+  workspaceId: string;
+}
 interface PresenceSource {
   read(serverId: string, agentId: string): AgentTabPresence;
   subscribe(listener: () => void): () => void;
   retain?(tab: RetainedAgentTab): void;
+  closeWorkspace?(workspace: WorkspaceTabScope): void;
 }
 let source: PresenceSource | null = null;
 let release: (() => void) | null = null;
@@ -23,6 +28,9 @@ function notify() {
 }
 
 export const agentTabPresenceBridge = {
+  closeWorkspace(workspace: WorkspaceTabScope): void {
+    source?.closeWorkspace?.(workspace);
+  },
   retain(tab: RetainedAgentTab): void {
     source?.retain?.(tab);
   },
