@@ -132,13 +132,13 @@ export function getStagingUserId(): Promise<string> {
   return cachedStagingUserIdPromise;
 }
 
-export function shouldInstallAppUpdateOnQuit(input: {
+export function shouldInstallAppUpdateOnQuit(_input: {
   platform: NodeJS.Platform;
   isAppImage: boolean;
 }): boolean {
-  // AppImage's no-relaunch install path blocks while launching the replacement
-  // binary, which can hang after the running file has already been replaced.
-  return !(input.platform === "linux" && input.isAppImage);
+  // Native shutdown must not install a download left over from before automatic
+  // updates were disabled. It could replace a newer cumulative Suite installation.
+  return false;
 }
 
 class ElectronAppUpdateRuntime implements AppUpdateRuntime {
@@ -253,6 +253,18 @@ export async function checkForAppUpdate({
   releaseChannel: AppReleaseChannel;
   intent: AppUpdateCheckIntent;
 }): Promise<AppUpdateCheckResult> {
+  // Enforce this in the native process too: an older renderer may still poll.
+  if (intent === "automatic") {
+    return {
+      hasUpdate: false,
+      readyToInstall: false,
+      currentVersion,
+      latestVersion: currentVersion,
+      body: null,
+      date: null,
+      errorMessage: null,
+    };
+  }
   updateLifecycleLog.checkStarted({ currentVersion, releaseChannel, intent });
   const result = await appUpdateService.checkForAppUpdate({
     currentVersion,

@@ -40,6 +40,7 @@ import {
   bucketFromStagingUserId,
   checkForAppUpdate,
   createAppUpdateLifecycleLogger,
+  installAppUpdateOnQuit,
   resolveStagingUserId,
   rolloutManifestSchema,
   shouldAdmitToRollout,
@@ -47,6 +48,25 @@ import {
 } from "./auto-updater";
 
 describe("checkForAppUpdate", () => {
+  it("does not contact the update feed for automatic checks", async () => {
+    const checksBefore = autoUpdaterMock.checkForUpdates.mock.calls.length;
+    const result = await checkForAppUpdate({
+      currentVersion: "1.2.3",
+      releaseChannel: "stable",
+      intent: "automatic",
+    });
+    expect(result).toEqual({
+      hasUpdate: false,
+      readyToInstall: false,
+      currentVersion: "1.2.3",
+      latestVersion: "1.2.3",
+      body: null,
+      date: null,
+      errorMessage: null,
+    });
+    expect(autoUpdaterMock.checkForUpdates.mock.calls.length).toBe(checksBefore);
+  });
+
   it("treats an unpublished channel manifest as an unavailable update", async () => {
     const error = Object.assign(new Error("Cannot find latest-mac.yml"), {
       code: "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND",
@@ -143,11 +163,38 @@ describe("checkForAppUpdate", () => {
 });
 
 describe("shouldInstallAppUpdateOnQuit", () => {
-  it("keeps Linux AppImage updates on the manual install path", () => {
+  it("keeps updates on the manual install path on every platform", () => {
     expect(shouldInstallAppUpdateOnQuit({ platform: "linux", isAppImage: true })).toBe(false);
-    expect(shouldInstallAppUpdateOnQuit({ platform: "linux", isAppImage: false })).toBe(true);
-    expect(shouldInstallAppUpdateOnQuit({ platform: "darwin", isAppImage: false })).toBe(true);
-    expect(shouldInstallAppUpdateOnQuit({ platform: "win32", isAppImage: false })).toBe(true);
+    expect(shouldInstallAppUpdateOnQuit({ platform: "linux", isAppImage: false })).toBe(false);
+    expect(shouldInstallAppUpdateOnQuit({ platform: "darwin", isAppImage: false })).toBe(false);
+    expect(shouldInstallAppUpdateOnQuit({ platform: "win32", isAppImage: false })).toBe(false);
+  });
+
+  it("does not revalidate or install an already downloaded update when quitting", async () => {
+    autoUpdaterMock.checkForUpdates.mockResolvedValueOnce({
+      isUpdateAvailable: true,
+      updateInfo: { version: "1.2.5" },
+    });
+    await checkForAppUpdate({
+      currentVersion: "1.2.3",
+      releaseChannel: "stable",
+      intent: "manual",
+    });
+    autoUpdaterMock.handlers.get("update-downloaded")?.({ version: "1.2.5" });
+    const checksBefore = autoUpdaterMock.checkForUpdates.mock.calls.length;
+    const downloadsBefore = autoUpdaterMock.downloadUpdate.mock.calls.length;
+    const installsBefore = autoUpdaterMock.quitAndInstall.mock.calls.length;
+
+    expect(
+      await installAppUpdateOnQuit({
+        currentVersion: "1.2.3",
+        releaseChannel: "stable",
+        signal: new AbortController().signal,
+      }),
+    ).toBe(false);
+    expect(autoUpdaterMock.checkForUpdates.mock.calls.length).toBe(checksBefore);
+    expect(autoUpdaterMock.downloadUpdate.mock.calls.length).toBe(downloadsBefore);
+    expect(autoUpdaterMock.quitAndInstall.mock.calls.length).toBe(installsBefore);
   });
 });
 
