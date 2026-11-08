@@ -42,6 +42,9 @@ export interface WindowStateStore {
 }
 
 const WINDOW_STATE_FILENAME = "window-state.json";
+// Device-local preference survives versioned application installs. Omit the file
+// to keep restoring the last window size as usual.
+const STARTUP_WINDOW_SIZE_FILENAME = "startup-window-size.json";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -156,6 +159,7 @@ export function createWindowStateStore({
   userDataPath: string;
 }): WindowStateStore {
   const filePath = path.join(userDataPath, WINDOW_STATE_FILENAME);
+  const startupSizePath = path.join(userDataPath, STARTUP_WINDOW_SIZE_FILENAME);
   let persistQueue: Promise<void> = Promise.resolve();
   // Once the synchronous final write lands (on close/quit), pending async
   // writes must not clobber it with an older snapshot.
@@ -165,34 +169,48 @@ export function createWindowStateStore({
     return `${filePath}.tmp.${process.pid}.${randomUUID()}`;
   }
 
-  return {
-    async load(): Promise<WindowState | null> {
-      let raw: string;
-      try {
-        raw = await readFile(filePath, "utf8");
-      } catch (error) {
-        // No file yet (first launch) is expected; surface anything else.
-        if (isNodeError(error) && error.code === "ENOENT") {
-          return null;
-        }
-        throw error;
-      }
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch (error) {
-        // A corrupted file shouldn't block launch; non-critical state falls back.
-        if (error instanceof SyntaxError) {
-          return null;
-        }
-        throw error;
-      }
-
-      if (!isRecord(parsed)) {
+  async function readDocument(documentPath: string): Promise<unknown> {
+    let raw: string;
+    try {
+      raw = await readFile(documentPath, "utf8");
+    } catch (error) {
+      // No file yet (first launch) is expected; surface anything else.
+      if (isNodeError(error) && error.code === "ENOENT") {
         return null;
       }
-      return coerceWindowState(parsed.state);
+      throw error;
+    }
+
+    try {
+      return JSON.parse(raw);
+    } catch (error) {
+      // A corrupted file shouldn't block launch; non-critical state falls back.
+      if (error instanceof SyntaxError) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  return {
+    async load(): Promise<WindowState | null> {
+      const [document, startupSize] = await Promise.all([
+        readDocument(filePath),
+        readDocument(startupSizePath),
+      ]);
+      const saved = isRecord(document) ? coerceWindowState(document.state) : null;
+      if (!isRecord(startupSize)) return saved;
+      const width = coerceFiniteNumber(startupSize.width);
+      const height = coerceFiniteNumber(startupSize.height);
+      if (
+        width === null ||
+        height === null ||
+        width < MIN_WINDOW_WIDTH ||
+        height < MIN_WINDOW_HEIGHT
+      )
+        return saved;
+      // Keep the saved position; main clamps the result to the current display.
+      return { ...saved, width, height, isMaximized: false };
     },
 
     async save(state: WindowState): Promise<void> {

@@ -53,6 +53,48 @@ describe("window-state store", () => {
     expect(await store.load()).toEqual(state);
   });
 
+  it("uses a device startup size on first launch and after saving another size", async () => {
+    const userDataPath = await createTempUserDataDir();
+    directories.add(userDataPath);
+    const preferencePath = path.join(userDataPath, "startup-window-size.json");
+    await writeFile(preferencePath, JSON.stringify({ width: 1615, height: 1215 }));
+    const store = createWindowStateStore({ userDataPath });
+    expect(await store.load()).toEqual({ width: 1615, height: 1215, isMaximized: false });
+    await store.save({ x: 20, y: 30, width: 1200, height: 800, isMaximized: true });
+    expect(await store.load()).toEqual({
+      x: 20,
+      y: 30,
+      width: 1615,
+      height: 1215,
+      isMaximized: false,
+    });
+    expect(JSON.parse(await readFile(preferencePath, "utf8"))).toEqual({
+      width: 1615,
+      height: 1215,
+    });
+    await rm(preferencePath);
+    expect(await store.load()).toEqual({
+      x: 20,
+      y: 30,
+      width: 1200,
+      height: 800,
+      isMaximized: true,
+    });
+  });
+
+  it.each(["{ invalid json", '{"width":"1615","height":1215}', '{"width":-1,"height":1215}'])(
+    "ignores an invalid startup size without losing saved geometry: %s",
+    async (contents) => {
+      const userDataPath = await createTempUserDataDir();
+      directories.add(userDataPath);
+      const store = createWindowStateStore({ userDataPath });
+      const saved = { x: 10, y: 20, width: 1100, height: 750, isMaximized: true };
+      await store.save(saved);
+      await writeFile(path.join(userDataPath, "startup-window-size.json"), contents);
+      expect(await store.load()).toEqual(saved);
+    },
+  );
+
   it("persists the maximized flag", async () => {
     const userDataPath = await createTempUserDataDir();
     directories.add(userDataPath);
