@@ -15,6 +15,7 @@ import { create } from "zustand";
 import { RetainedPanel, useRetainedPanelActive } from "@/components/retained-panel";
 import { PressHighlight } from "@/components/ui/press-highlight";
 import { Button } from "@/components/ui/button";
+import { SidebarProviderIcon } from "../sidebar-provider-icon";
 import { useAggregatedAgents, type AggregatedAgent } from "@/hooks/use-aggregated-agents";
 import { getHostRuntimeStore, useHosts } from "@/runtime/host-runtime";
 import { markActivitySessionsRead } from "./mark-all-read";
@@ -303,9 +304,12 @@ const ActivitySessionRow = memo(function ActivitySessionRow({
         style={[styles.row, hovered && styles.pressed]}
         highlightStyle={styles.pressed}
       >
-        <Text numberOfLines={1} style={styles.tabName} testID="sidebar-activity-tab-name">
-          {tabName}
-        </Text>
+        <View style={styles.tabNameRow}>
+          <SidebarProviderIcon provider={agent.provider} serverId={agent.serverId} />
+          <Text numberOfLines={1} style={styles.tabName} testID="sidebar-activity-tab-name">
+            {tabName}
+          </Text>
+        </View>
         <Text numberOfLines={1} style={styles.title}>
           {title}
         </Text>
@@ -444,7 +448,10 @@ const styles = StyleSheet.create((theme) => ({
   },
   pressed: { backgroundColor: theme.colors.surfaceSidebarHover },
   title: { color: theme.colors.foreground, fontSize: theme.fontSize.base },
+  tabNameRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing[1] },
   tabName: {
+    flex: 1,
+    minWidth: 0,
     color: theme.colors.foreground,
     fontSize: theme.fontSize.sm,
     fontWeight: "600",

@@ -72,6 +72,7 @@ it.each(["running", "unreviewed"])(
     const screen = render(element());
     fireEvent.click(screen.getByRole("tab", { name: `sidebar.activity.${view} 1` }));
     const row = screen.getByTestId("sidebar-activity-session-host-agent");
+    expect(screen.getByRole("img", { name: "Codex" })).toBeTruthy();
     fireEvent.click(row);
     state.agents = [];
     screen.rerender(element());
