@@ -78,9 +78,7 @@ it("updates a mounted sidebar without manual refresh and keeps automatic reads c
   expect(view.result.current[0].report).toMatchObject({
     windows: [{ usedPct: 2 }],
   });
-  expect(
-    fixture.list.mock.calls.every(([options]) => options.forceRefresh === false)
-  ).toBe(true);
+  expect(fixture.list.mock.calls.every(([options]) => options.forceRefresh === false)).toBe(true);
   view.unmount();
   await act(async () => {
     await vi.advanceTimersByTimeAsync(120_000);
@@ -113,21 +111,32 @@ it.each([
   ["host settings", () => useHostUsage("host")],
   ["agent details", () => useAgentUsage("host", "agent")],
 ] as const)("automatically refreshes open %s", async (_label, hook) => {
-  renderHook(hook, { wrapper });
-  await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+  renderHook(() => void hook(), { wrapper });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10);
+  });
   expect(fixture.list).toHaveBeenCalledTimes(1);
-  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
   expect(fixture.list).toHaveBeenCalledTimes(2);
 });
 
 it("shares sidebar and settings reads while preserving explicit cache-bypassing refresh", async () => {
   renderHook(() => useUsageHostReports("host"), { wrapper });
   const settings = renderHook(() => useHostUsage("host"), { wrapper });
-  await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10);
+  });
   expect(fixture.list).toHaveBeenCalledTimes(1);
-  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
   expect(fixture.list).toHaveBeenCalledTimes(2);
-  await act(async () => { settings.result.current.refresh(); await vi.advanceTimersByTimeAsync(10); });
+  await act(async () => {
+    settings.result.current.refresh();
+    await vi.advanceTimersByTimeAsync(10);
+  });
   expect(fixture.list).toHaveBeenCalledTimes(3);
   expect(fixture.list.mock.calls[2][0].forceRefresh).toBe(true);
 });
@@ -135,6 +144,8 @@ it("shares sidebar and settings reads while preserving explicit cache-bypassing 
 it("keeps mounted reports fresh while the user works in another app", async () => {
   focusManager.setFocused(false);
   renderHook(() => useUsageHostReports("host"), { wrapper });
-  await act(async () => { await vi.advanceTimersByTimeAsync(60_010); });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_010);
+  });
   expect(fixture.list).toHaveBeenCalledTimes(2);
 });
