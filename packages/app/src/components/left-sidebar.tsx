@@ -38,6 +38,8 @@ import {
 } from "@/components/sidebar-resize-handle-layout";
 import { HostPicker } from "@/components/hosts/host-picker";
 import { SidebarDisplayPreferencesMenu } from "@/components/sidebar/display-preferences/menu";
+import { SidebarSectionHeader } from "@/components/sidebar/sidebar-section-header";
+import { getProjectWindowScope } from "@/project-window/state";
 import { SidebarSeparator } from "@/components/sidebar/sidebar-separator";
 import { SidebarNavRows } from "@/components/sidebar/sidebar-nav-rows";
 import { SidebarActivityPanel } from "@/components/sidebar/activity/panel";
@@ -553,6 +555,7 @@ function MobileSidebar({
   insetsBottom,
   closeSidebar,
 }: MobileSidebarProps) {
+  const isProjectWindow = getProjectWindowScope() !== null;
   const hasActiveHostFilter = useSidebarViewStore((state) => state.hostFilters.length > 0);
   const { gesture: closeGesture, gestureRef: closeGestureRef } = useCloseAgentListGesture();
 
@@ -575,13 +578,16 @@ function MobileSidebar({
   );
 
   const navigationTrailing = useMemo(
-    () => (
-      <View style={styles.workspaceActions}>
-        {workspaceActionsElement}
-        {closeButton}
-      </View>
-    ),
-    [closeButton],
+    () =>
+      isProjectWindow ? (
+        <View style={styles.workspaceActions}>
+          {workspaceActionsElement}
+          {closeButton}
+        </View>
+      ) : (
+        closeButton
+      ),
+    [closeButton, isProjectWindow],
   );
 
   return (
@@ -622,6 +628,7 @@ function MobileSidebar({
               onImportSession={handleImportSession}
               parentGestureRef={closeGestureRef}
               dragGestureHostActive={active}
+              listHeaderComponent={isProjectWindow ? null : workspacesSectionHeaderElement}
             />
           )}
         </SidebarActivityPanel>
@@ -693,6 +700,7 @@ function DesktopSidebar({
   insetsTop,
   active,
 }: DesktopSidebarProps) {
+  const isProjectWindow = getProjectWindowScope() !== null;
   const ownsTopLeft = useOwnsWindowChromeCorner("top-left");
   const hasActiveHostFilter = useSidebarViewStore((state) => state.hostFilters.length > 0);
   const sidebarWidth = usePanelStore((state) => state.sidebarWidth);
@@ -804,7 +812,7 @@ function DesktopSidebar({
           )}
           <SidebarNavRows
             style={sidebarHeaderGroupStyle}
-            firstRowTrailing={workspaceActionsElement}
+            firstRowTrailing={isProjectWindow ? workspaceActionsElement : null}
           />
         </View>
 
@@ -829,6 +837,7 @@ function DesktopSidebar({
               onRefresh={handleRefresh}
               onAddProject={handleOpenProject}
               onImportSession={handleImportSession}
+              listHeaderComponent={isProjectWindow ? null : workspacesSectionHeaderElement}
             />
           )}
         </SidebarActivityPanel>
@@ -872,6 +881,10 @@ function WorkspaceActions() {
 }
 
 const workspaceActionsElement = <WorkspaceActions />;
+
+const workspacesSectionHeaderElement = (
+  <SidebarSectionHeader title="Workspaces">{workspaceActionsElement}</SidebarSectionHeader>
+);
 
 // Static styles for Animated.Views — must NOT use Unistyles dynamic theme to
 // avoid the "Unable to find node on an unmounted component" crash when Unistyles
