@@ -68,6 +68,59 @@ const agent: AgentSnapshotPayload = {
   title: "Start once",
   labels: {},
 };
+test.each(["completed", "failed"] as const)(
+  "a failing terminal observer preserves the durable %s creation result",
+  async (phase) => {
+    const directory = await mkdtemp(join(tmpdir(), "creation-terminal-observer-"));
+    directories.push(directory);
+    let creates = 0;
+    const observed: string[] = [];
+    const persistedAtNotification: unknown[] = [];
+    const service = new CreationService(
+      directory,
+      silentLogger,
+      undefined,
+      undefined,
+      async (snapshot) => {
+        observed.push(snapshot.phase);
+        const receipt = (await readdir(directory)).find((name) => name.endsWith(".json"));
+        const persisted = JSON.parse(await readFile(join(directory, receipt!), "utf8"));
+        persistedAtNotification.push(persisted);
+        throw new Error("One client disconnected during the terminal refresh");
+      },
+    );
+    const input: CreationInput = {
+      kind: "workspace",
+      key: `observer-${phase}`,
+      request: { phase },
+      workspaceId: workspace.id,
+      hasAgent: true,
+      hasPrompt: false,
+      exists: async () => false,
+      provision: async () => ({ workspace }),
+      createAgent: async () => {
+        creates += 1;
+        if (phase === "failed") throw new Error("No subscription available");
+        return { agent, initialPromptStarted: false };
+      },
+    };
+    const result = await service.create(input);
+    expect(result.phase).toBe(phase);
+    expect(result.error).toBe(phase === "failed" ? "No subscription available" : null);
+    expect(observed).toEqual([phase]);
+    expect(persistedAtNotification).toEqual([
+      expect.objectContaining({ snapshot: expect.objectContaining({ phase }), inFlight: null }),
+    ]);
+    if (phase === "completed") expect(await service.create(input)).toEqual(result);
+    expect(creates).toBe(1);
+    const receipt = (await readdir(directory)).find((name) => name.endsWith(".json"));
+    expect(JSON.parse(await readFile(join(directory, receipt!), "utf8")).snapshot).toMatchObject({
+      phase,
+      error: result.error,
+    });
+  },
+);
+
 test("reports the newest failure for a workspace and restores its prompt", async () => {
   const directory = await mkdtemp(join(tmpdir(), "creation-lookup-"));
   directories.push(directory);

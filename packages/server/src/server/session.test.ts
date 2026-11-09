@@ -186,6 +186,110 @@ test("legacy cancel_agent_request reports refusal through the activity log", asy
   ]);
 });
 
+test("timeline fetch returns agent_not_found only for a missing durable agent", async () => {
+  const agentId = "11111111-1111-4111-8111-111111111121";
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      waitForAgentClose: vi.fn(async () => {}),
+      getAgent: vi.fn(() => null),
+    },
+    agentStorage: { get: vi.fn(async () => null) },
+  });
+
+  await session.handleMessage({
+    type: "fetch_agent_timeline_request",
+    agentId,
+    requestId: "missing-timeline",
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "rpc_error",
+      payload: {
+        requestId: "missing-timeline",
+        requestType: "fetch_agent_timeline_request",
+        code: "agent_not_found",
+        error: `Agent not found: ${agentId}`,
+      },
+    },
+  ]);
+});
+
+test.each(["Storage temporarily unavailable", "Agent not found: upstream history"])(
+  "timeline fetch keeps an untyped failure retryable: %s",
+  async (message) => {
+    const messages: SessionOutboundMessage[] = [];
+    const session = createSessionForTest({
+      messages,
+      agentManager: {
+        waitForAgentClose: vi.fn(async () => {}),
+        getAgent: vi.fn(() => null),
+      },
+      agentStorage: {
+        get: vi.fn(async () => {
+          throw new Error(message);
+        }),
+      },
+    });
+
+    await session.handleMessage({
+      type: "fetch_agent_timeline_request",
+      agentId: "11111111-1111-4111-8111-111111111122",
+      requestId: "retryable-timeline",
+    });
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "fetch_agent_timeline_response",
+        payload: expect.objectContaining({ requestId: "retryable-timeline", error: message }),
+      }),
+    ]);
+  },
+);
+
+test("timeline fetch does not mark an archived agent's failed resume as deleted", async () => {
+  const agentId = "11111111-1111-4111-8111-111111111123";
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      waitForAgentClose: vi.fn(async () => {}),
+      getAgent: vi.fn(() => null),
+      getRegisteredProviderIds: vi.fn(() => ["codex"]),
+      resumeAgentFromPersistence: vi.fn(async () => {
+        throw new Error("History provider temporarily unavailable");
+      }),
+    },
+    agentStorage: {
+      get: vi.fn(async () => ({
+        id: agentId,
+        provider: "codex",
+        cwd: "/tmp/history",
+        archivedAt: "2026-11-09T00:00:00.000Z",
+        persistence: { provider: "codex", sessionId: "native-history" },
+      })),
+    },
+  });
+
+  await session.handleMessage({
+    type: "fetch_agent_timeline_request",
+    agentId,
+    requestId: "archived-timeline",
+  });
+
+  expect(messages).toEqual([
+    expect.objectContaining({
+      type: "fetch_agent_timeline_response",
+      payload: expect.objectContaining({
+        requestId: "archived-timeline",
+        error: "History provider temporarily unavailable",
+      }),
+    }),
+  ]);
+});
+
 const checkoutGitMocks = vi.hoisted(() => ({
   checkoutResolvedBranch: vi.fn(),
   commitChanges: vi.fn(),

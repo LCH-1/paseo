@@ -22,6 +22,9 @@ import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 import { createTestLogger } from "../test-utils/test-logger.js";
 import { Session } from "./session.js";
 import type { SessionOptions } from "./session.js";
+import { CreationService } from "./creation/index.js";
+import { DirectorySyncService } from "./directory-sync/index.js";
+import { WorkspaceDescriptorPayloadSchema } from "@getpaseo/protocol/messages";
 import { OWNER_PERMISSIONS } from "./authorization/index.js";
 import type { AgentUpdatesService } from "./session/agent-updates/agent-updates-service.js";
 import type { AgentSnapshotPayload, SessionOutboundMessage } from "@getpaseo/protocol/messages";
@@ -555,6 +558,8 @@ class CreateAgentTestClient implements AgentClient {
 function createSessionForWorkspaceTests(
   options: {
     appVersion?: string | null;
+    creationService?: SessionOptions["creationService"];
+    directorySync?: SessionOptions["directorySync"];
     onMessage?: (message: SessionOutboundMessage) => void;
     onWorkspaceRecovered?: SessionOptions["onWorkspaceRecovered"];
     workspaceGitService?: ReturnType<typeof createNoopWorkspaceGitService>;
@@ -646,7 +651,8 @@ function createSessionForWorkspaceTests(
   const session = asTestSession(
     new Session({
       messageReceipts: createMessageReceiptsStub(),
-      creationService: createTestCreationService(),
+      creationService: options.creationService ?? createTestCreationService(),
+      directorySync: options.directorySync,
       clientId: "test-client",
       permissions: OWNER_PERMISSIONS,
       appVersion: options.appVersion ?? null,
@@ -9433,6 +9439,141 @@ test("workspace create emits through a matching workspace subscription", async (
   expect(statuses).toContain("running");
   expect(statuses).not.toContain("done");
 });
+
+test("an optimistic workspace update can be repaired by a sequenced refresh", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = createSessionForWorkspaceTests({ onMessage: (message) => emitted.push(message) });
+  session.listAgentPayloads = async () => [];
+  await session.handleMessage({
+    type: "fetch_workspaces_request",
+    requestId: "optimistic-subscribe",
+    sync: {},
+    subscribe: { subscriptionId: "optimistic-subscribe" },
+  });
+  await session.emitWorkspaceUpdatesForWorkspaceIds(["ws-repo-running"], {
+    optimisticStatus: "running",
+  });
+  const optimistic = filterByType(emitted, "workspace_update").at(-1)?.payload;
+  expect(optimistic).toMatchObject({ kind: "upsert", workspace: { status: "running" } });
+  await session.handleMessage({
+    type: "fetch_workspaces_request",
+    requestId: "optimistic-refresh",
+    sync: { generation: optimistic?.generation, afterSeq: optimistic?.seq },
+  });
+  const refreshed = filterByType(emitted, "fetch_workspaces_response").at(-1)?.payload;
+  expect(refreshed?.entries).toEqual([
+    expect.objectContaining({ id: "ws-repo-running", status: "done" }),
+  ]);
+  expect(refreshed?.sync?.headSeq).toBeGreaterThan(optimistic?.seq ?? 0);
+});
+
+test.each([false, true])(
+  "a failed creation refreshes both windows and preserves other activity: %s",
+  async (otherAgentRunning) => {
+    const directory = mkdtempSync(path.join(tmpdir(), "creation-window-state-"));
+    const sessions: TestSession[] = [];
+    const messages: SessionOutboundMessage[][] = [[], []];
+    const directorySync = new DirectorySyncService();
+    const logger = createTestLogger();
+    const service = new CreationService(
+      directory,
+      logger,
+      undefined,
+      undefined,
+      async (snapshot) => {
+        if (snapshot.workspaceId) {
+          await Promise.all(
+            sessions.map((session) =>
+              session.emitWorkspaceUpdatesForWorkspaceIds([snapshot.workspaceId]),
+            ),
+          );
+        }
+      },
+    );
+    try {
+      for (const [index, emitted] of messages.entries()) {
+        const session = createSessionForWorkspaceTests({
+          creationService: service,
+          directorySync,
+          onMessage: (message) => emitted.push(message),
+        });
+        session.listAgentPayloads = async () =>
+          otherAgentRunning
+            ? [
+                makeAgent({
+                  id: "existing-agent",
+                  cwd: REPO_CWD,
+                  workspaceId: "ws-repo-running",
+                  status: "running",
+                  updatedAt: "2026-11-09T08:00:00.000Z",
+                }),
+              ]
+            : [];
+        sessions.push(session);
+        await session.handleMessage({
+          type: "fetch_workspaces_request",
+          requestId: `creation-window-${index}`,
+          sync: {},
+          subscribe: { subscriptionId: `creation-window-${index}` },
+        });
+        emitted.length = 0;
+      }
+      const workspace = WorkspaceDescriptorPayloadSchema.parse(
+        (await sessions[0]!.listFetchWorkspacesEntries({})).entries[0],
+      );
+      const result = await service.create({
+        kind: "workspace",
+        key: "quota-refusal",
+        request: { source: "test" },
+        workspaceId: workspace.id,
+        hasAgent: true,
+        hasPrompt: false,
+        exists: async () => false,
+        provision: async () => {
+          await Promise.all(
+            sessions.map((session) =>
+              session.emitWorkspaceUpdatesForWorkspaceIds([workspace.id], {
+                optimisticStatus: "running",
+              }),
+            ),
+          );
+          return { workspace };
+        },
+        createAgent: async () => {
+          throw new Error("All Claude accounts are at their usage limit");
+        },
+      });
+      expect(result).toMatchObject({
+        phase: "failed",
+        failedStage: "agent",
+        outcomeUnknown: false,
+      });
+      for (const [index, emitted] of messages.entries()) {
+        const updates = filterByType(emitted, "workspace_update");
+        const optimistic = updates[0]?.payload;
+        expect(optimistic).toMatchObject({ kind: "upsert", workspace: { status: "running" } });
+        expect(updates.at(-1)?.payload).toMatchObject({
+          kind: "upsert",
+          workspace: { status: otherAgentRunning ? "running" : "done" },
+        });
+        if (!otherAgentRunning) {
+          expect(updates.at(-1)?.payload.seq).toBeGreaterThan(optimistic?.seq ?? 0);
+          await sessions[index]!.handleMessage({
+            type: "fetch_workspaces_request",
+            requestId: `creation-catch-up-${index}`,
+            sync: { generation: optimistic?.generation, afterSeq: optimistic?.seq },
+          });
+          const caughtUp = filterByType(emitted, "fetch_workspaces_response").at(-1)?.payload;
+          expect(caughtUp?.entries).toEqual([
+            expect.objectContaining({ id: workspace.id, status: "done" }),
+          ]);
+        }
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 test("workspace create stays out of a non-matching workspace subscription", async () => {
   const emitted: SessionOutboundMessage[] = [];

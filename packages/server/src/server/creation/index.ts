@@ -63,6 +63,7 @@ export class CreationService {
       snapshot: CreationSnapshot,
     ) => Promise<void> = async () => {},
     private readonly legacyDirectory?: string,
+    private readonly onTerminal?: (snapshot: CreationSnapshot) => Promise<void>,
   ) {}
 
   async create(input: CreationInput, observer?: Observer): Promise<CreationSnapshot> {
@@ -353,6 +354,17 @@ export class CreationService {
     await this.write(identity, record);
     for (const observer of this.observers.get(identity) ?? [])
       this.notify(observer, record.snapshot);
+    if (record.snapshot.phase === "completed" || record.snapshot.phase === "failed") {
+      try {
+        await this.onTerminal?.(record.snapshot);
+      } catch (err) {
+        // Refreshing subscribers cannot undo a durable result or retry resource creation.
+        this.logger.warn(
+          { err, kind: record.snapshot.kind, phase: record.snapshot.phase },
+          "Creation terminal observer failed",
+        );
+      }
+    }
   }
   private write(identity: string, record: Record): Promise<void> {
     // Serialize now: the runner mutates the record after queueing this write.

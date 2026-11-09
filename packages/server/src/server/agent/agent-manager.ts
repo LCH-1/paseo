@@ -77,6 +77,7 @@ import {
   AgentRunState,
   type ForegroundTurnWaiter,
   type PendingForegroundRun,
+  type TrackedAgentRun,
 } from "./agent-run-state.js";
 import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { parseAgentMessage, projectAgentMessage } from "./agent-messages/index.js";
@@ -3176,17 +3177,26 @@ export class AgentManager {
 
   async cancelAgentRun(agentId: string): Promise<AgentRunCancellationResult> {
     this.cancelPendingTurnRetry(agentId);
-    return this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId));
-  }
-
-  private async cancelAgentRunNow(agentId: string): Promise<AgentRunCancellationResult> {
     const agent = this.requireSessionAgent(agentId);
     const run =
       this.runs.getRun(agentId) ??
       (agent.lifecycle === "running" ? this.runs.trackAutonomousRun(agentId, null) : null);
+    // A queued Stop belongs to the run present when the request arrived, not
+    // a later prompt that starts before this foreground mutation can enter.
+    return this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId, run));
+  }
+
+  private async cancelAgentRunNow(
+    agentId: string,
+    run: TrackedAgentRun | null,
+  ): Promise<AgentRunCancellationResult> {
     if (!run) {
       return { status: "not_running" };
     }
+    if (this.runs.getRun(agentId)?.token !== run.token) {
+      return { status: run.settled ? "settled" : "refused" };
+    }
+    const agent = this.requireSessionAgent(agentId);
 
     const interruptAcknowledged = await this.interruptSession(agent.session, agentId);
     const settlement = await this.waitWithTimeout({
@@ -3195,6 +3205,12 @@ export class AgentManager {
         ? INTERRUPT_SESSION_TIMEOUT_MS
         : this.rescueTimeouts.interruptSessionMs,
     });
+
+    // Completion may admit a new turn while the old provider acknowledgement
+    // is in flight. Its state and pending permissions are outside this Stop.
+    if (this.runs.getRun(agentId)?.token !== run.token) {
+      return { status: run.settled ? "settled" : "refused" };
+    }
 
     if (!interruptAcknowledged) {
       return { status: settlement === "completed" ? "settled" : "refused" };

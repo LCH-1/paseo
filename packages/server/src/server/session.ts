@@ -61,7 +61,11 @@ import {
   resolveStoredAgentUpdatedAt,
   toAgentPersistenceHandle,
 } from "./persistence-hooks.js";
-import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent/agent-loading.js";
+import {
+  AgentNotFoundError,
+  ensureAgentLoaded,
+  ensureUnarchivedAgentLoaded,
+} from "./agent/agent-loading.js";
 import {
   sendPromptToAgent,
   waitForAgentRunStartWithTimeout,
@@ -6162,7 +6166,7 @@ export class Session {
 
       const nextPayload: WorkspaceUpdatePayload = this.directorySync.sequenceWorkspaceUpdate(
         { kind: "upsert", workspace: nextWorkspace },
-        workspace ?? null,
+        nextWorkspace,
         workspaceId,
         subscription.syncEnabled === true,
         subscription.filter?.includeBackground,
@@ -7893,6 +7897,21 @@ export class Session {
         { err: error, agentId: msg.agentId },
         "Failed to handle fetch_agent_timeline_request",
       );
+      if (error instanceof AgentNotFoundError) {
+        this.emitForSource(
+          {
+            type: "rpc_error",
+            payload: {
+              requestId: msg.requestId,
+              requestType: msg.type,
+              code: "agent_not_found",
+              error: error.message,
+            },
+          },
+          source,
+        );
+        return;
+      }
       this.emitForSource(
         {
           type: "fetch_agent_timeline_response",

@@ -686,6 +686,15 @@ export class VoiceAssistantWebSocketServer {
       this.logger.child({ module: "creation" }),
       (snapshot) => this.validateCompletedCreation(snapshot),
       join(paseoHome, "agent-requests"),
+      async (snapshot) => {
+        const workspaceId = snapshot.workspaceId;
+        if (!workspaceId) return;
+        await Promise.all(
+          this.listSessions().map((session) =>
+            session.emitWorkspaceUpdateForWorkspaceId(workspaceId),
+          ),
+        );
+      },
     );
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();

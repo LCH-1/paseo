@@ -2786,6 +2786,79 @@ test("cancelAgentRun succeeds when the provider queues completion before rejecti
   }
 });
 
+test.each(["running", "idle"] as const)(
+  "a queued Stop preserves a later turn when requested while the old run is %s",
+  async (requestedWhile) => {
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    class HeldStopSession extends TestAgentSession {
+      starts = 0;
+      readonly interruptedTurns: string[] = [];
+
+      override async startTurn(): Promise<{ turnId: string }> {
+        return { turnId: `turn-${++this.starts}` };
+      }
+
+      override async interrupt(): Promise<void> {
+        const turnId = `turn-${this.starts}`;
+        this.interruptedTurns.push(turnId);
+        if (this.interruptedTurns.length === 1) {
+          entered.resolve();
+          await release.promise;
+        } else {
+          this.pushEvent({ type: "turn_canceled", provider: this.provider, turnId });
+        }
+      }
+    }
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-queued-stop-"));
+    const session = new HeldStopSession({ provider: "codex", cwd: workdir });
+    const client = new (class extends TestAgentClient {
+      override async createSession(): Promise<AgentSession> {
+        return session;
+      }
+    })();
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+    let agentId: string | undefined;
+    try {
+      const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+        workspaceId: undefined,
+      });
+      agentId = agent.id;
+      const firstRun = manager.runAgent(agent.id, "first");
+      await manager.waitForAgentRunStart(agent.id);
+      const firstStop = manager.cancelAgentRun(agent.id);
+      await entered.promise;
+      let queuedStop!: ReturnType<AgentManager["cancelAgentRun"]>;
+      if (requestedWhile === "running") queuedStop = manager.cancelAgentRun(agent.id);
+      session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "turn-1" });
+      await firstRun;
+      if (requestedWhile === "idle") queuedStop = manager.cancelAgentRun(agent.id);
+
+      const secondRun = manager.runAgent(agent.id, "second after the first finished");
+      await manager.waitForAgentRunStart(agent.id);
+      release.resolve();
+      const results = await Promise.all([firstStop, queuedStop]);
+      expect(session.interruptedTurns).toEqual(["turn-1"]);
+      const expectedResults = {
+        running: [{ status: "settled" }, { status: "settled" }],
+        idle: [{ status: "settled" }, { status: "not_running" }],
+      } as const;
+      expect(results).toEqual(expectedResults[requestedWhile]);
+      expect(manager.getAgent(agent.id)).toMatchObject({
+        lifecycle: "running",
+        activeForegroundTurnId: "turn-2",
+      });
+      session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "turn-2" });
+      await expect(secondRun).resolves.toMatchObject({ canceled: false });
+    } finally {
+      release.resolve();
+      if (agentId) await manager.closeAgent(agentId);
+      await manager.flush();
+      rmSync(workdir, { recursive: true, force: true });
+    }
+  },
+);
+
 test("listProviderAvailability uses registered client keys, including custom providers", async () => {
   const customClient: AgentClient = {
     provider: "zai",
