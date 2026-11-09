@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  filterProjectWindowHosts,
   filterProjectWindowProjects,
   isProjectWindowWorkspace,
   projectWindowStorageKey,
@@ -15,6 +16,14 @@ const scope = {
 };
 
 describe("project window state", () => {
+  it("connects only its project host without changing the saved registry", () => {
+    const hosts = [{ serverId: "host" }, { serverId: "other" }];
+    expect(filterProjectWindowHosts(hosts, scope)).toEqual([hosts[0]]);
+    expect(hosts).toHaveLength(2);
+    expect(filterProjectWindowHosts(hosts, null)).toBe(hosts);
+    expect(filterProjectWindowHosts(hosts, { ...scope, serverId: "missing" })).toEqual([]);
+  });
+
   it("keeps tabs, drafts, panels, filters, ordering and selection separate even for the same project", () => {
     for (const key of [
       "paseo-drafts",

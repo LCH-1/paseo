@@ -76,6 +76,41 @@ function applySynced(agentId: string, seq: number): void {
 
 afterEach(() => useSessionStore.getState().clearSession(SERVER_ID));
 
+it("discards a deleted conversation's already queued stream commits", () => {
+  useSessionStore.getState().initializeSession(SERVER_ID, null);
+  const owner = createOwner({
+    readTimeline: async () => undefined,
+    commitTimeline: () => undefined,
+  });
+  const event = {
+    event: {
+      type: "timeline",
+      provider: "codex",
+      item: { type: "assistant_message", text: "buffered", messageId: "buffered" },
+    } as AgentStreamEventPayload,
+    seq: 1,
+    epoch: "epoch-1",
+    timestamp: new Date("2026-08-26T10:00:00.000Z"),
+  };
+  try {
+    owner.enqueueStreamEvent(AGENT_ID, event);
+    owner.enqueueStreamEvent("kept", event);
+    owner.forgetAgent(AGENT_ID);
+    owner.flushStreamAgent(AGENT_ID);
+    owner.flushStreamAgent("kept");
+    const session = useSessionStore.getState().sessions[SERVER_ID];
+    expect(session.agentStreamTail.has(AGENT_ID)).toBe(false);
+    expect(session.agentStreamHead.has(AGENT_ID)).toBe(false);
+    expect(session.agentTimelineCursor.has(AGENT_ID)).toBe(false);
+    expect([
+      ...(session.agentStreamTail.get("kept") ?? []),
+      ...(session.agentStreamHead.get("kept") ?? []),
+    ]).toHaveLength(1);
+  } finally {
+    owner.dispose();
+  }
+});
+
 describe("viewed timeline persistence", () => {
   it("keeps one complete reply when live chunks arrive before a cached chat catches up", async () => {
     useSessionStore.getState().initializeSession(SERVER_ID, null);

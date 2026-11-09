@@ -41,7 +41,7 @@ function deriveMountedTabLru(input: DeriveMountedTabLruInput): string[] {
 
   for (const tabId of previousLru) {
     if (next.length >= maxSize) break;
-    if (tabId !== activeTabId && availableTabIds.has(tabId)) {
+    if (!next.includes(tabId) && availableTabIds.has(tabId)) {
       next.push(tabId);
     }
   }

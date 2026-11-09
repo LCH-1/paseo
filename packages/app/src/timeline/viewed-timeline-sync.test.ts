@@ -41,7 +41,7 @@ interface TimelineFetch {
   agentId: string;
   request: ProjectedTimelineForwardFetchPlan;
   respond(input: { hasNewer: boolean; seq?: number }): void;
-  fail(message: string): void;
+  fail(error: string | Error): void;
 }
 
 test("split panes catch up together before hidden open chats start fetching", async () => {
@@ -177,7 +177,7 @@ class TimelineWorld {
             hasNewer,
             endCursor: { epoch: `epoch-${agentId}`, seq },
           }),
-        fail: (message) => result.reject(new Error(message)),
+        fail: (error) => result.reject(error instanceof Error ? error : new Error(error)),
       });
       this.releaseFetchWaiters();
       return result.promise;
@@ -267,7 +267,7 @@ class TimelineWorld {
       request,
       respond: ({ hasNewer, seq = 1 }) =>
         result.resolve({ hasNewer, endCursor: { epoch: `epoch-${agentId}`, seq } }),
-      fail: (message) => result.reject(new Error(message)),
+      fail: (error) => result.reject(error instanceof Error ? error : new Error(error)),
     });
     this.releaseFetchWaiters();
     return result.promise;
@@ -332,6 +332,57 @@ class TimelineWorld {
     }
   }
 }
+
+test("confirmed deletion stops retries and cannot be reopened by stale visibility", async () => {
+  const world = new TimelineWorld();
+  world.sync.replaceVisibleAgentIds("pane", ["deleted"]);
+  world.sync.setConnected(true);
+  (await world.nextMembership()).succeed();
+  (await world.nextFetch("deleted")).fail(
+    Object.assign(new Error("Agent not found"), { code: "agent_not_found" }),
+  );
+  await vi.waitFor(() => expect(world.sync.isAgentDeleted("deleted")).toBe(true));
+  expect(world.sync.getAgentTimelineStatus("deleted")).toBe("error");
+  expect(world.sync.getAgentTimelineError("deleted")).toContain("deleted");
+  world.sync.replaceVisibleAgentIds("stale-pane", ["deleted"]);
+  world.sync.setConnected(false);
+  world.sync.setConnected(true);
+  world.elapse(60_000);
+  world.expectNoPendingFetch();
+  expect(world.errors).toEqual([]);
+  world.sync.dispose();
+});
+
+test("a generic not-found message remains retryable without the deletion code", async () => {
+  const world = new TimelineWorld();
+  world.sync.replaceVisibleAgentIds("pane", ["agent"]);
+  world.sync.setConnected(true);
+  (await world.nextMembership()).succeed();
+  (await world.nextFetch("agent")).fail(
+    Object.assign(new Error("Agent not found"), { code: "handler_error" }),
+  );
+  await world.nextError();
+  expect(world.sync.isAgentDeleted("agent")).toBe(false);
+  (await world.nextRetry())();
+  (await world.nextFetch("agent")).respond({ hasNewer: false });
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent")).toBe("ready"));
+  world.sync.dispose();
+});
+
+test("deleting one open chat releases it without affecting another catch-up", async () => {
+  const world = new TimelineWorld();
+  world.sync.replaceVisibleAgentIds("pane", ["a", "b"]);
+  world.sync.setConnected(true);
+  (await world.nextMembership()).succeed();
+  const a = await world.nextFetch("a");
+  const b = await world.nextFetch("b");
+  world.sync.forgetAgent("a");
+  a.respond({ hasNewer: false });
+  b.respond({ hasNewer: false });
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("b")).toBe("ready"));
+  expect(world.sync.getAgentTimelineStatus("a")).toBe("error");
+  world.sync.dispose();
+});
 
 test("uses a tail fetch when an agent becomes visible", async () => {
   const world = new TimelineWorld();

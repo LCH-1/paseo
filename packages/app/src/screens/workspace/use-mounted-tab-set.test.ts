@@ -9,6 +9,24 @@ function mountedIds(result: { current: ReturnType<typeof useMountedTabSet> }): s
 }
 
 describe("useMountedTabSet", () => {
+  it("does not evict a warm tab when a retained tab already occupies an LRU slot", () => {
+    const { result, rerender } = renderHook(
+      ({ activeTabId }) =>
+        useMountedTabSet({
+          activeTabId,
+          allTabIds: ["modified", "warm", "active"],
+          retainedTabIds: new Set(["modified"]),
+          cap: 3,
+        }),
+      { initialProps: { activeTabId: "warm" } },
+    );
+    rerender({ activeTabId: "modified" });
+    rerender({ activeTabId: "active" });
+    expect(mountedIds(result)).toEqual(["active", "modified", "warm"]);
+    rerender({ activeTabId: "warm" });
+    expect(mountedIds(result)).toEqual(["warm", "modified", "active"]);
+  });
+
   it("includes a newly active tab in the same render", () => {
     let renderCount = 0;
     const { result, rerender } = renderHook(

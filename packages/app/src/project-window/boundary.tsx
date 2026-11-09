@@ -1,5 +1,5 @@
 import { Redirect, usePathname } from "expo-router";
-import type { ReactNode } from "react";
+import React, { type ReactNode } from "react";
 import { useSessionStore } from "@/stores/session-store";
 import { buildNewWorkspaceRoute, parseHostWorkspaceRouteFromPathname } from "@/utils/host-routes";
 import { getProjectWindowScope, isProjectWindowWorkspace } from "./state";
@@ -12,6 +12,9 @@ export function ProjectWindowBoundary({ children }: { children: ReactNode }) {
     selection
       ? state.sessions[selection.serverId]?.workspaces.get(selection.workspaceId)
       : undefined,
+  );
+  const hydrated = useSessionStore((state) =>
+    selection ? state.sessions[selection.serverId]?.hasHydratedWorkspaces === true : false,
   );
   if (!scope) return children;
   const newRoute = buildNewWorkspaceRoute({
@@ -27,7 +30,7 @@ export function ProjectWindowBoundary({ children }: { children: ReactNode }) {
     return <Redirect href={newRoute} />;
   }
   if (!selection) return children;
-  if (!workspace) return null;
+  if (!workspace) return hydrated ? <Redirect href={newRoute} /> : null;
   if (!isProjectWindowWorkspace(selection.serverId, workspace, scope))
     return <Redirect href={newRoute} />;
   return children;

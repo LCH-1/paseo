@@ -1,4 +1,5 @@
 import { useSyncExternalStore, useMemo } from "react";
+import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import equal from "fast-deep-equal/es6";
 import {
@@ -48,6 +49,7 @@ import {
   createDesktopDaemonTransportFactory,
 } from "@/desktop/daemon/desktop-daemon-transport";
 import { getDesktopHost } from "@/desktop/host";
+import { filterProjectWindowHosts } from "@/project-window/state";
 import { readDesktopManagedLocalCredential } from "@/desktop/daemon/local-credential";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 import { BROWSER_AUTOMATION_COMMAND_NAMES } from "@getpaseo/protocol/browser-automation/rpc-schemas";
@@ -1794,6 +1796,7 @@ export class HostRuntimeStore {
       newServerId,
       {
         onAgentStoppedRunning: (agentId) => this.drainQueuedAgentMessage(newServerId, agentId),
+        onAgentDeleted: (agentId) => this.handleAgentDeleted(newServerId, agentId),
         markAgentLoading: () => controller.markAgentDirectorySyncLoading(),
         markAgentReady: () => controller.markAgentDirectorySyncReady(),
         markAgentError: (error) => controller.markAgentDirectorySyncError(error),
@@ -2271,7 +2274,9 @@ export class HostRuntimeStore {
   ): void {
     this.replicaCache.setHosts(hosts.map((host) => host.serverId));
     projectIconCache.setHosts(hosts.map((host) => host.serverId));
-    const nextIds = new Set(hosts.map((host) => host.serverId));
+    // The registry/cache stay complete; a dedicated window only owns its host's live work.
+    const connectedHosts = filterProjectWindowHosts(hosts);
+    const nextIds = new Set(connectedHosts.map((host) => host.serverId));
     for (const [serverId, controller] of this.controllers) {
       if (nextIds.has(serverId)) {
         continue;
@@ -2287,7 +2292,7 @@ export class HostRuntimeStore {
       this.emit(serverId);
     }
 
-    for (const host of hosts) {
+    for (const host of connectedHosts) {
       const initialConnection = options?.initialConnectionByServerId?.get(host.serverId);
       const existing = this.controllers.get(host.serverId);
       if (existing) {
@@ -2310,6 +2315,7 @@ export class HostRuntimeStore {
         host.serverId,
         {
           onAgentStoppedRunning: (agentId) => this.drainQueuedAgentMessage(host.serverId, agentId),
+          onAgentDeleted: (agentId) => this.handleAgentDeleted(host.serverId, agentId),
           markAgentLoading: () => controller.markAgentDirectorySyncLoading(),
           markAgentReady: () => controller.markAgentDirectorySyncReady(),
           markAgentError: (error) => controller.markAgentDirectorySyncError(error),
@@ -2496,7 +2502,17 @@ export class HostRuntimeStore {
   restoreAgentSnapshot(serverId: string, agentId: string, agent: Agent | undefined): void {
     const directory = this.requireDirectory(serverId);
     if (agent) directory.acceptAgent(agent);
-    else directory.removeAgent(agentId);
+    else directory.forgetAgentSnapshot(agentId);
+  }
+
+  handleAgentDeleted(serverId: string, agentId: string): void {
+    useSessionStore.getState().sessions[serverId]?.viewedTimelineSync?.forgetAgent(agentId);
+    useWorkspaceLayoutStore.getState().removeDeletedAgentTabs(serverId, agentId);
+    if (isWeb && typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+      window.dispatchEvent(
+        new CustomEvent("paseo:agent-deleted", { detail: { serverId, agentId } }),
+      );
+    }
   }
 
   acceptWorkspaceSnapshots(serverId: string, workspaces: readonly WorkspaceDescriptor[]): void {

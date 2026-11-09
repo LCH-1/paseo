@@ -35,6 +35,12 @@ type AgentFetchResult = Awaited<ReturnType<DaemonClient["fetchAgents"]>>;
 type WorkspaceScriptsResult = Awaited<ReturnType<DaemonClient["listWorkspaceScripts"]>>;
 
 class FakeDirectoryClient {
+  timelineCalls = 0;
+  timelineError: unknown = new Error("No timeline configured");
+  async fetchAgentTimeline(): Promise<never> {
+    this.timelineCalls += 1;
+    throw this.timelineError;
+  }
   supportsBackgroundWorkspaces(): boolean {
     return false;
   }
@@ -290,6 +296,167 @@ afterEach(() => {
   for (const serverId of serverIds) useSessionStore.getState().clearSession(serverId);
   serverIds.clear();
   useWorkspaceLabels.setState({ hosts: {} });
+});
+
+describe("directory sequence fences", () => {
+  it("keeps filtered removals reversible but treats a deletion event as final", async () => {
+    const serverId = "delete-versus-filter";
+    const { client, directory } = createDirectory(serverId);
+    useSessionStore.getState().initializeSession(serverId, client as unknown as DaemonClient, 1);
+    try {
+      await directory.refreshAgents({ subscribe: {} });
+      const upsert = () =>
+        client.emit({
+          type: "agent_update",
+          payload: { kind: "upsert", agent: createAgentSnapshot("agent"), project: null },
+        });
+      upsert();
+      client.emit({ type: "agent_update", payload: { kind: "remove", agentId: "agent" } });
+      upsert();
+      expect(useSessionStore.getState().sessions[serverId].agents.has("agent")).toBe(true);
+      client.emit({ type: "agent_deleted", payload: { requestId: "delete", agentId: "agent" } });
+      upsert();
+      expect(useSessionStore.getState().sessions[serverId].agents.has("agent")).toBe(false);
+      await expect(directory.fetchTimeline("agent", {})).rejects.toMatchObject({
+        code: "agent_not_found",
+      });
+      expect(client.timelineCalls).toBe(0);
+    } finally {
+      directory.dispose();
+    }
+  });
+
+  it("stops remote fetches only for an explicit agent_not_found response", async () => {
+    const serverId = "timeline-delete-code";
+    const { client, directory } = createDirectory(serverId);
+    useSessionStore.getState().initializeSession(serverId, client as unknown as DaemonClient, 1);
+    try {
+      client.timelineError = Object.assign(new Error("temporary failure"), {
+        code: "handler_error",
+      });
+      await expect(directory.fetchTimeline("agent", {})).rejects.toMatchObject({
+        code: "handler_error",
+      });
+      client.timelineError = Object.assign(new Error("deleted"), { code: "agent_not_found" });
+      await expect(directory.fetchTimeline("agent", {})).rejects.toMatchObject({
+        code: "agent_not_found",
+      });
+      await expect(directory.fetchTimeline("agent", {})).rejects.toMatchObject({
+        code: "agent_not_found",
+      });
+      expect(client.timelineCalls).toBe(2);
+    } finally {
+      directory.dispose();
+    }
+  });
+  it("ignores stale live removals and events from retired generations", async () => {
+    const serverId = "live-sequence-fence";
+    const { client, directory } = createDirectory(serverId);
+    useSessionStore.getState().initializeSession(serverId, client as unknown as DaemonClient, 1);
+    try {
+      await directory.refreshAgents({ subscribe: {} });
+      const upsert = (generation: string, seq: number) =>
+        client.emit({
+          type: "agent_update",
+          payload: {
+            kind: "upsert",
+            agent: createAgentSnapshot("agent"),
+            project: null,
+            generation,
+            seq,
+          },
+        });
+      const remove = (generation: string, seq: number) =>
+        client.emit({
+          type: "agent_update",
+          payload: { kind: "remove", agentId: "agent", generation, seq },
+        });
+      const exists = () => useSessionStore.getState().sessions[serverId].agents.has("agent");
+      upsert("old", 12);
+      remove("old", 11);
+      expect(exists()).toBe(true);
+      upsert("new", 1);
+      remove("old", 13);
+      expect(exists()).toBe(true);
+      remove("new", 2);
+      upsert("new", 1);
+      expect(exists()).toBe(false);
+    } finally {
+      directory.dispose();
+    }
+  });
+
+  it.each([11, 13])(
+    "replays only buffered events after the snapshot fence (seq %s)",
+    async (seq) => {
+      const serverId = `agent-snapshot-fence-${seq}`;
+      const { client, directory } = createDirectory(serverId);
+      useSessionStore.getState().initializeSession(serverId, client as unknown as DaemonClient, 1);
+      try {
+        await directory.refreshAgents({ subscribe: {} });
+        const finish = client.holdAgentFetch();
+        const refreshing = directory.refreshAgents({ subscribe: {} });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        client.emit({
+          type: "agent_update",
+          payload: { kind: "remove", agentId: "agent", generation: "generation", seq },
+        });
+        finish({
+          requestId: "snapshot",
+          entries: [
+            {
+              agent: createAgentSnapshot("agent"),
+              project: deriveProjectPlacementFromCwd("/repo"),
+            },
+          ],
+          pageInfo: { hasMore: false, nextCursor: null, prevCursor: null },
+          sync: { mode: "snapshot", generation: "generation", headSeq: 12, removals: [] },
+        });
+        await refreshing;
+        expect(useSessionStore.getState().sessions[serverId].agents.has("agent")).toBe(seq <= 12);
+      } finally {
+        directory.dispose();
+      }
+    },
+  );
+
+  it("keeps an authoritative workspace snapshot despite an earlier buffered removal", async () => {
+    const serverId = "workspace-snapshot-fence";
+    const { client, directory } = createDirectory(serverId);
+    useSessionStore.getState().initializeSession(serverId, client as unknown as DaemonClient, 1);
+    useSessionStore.getState().updateSessionServerInfo(serverId, {
+      serverId,
+      hostname: null,
+      version: "test",
+      features: { workspaceMultiplicity: true, directorySync: true },
+    });
+    try {
+      await directory.refreshWorkspaces({ subscribe: true });
+      const finish = client.holdWorkspaceFetch();
+      const refreshing = directory.refreshWorkspaces({ subscribe: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      client.emit({
+        type: "workspace_update",
+        payload: { kind: "remove", id: "workspace", generation: "generation", seq: 11 },
+      });
+      finish({
+        requestId: "snapshot",
+        entries: [createWorkspaceEntry("workspace")],
+        emptyProjects: [],
+        pageInfo: { hasMore: false, nextCursor: null, prevCursor: null },
+        sync: { mode: "snapshot", generation: "generation", headSeq: 12, removals: [] },
+      });
+      await refreshing;
+      expect(useSessionStore.getState().sessions[serverId].workspaces.has("workspace")).toBe(true);
+      client.emit({
+        type: "workspace_update",
+        payload: { kind: "remove", id: "workspace", generation: "generation", seq: 11 },
+      });
+      expect(useSessionStore.getState().sessions[serverId].workspaces.has("workspace")).toBe(true);
+    } finally {
+      directory.dispose();
+    }
+  });
 });
 
 describe("DirectorySync attention acknowledgements", () => {

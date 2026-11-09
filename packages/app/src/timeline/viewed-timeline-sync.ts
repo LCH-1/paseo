@@ -13,6 +13,7 @@ import {
 import { useCreateFlowStore } from "@/stores/create-flow-store";
 import type { SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import { getSendingClientMessageIds } from "@/composer/submission/model";
+import { isAgentNotFoundError } from "@/utils/agent-not-found";
 import {
   getInitDeferred,
   getInitKey,
@@ -320,6 +321,7 @@ export interface ViewedTimelineSyncPorts {
    */
   onCatchUpEnded(agentId: string): void;
   reportError(error: unknown): void;
+  onAgentDeleted?(agentId: string): void;
   schedule(task: () => void, delayMs: number): () => void;
 }
 
@@ -334,6 +336,8 @@ export interface ViewedTimelineUiBridge {
 }
 
 export interface ViewedTimelineSync extends ViewedTimelineUiBridge {
+  forgetAgent(agentId: string): void;
+  isAgentDeleted(agentId: string): boolean;
   /**
    * The agent tabs that currently exist in workspace layout. This only ever *releases*
    * subscriptions: closing a tab drops its chat. It never adds one, because layout is
@@ -365,8 +369,13 @@ export function createViewedTimelineOwner(input: {
   ports: ViewedTimelineOwnerPorts;
 }): ViewedTimelineOwner {
   const forcedTailReplacements = new Set<string>();
+  const deletedAgentIds = new Set<string>();
   const sync = createViewedTimelineSync({
     ...input.ports,
+    onAgentDeleted: (agentId) => {
+      deletedAgentIds.add(agentId);
+      input.ports.onAgentDeleted?.(agentId);
+    },
     fetchLatestTail: async (agentId) => {
       forcedTailReplacements.add(agentId);
       try {
@@ -383,14 +392,36 @@ export function createViewedTimelineOwner(input: {
   });
   const streamQueue = createSessionAgentStreamReducerQueue({
     serverId: input.serverId,
-    setAgentStreamState: (...args) => useSessionStore.getState().setAgentStreamState(...args),
-    setAgentTimelineCursor: (...args) => useSessionStore.getState().setAgentTimelineCursor(...args),
-    recoverTimelineGap: (agentId, cursor) => sync.recoverGap(agentId, cursor),
-    onCommitted: (agentId) => input.replica.timelineUpdated(agentId),
+    setAgentStreamState: (serverId, agentId, state) => {
+      if (!deletedAgentIds.has(agentId))
+        useSessionStore.getState().setAgentStreamState(serverId, agentId, state);
+    },
+    setAgentTimelineCursor: (serverId, update) =>
+      useSessionStore.getState().setAgentTimelineCursor(serverId, (previous) => {
+        const next = update(previous);
+        let retained = next;
+        for (const agentId of deletedAgentIds) {
+          if (!retained.has(agentId)) continue;
+          if (retained === next) retained = new Map(next);
+          retained.delete(agentId);
+        }
+        return retained;
+      }),
+    recoverTimelineGap: (agentId, cursor) => {
+      if (!deletedAgentIds.has(agentId)) sync.recoverGap(agentId, cursor);
+    },
+    onCommitted: (agentId) => {
+      if (!deletedAgentIds.has(agentId)) input.replica.timelineUpdated(agentId);
+    },
   });
   return {
     ...sync,
+    forgetAgent(agentId) {
+      deletedAgentIds.add(agentId);
+      sync.forgetAgent(agentId);
+    },
     applyTimelineResponse(receivedPayload) {
+      if (sync.isAgentDeleted(receivedPayload.agentId)) return;
       const payload = consumeForcedTimelineTailReplacement(receivedPayload, forcedTailReplacements);
       const accepted = applyAuthoritativeTimelineResponse({
         serverId: input.serverId,
@@ -402,6 +433,7 @@ export function createViewedTimelineOwner(input: {
       if (accepted) input.replica.timelineUpdated(payload.agentId);
     },
     enqueueStreamEvent(agentId, event) {
+      if (sync.isAgentDeleted(agentId)) return;
       streamQueue.enqueue(agentId, event);
     },
     flushStreamAgent(agentId) {
@@ -478,6 +510,7 @@ function sameAgentIds(left: string[], right: string[]): boolean {
 
 export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): ViewedTimelineSync {
   const sources = new Map<string, string[]>();
+  const deletedAgentIds = new Set<string>();
   const catchUps = new Map<string, CatchUpState>();
   const catchUpGenerations = new Map<string, number>();
   // Authoritative fetch owed but not runnable yet: disconnected, unacknowledged, or parked.
@@ -510,7 +543,8 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
   // only closing the tab or ending the session takes it out.
   let openedAgentIds: string[] = [];
 
-  const visibleAgentIds = () => normalizeAgentIds([...sources.values()].flat());
+  const visibleAgentIds = () =>
+    normalizeAgentIds([...sources.values()].flat()).filter((id) => !deletedAgentIds.has(id));
 
   const rememberOpenedAgentIds = (agentIds: string[]) => {
     if (agentIds.length === 0) return;
@@ -597,6 +631,11 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       }
       setVisibilityCatchUpReady(agentId);
     } catch (error) {
+      if (isAgentNotFoundError(error)) {
+        forgetAgent(agentId);
+        ports.onAgentDeleted?.(agentId);
+        return;
+      }
       if (catchUps.get(agentId)?.generation === generation) {
         const nextRetryDelayMs = getNextRetryDelayMs(catchUps.get(agentId)?.retryDelayMs);
         const cancelRetry = ports.schedule(() => {
@@ -822,18 +861,39 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
     commitDesiredMembership(normalizeAgentIds([...openedAgentIds, ...visibleAgentIds()]));
   };
 
+  const forgetAgent = (agentId: string) => {
+    deletedAgentIds.add(agentId);
+    openedAgentIds = openedAgentIds.filter((id) => id !== agentId);
+    for (const [source, ids] of sources) {
+      const remaining = ids.filter((id) => id !== agentId);
+      if (remaining.length) sources.set(source, remaining);
+      else sources.delete(source);
+    }
+    cancelCatchUp(agentId);
+    loadedCache.delete(agentId);
+    visibilityCatchUpPending.delete(agentId);
+    visibilityCatchUpErrors.delete(agentId);
+    manualRetries.delete(agentId);
+    publishVisibleMembership();
+    notifyListeners();
+  };
+
   return {
+    forgetAgent,
+    isAgentDeleted: (agentId) => deletedAgentIds.has(agentId),
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
     getAgentTimelineStatus(agentId) {
+      if (deletedAgentIds.has(agentId)) return "error";
       if (manualRetries.has(agentId)) return "retrying";
       if (visibilityCatchUpErrors.has(agentId)) return "error";
       if (!isDesired(agentId) || visibilityCatchUpPending.has(agentId)) return "pending";
       return "ready";
     },
     getAgentTimelineError(agentId) {
+      if (deletedAgentIds.has(agentId)) return "This conversation was deleted.";
       return visibilityCatchUpErrors.get(agentId) ?? null;
     },
     replaceOpenTabAgentIds(agentIds) {
@@ -844,7 +904,7 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       publishVisibleMembership();
     },
     replaceVisibleAgentIds(sourceId, agentIds) {
-      const normalized = normalizeAgentIds(agentIds);
+      const normalized = normalizeAgentIds(agentIds).filter((id) => !deletedAgentIds.has(id));
       if (normalized.length === 0) sources.delete(sourceId);
       else sources.set(sourceId, normalized);
       rememberOpenedAgentIds(normalized);

@@ -83,6 +83,73 @@ const workspaceLayoutIds = createDeterministicWorkspaceLayoutIds();
 const workspaceLayoutStore = createWorkspaceLayoutStore(workspaceLayoutIds);
 
 describe("closed tab history", () => {
+  it("forgets a deleted conversation without closing other chats or another host's tabs", () => {
+    const source = createWorkspaceLayoutStore(workspaceLayoutIds);
+    for (const workspaceKey of ["host:workspace", "other:workspace"]) {
+      source
+        .getState()
+        .openTab({ workspaceKey, target: { kind: "agent", agentId: "deleted" }, intent: "reveal" });
+      source
+        .getState()
+        .openTab({ workspaceKey, target: { kind: "agent", agentId: "kept" }, intent: "new" });
+      source.getState().recordClosedTab(workspaceKey, {
+        tab: {
+          tabId: "old-deleted",
+          target: { kind: "agent", agentId: "deleted" },
+          createdAt: 1,
+        },
+        paneId: null,
+        browserUrl: null,
+      });
+    }
+    source.getState().removeDeletedAgentTabs("host", "deleted");
+    const tabs = (key: string) =>
+      collectAllTabs(source.getState().layoutByWorkspace[key].root).map((tab) => tab.target);
+    expect(tabs("host:workspace")).not.toContainEqual({ kind: "agent", agentId: "deleted" });
+    expect(tabs("host:workspace")).toContainEqual({ kind: "agent", agentId: "kept" });
+    expect(tabs("other:workspace")).toContainEqual({ kind: "agent", agentId: "deleted" });
+    expect(source.getState().closedTabsByWorkspace["host:workspace"]).toEqual([]);
+    expect(source.getState().closedTabsByWorkspace["other:workspace"]).toHaveLength(1);
+  });
+  it("restores bounded close history and its sequence after storage rehydration", async () => {
+    await AsyncStorage.removeItem("workspace-layout-state");
+    const source = createWorkspaceLayoutStore(workspaceLayoutIds);
+    await source.persist.rehydrate();
+    const workspaceKey = "server-1:persisted-close-history";
+    for (let index = 0; index < 35; index += 1) {
+      source.getState().recordClosedTab(workspaceKey, {
+        tab: {
+          tabId: `file-${index}`,
+          target: { kind: "file", path: `file-${index}.txt` },
+          createdAt: index,
+        },
+        paneId: null,
+        browserUrl: null,
+        origin: "global-workspace-tabs",
+        position: index,
+      });
+    }
+    source.getState().recordClosedTab(workspaceKey, {
+      tab: { tabId: "ephemeral", target: { kind: "commit_diff", sha: "outdated" }, createdAt: 36 },
+      paneId: null,
+      browserUrl: null,
+    });
+    const restored = createWorkspaceLayoutStore(workspaceLayoutIds);
+    await restored.persist.rehydrate();
+    expect(restored.getState().closedTabsByWorkspace[workspaceKey]).toHaveLength(29);
+    expect(restored.getState().takeLastClosedTab(workspaceKey)).toMatchObject({
+      tab: { tabId: "file-34" },
+      sequence: 35,
+      origin: "global-workspace-tabs",
+      position: 34,
+    });
+    restored.getState().recordClosedTab(workspaceKey, {
+      tab: { tabId: "later", target: { kind: "file", path: "later.txt" }, createdAt: 37 },
+      paneId: null,
+      browserUrl: null,
+    });
+    expect(restored.getState().takeLastClosedTab(workspaceKey)?.sequence).toBe(37);
+  });
   it("orders extension tabs and native closes in the same bounded history", () => {
     const store = createWorkspaceLayoutStore(workspaceLayoutIds);
     const workspaceKey = "server-1:extension-history";
@@ -708,6 +775,8 @@ describe("workspace-layout-store version 2 migration", () => {
       const persisted = JSON.parse((await AsyncStorage.getItem("workspace-layout-state")) ?? "{}");
       expect(persisted.version).toBe(2);
       expect(Object.keys(persisted.state).sort()).toEqual([
+        "closedTabSequence",
+        "closedTabsByWorkspace",
         "explorerPaneIdByWorkspace",
         "explorerSidebarWidthByWorkspace",
         "layoutByWorkspace",
@@ -1257,6 +1326,8 @@ describe("workspace-layout-store actions", () => {
   beforeEach(() => {
     workspaceLayoutIds.reset();
     workspaceLayoutStore.setState({
+      closedTabsByWorkspace: {},
+      closedTabSequence: 0,
       layoutByWorkspace: {},
       splitSizesByWorkspace: {},
       pinnedAgentIdsByWorkspace: {},
@@ -3301,6 +3372,8 @@ describe("workspace-layout-store actions", () => {
     const persisted = partialize(currentState);
 
     expect(persisted).toEqual({
+      closedTabsByWorkspace: {},
+      closedTabSequence: 0,
       layoutByWorkspace: { [workspaceKey]: layout },
       pinnedAgentIdsByWorkspace: {},
       splitSizesByWorkspace: currentState.splitSizesByWorkspace,
@@ -3535,6 +3608,8 @@ describe("workspace-layout-store actions", () => {
     const partialize = workspaceLayoutStore.persist.getOptions().partialize;
     expect(partialize).toBeTypeOf("function");
     expect(partialize?.(state)).toEqual({
+      closedTabsByWorkspace: {},
+      closedTabSequence: 0,
       pullRequestTabAutoOpenedByWorkspace: {},
       layoutByWorkspace: {},
       pinnedAgentIdsByWorkspace: {},

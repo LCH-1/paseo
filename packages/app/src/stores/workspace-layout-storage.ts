@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { SplitNode, WorkspaceLayout } from "./workspace-layout-actions";
+import type { ClosedWorkspaceTab } from "./workspace-layout-store";
 
 const WorkspaceDraftTabSetupStorageSchema = z.strictObject({
   provider: z.string(),
@@ -66,6 +67,14 @@ const WorkspaceTabStorageSchema = z.strictObject({
   createdAt: z.number(),
   state: z.json().optional(),
 });
+const ClosedWorkspaceTabStorageSchema: z.ZodType<ClosedWorkspaceTab> = z.strictObject({
+  tab: WorkspaceTabStorageSchema,
+  paneId: z.string().nullable(),
+  browserUrl: z.string().nullable(),
+  sequence: z.number().int().nonnegative().optional(),
+  origin: z.string().optional(),
+  position: z.number().int().nonnegative().optional(),
+});
 const SplitNodeStorageSchema: z.ZodType<SplitNode> = z.lazy(() =>
   z.discriminatedUnion("kind", [
     z.strictObject({
@@ -95,6 +104,8 @@ const WorkspaceLayoutStorageSchema: z.ZodType<WorkspaceLayout> = z.strictObject(
   parentTabIdByTabId: z.record(z.string(), z.string()).optional(),
 });
 export const WorkspaceLayoutPersistedStateSchema = z.strictObject({
+  closedTabsByWorkspace: z.record(z.string(), z.array(ClosedWorkspaceTabStorageSchema)).optional(),
+  closedTabSequence: z.number().int().nonnegative().optional(),
   pinnedAgentIdsByWorkspace: z.record(z.string(), z.array(z.string())).optional(),
   layoutByWorkspace: z.record(z.string(), WorkspaceLayoutStorageSchema),
   splitSizesByWorkspace: z.record(z.string(), z.record(z.string(), z.array(z.number()))).optional(),

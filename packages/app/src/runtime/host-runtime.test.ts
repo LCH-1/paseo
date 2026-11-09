@@ -32,6 +32,72 @@ import type { ReplicaRow, ReplicaRowStore } from "./replica-cache/row-store";
 import { subscriptionFixture } from "./subscription-fixture";
 import { readDesktopManagedLocalCredential } from "@/desktop/daemon/local-credential";
 import type { HostConfirmationRequest } from "./host-confirmation";
+import * as desktopHost from "@/desktop/host";
+import { collectAllTabs, useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+
+it("releases timeline demand and only the deleted conversation's saved tabs", () => {
+  const serverId = "srv_confirmed_agent_delete";
+  const workspaceKey = `${serverId}:workspace`;
+  const runtime = new HostRuntimeStore();
+  const session = useSessionStore.getState();
+  const layouts = useWorkspaceLayoutStore;
+  const previous = layouts.getState();
+  const forgetAgent = vi.fn();
+  session.initializeSession(serverId, new FakeDaemonClient() as unknown as DaemonClient, 1);
+  session.setViewedTimelineSync(serverId, { forgetAgent } as unknown as Parameters<
+    typeof session.setViewedTimelineSync
+  >[1]);
+  try {
+    layouts
+      .getState()
+      .openTab({ workspaceKey, target: { kind: "agent", agentId: "deleted" }, intent: "reveal" });
+    layouts
+      .getState()
+      .openTab({ workspaceKey, target: { kind: "agent", agentId: "kept" }, intent: "new" });
+    runtime.handleAgentDeleted(serverId, "deleted");
+    expect(forgetAgent).toHaveBeenCalledExactlyOnceWith("deleted");
+    const targets = collectAllTabs(layouts.getState().layoutByWorkspace[workspaceKey].root).map(
+      (tab) => tab.target,
+    );
+    expect(targets).not.toContainEqual({ kind: "agent", agentId: "deleted" });
+    expect(targets).toContainEqual({ kind: "agent", agentId: "kept" });
+    expect(layouts.getState().closedTabsByWorkspace[workspaceKey]).toEqual([]);
+  } finally {
+    layouts.setState(previous);
+    session.clearSession(serverId);
+  }
+});
+
+it("connects only the project host while preserving the complete registry", async () => {
+  const selected = makeHost({ serverId: "srv_project_only" });
+  const other = makeHost({ serverId: "srv_unrelated_project" });
+  const storage = createMemoryHostRuntimeStorage();
+  await storage.setItem("@paseo:daemon-registry", JSON.stringify([selected, other]));
+  await storage.setItem("@paseo:e2e", "1");
+  const host = vi.spyOn(desktopHost, "getDesktopHost").mockReturnValue({
+    projectWindow: {
+      serverId: selected.serverId,
+      projectId: "project",
+      projectName: "Project",
+      directory: "/project",
+      windowId: "project-window",
+    },
+  });
+  const store = createAppearanceStore(storage);
+  try {
+    await store.boot();
+    expect(store.getHosts().map((entry) => entry.serverId)).toEqual([
+      selected.serverId,
+      other.serverId,
+    ]);
+    expect(useSessionStore.getState().sessions[selected.serverId]).toBeDefined();
+    expect(useSessionStore.getState().sessions[other.serverId]).toBeUndefined();
+    expect(JSON.parse((await storage.getItem("@paseo:daemon-registry"))!)).toHaveLength(2);
+  } finally {
+    store.syncHosts([]);
+    host.mockRestore();
+  }
+});
 
 it("requests the managed connection credential through desktop main without a web hint", async () => {
   const requests: string[] = [];

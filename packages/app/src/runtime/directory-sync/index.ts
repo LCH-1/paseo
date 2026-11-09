@@ -34,6 +34,7 @@ import type {
   DirectoryReplicaMutation,
 } from "@/runtime/replica-cache";
 import type { TurnLivenessTransition } from "@/timeline/turn-liveness";
+import { agentNotFoundError, isAgentNotFoundError } from "@/utils/agent-not-found";
 
 type FetchAgentsPayload = Awaited<ReturnType<DaemonClient["fetchAgents"]>>;
 type FetchWorkspacesPayload = Awaited<ReturnType<DaemonClient["fetchWorkspaces"]>>;
@@ -163,11 +164,14 @@ export class DirectorySync {
   private demandRefresh: Promise<void> | null = null;
   private satisfiedDemandSource: DirectorySourceToken | null = null;
   private cursors: DirectoryCheckpoint = {};
+  private readonly retiredGenerations = new Map<keyof DirectoryCheckpoint, Set<string>>();
+  private readonly deletedAgentIds = new Set<string>();
 
   constructor(
     private readonly serverId: string,
     private readonly callbacks: {
       onAgentStoppedRunning: (agentId: string) => void;
+      onAgentDeleted?: (agentId: string) => void;
       markAgentLoading: () => void;
       markAgentReady: () => void;
       markAgentError: (error: string) => void;
@@ -219,7 +223,7 @@ export class DirectorySync {
   }
 
   setAgentRouteDemand(agentIds: readonly string[]): void {
-    const next = new Set(agentIds);
+    const next = new Set(agentIds.filter((id) => !this.deletedAgentIds.has(id)));
     if (
       next.size === this.routeDemandIds.size &&
       [...next].every((agentId) => this.routeDemandIds.has(agentId))
@@ -288,8 +292,10 @@ export class DirectorySync {
   }
 
   private receiveAgentDelta(source: DirectorySourceToken, delta: AgentDirectoryDelta): void {
-    this.revision += 1;
+    if (delta.kind === "upsert" && this.deletedAgentIds.has(delta.agent.id)) return;
     if (this.agentTransactions.record(source, delta)) return;
+    if (!this.isFreshDelta("agents", delta)) return;
+    this.revision += 1;
     this.agents.applyDelta(delta);
     this.noteLiveCursor("agents", delta);
     this.persistCheckpoint();
@@ -299,9 +305,11 @@ export class DirectorySync {
     source: DirectorySourceToken,
     delta: WorkspaceDirectoryDelta,
   ): void {
+    if (this.workspaceTransactions.record(source, delta)) return;
+    const entity = this.workspaceDeltaEntity(delta);
+    if (entity && !this.isFreshDelta(entity, delta)) return;
     this.revision += 1;
     this.workspaceRevision += 1;
-    if (this.workspaceTransactions.record(source, delta)) return;
     this.applyWorkspaceDelta(delta);
     if (delta.kind !== "script_status")
       this.noteLiveCursor(
@@ -331,9 +339,13 @@ export class DirectorySync {
         });
       }
     });
+    const unsubscribeDeleted = client.on("agent_deleted", ({ payload }) => {
+      if (active && this.isCurrent(client, source)) this.removeAgent(payload.agentId);
+    });
     this.releaseAttentionAcknowledgements = () => {
       active = false;
       unsubscribe();
+      unsubscribeDeleted();
     };
   }
 
@@ -443,6 +455,7 @@ export class DirectorySync {
   }
 
   async prepareAgentRoute(agentId: string): Promise<void> {
+    if (this.deletedAgentIds.has(agentId)) throw agentNotFoundError(agentId);
     await this.loadCachedAgent(agentId);
     const agent = useSessionStore.getState().sessions[this.serverId]?.agents.get(agentId);
     if (agent?.workspaceId) await this.loadCachedWorkspace(agent.workspaceId);
@@ -499,9 +512,17 @@ export class DirectorySync {
     agentId: string,
     request: Parameters<DaemonClient["fetchAgentTimeline"]>[1],
   ): Promise<Awaited<ReturnType<DaemonClient["fetchAgentTimeline"]>>> {
+    if (this.deletedAgentIds.has(agentId)) throw agentNotFoundError(agentId);
     const { client } = this.requireOnline();
     const token = this.agents.captureTimeline(agentId);
-    const page = await fetchAgentTimelineOnce(client, agentId, request);
+    let page: Awaited<ReturnType<DaemonClient["fetchAgentTimeline"]>>;
+    try {
+      page = await fetchAgentTimelineOnce(client, agentId, request);
+    } catch (error) {
+      if (isAgentNotFoundError(error)) this.removeAgent(agentId);
+      throw error;
+    }
+    if (this.deletedAgentIds.has(agentId)) throw agentNotFoundError(agentId);
     if (page.agent && this.agents.submitTimelineAgent(token, page.agent)) {
       this.revision += 1;
       this.persistCheckpoint();
@@ -556,7 +577,7 @@ export class DirectorySync {
       return { agents, subscriptionId: completion.snapshot.subscriptionId };
     } catch (error) {
       const deltas = this.agentTransactions.fail(transaction);
-      if (deltas) for (const delta of deltas) this.agents.applyDelta(delta);
+      if (deltas) for (const delta of deltas) this.receiveAgentDelta(source, delta);
       if (!(error instanceof DirectoryRefreshSupersededError)) {
         this.callbacks.markAgentError(error instanceof Error ? error.message : String(error));
       }
@@ -617,7 +638,7 @@ export class DirectorySync {
       this.completeWorkspaceRefresh(client, source, transaction);
     } catch (error) {
       const deltas = this.workspaceTransactions.fail(transaction);
-      if (deltas) for (const delta of deltas) this.applyWorkspaceDelta(delta);
+      if (deltas) for (const delta of deltas) this.receiveWorkspaceDelta(source, delta);
       throw error;
     }
   }
@@ -708,6 +729,14 @@ export class DirectorySync {
   }
 
   removeAgent(agentId: string): void {
+    if (this.deletedAgentIds.has(agentId)) return;
+    this.deletedAgentIds.add(agentId);
+    this.routeDemandIds.delete(agentId);
+    this.agents.remove(agentId);
+    this.callbacks.onAgentDeleted?.(agentId);
+  }
+
+  forgetAgentSnapshot(agentId: string): void {
     this.agents.remove(agentId);
   }
 
@@ -824,9 +853,13 @@ export class DirectorySync {
     snapshot: AgentSnapshot,
     deltas: readonly AgentDirectoryDelta[],
   ): Map<string, Agent> {
+    const entries = snapshot.entries.filter((entry) => !this.deletedAgentIds.has(entry.agent.id));
+    const fresh = this.filterSnapshotDeltas(deltas, () => "agents", {
+      agents: snapshot.syncCursor,
+    }).filter((delta) => delta.kind === "remove" || !this.deletedAgentIds.has(delta.agent.id));
     return snapshot.syncMode === "changes"
-      ? this.agents.commitChanges(snapshot.entries, snapshot.syncRemovals, deltas)
-      : this.agents.commitSnapshot(snapshot.entries, deltas);
+      ? this.agents.commitChanges(entries, snapshot.syncRemovals, fresh)
+      : this.agents.commitSnapshot(entries, fresh);
   }
 
   private persistAgentCursors(
@@ -834,7 +867,10 @@ export class DirectorySync {
     deltas: readonly AgentDirectoryDelta[],
   ): void {
     if (snapshot.syncCursor) this.writeCursor("agents", snapshot.syncCursor);
-    for (const delta of deltas) this.noteLiveCursor("agents", delta);
+    for (const delta of this.filterSnapshotDeltas(deltas, () => "agents", {
+      agents: snapshot.syncCursor,
+    }))
+      this.noteLiveCursor("agents", delta);
   }
 
   private async fetchProjectSnapshot(
@@ -883,7 +919,12 @@ export class DirectorySync {
     this.revision += 1;
     this.workspaceRevision += 1;
     const previous = this.readWorkspaceState();
-    const deltaMutations = this.workspaces.commitSnapshot(completion.snapshot, completion.deltas);
+    const deltas = this.filterSnapshotDeltas(
+      completion.deltas,
+      (delta) => this.workspaceDeltaEntity(delta),
+      completion.snapshot.syncCursors ?? {},
+    );
+    const deltaMutations = this.workspaces.commitSnapshot(completion.snapshot, deltas);
     const next = this.workspaces.snapshot();
     const workspaceIds =
       completion.snapshot.syncModes?.workspaces === "changes"
@@ -901,7 +942,7 @@ export class DirectorySync {
     for (const [entity, cursor] of Object.entries(completion.snapshot.syncCursors ?? {})) {
       if (cursor) this.writeCursor(entity as "projects" | "workspaces", cursor);
     }
-    for (const delta of completion.deltas) {
+    for (const delta of deltas) {
       if (delta.kind === "script_status") continue;
       const entity = "projectId" in delta || "project" in delta ? "projects" : "workspaces";
       this.noteLiveCursor(entity, delta);
@@ -964,6 +1005,43 @@ export class DirectorySync {
     });
   }
 
+  private workspaceDeltaEntity(delta: WorkspaceDirectoryDelta): "projects" | "workspaces" | null {
+    if (delta.kind === "script_status") return null;
+    return "projectId" in delta || "project" in delta ? "projects" : "workspaces";
+  }
+
+  private isFreshDelta(
+    entity: keyof DirectoryCheckpoint,
+    delta: object,
+    cursor = this.cursors[entity],
+  ): boolean {
+    const generation = "generation" in delta ? delta.generation : undefined;
+    const seq = "seq" in delta ? delta.seq : undefined;
+    if (typeof generation !== "string" || typeof seq !== "number") return true;
+    if (this.retiredGenerations.get(entity)?.has(generation)) return false;
+    return cursor?.generation !== generation || seq > cursor.afterSeq;
+  }
+
+  private filterSnapshotDeltas<T extends object>(
+    deltas: readonly T[],
+    entityFor: (delta: T) => keyof DirectoryCheckpoint | null,
+    snapshotCursors: DirectoryCheckpoint,
+  ): T[] {
+    const cursors = { ...this.cursors, ...snapshotCursors };
+    return deltas.filter((delta) => {
+      const entity = entityFor(delta);
+      if (!entity) return true;
+      const generation = "generation" in delta ? delta.generation : undefined;
+      const seq = "seq" in delta ? delta.seq : undefined;
+      const fence = snapshotCursors[entity];
+      if (fence && generation && generation !== fence.generation) return false;
+      if (!this.isFreshDelta(entity, delta, cursors[entity])) return false;
+      if (typeof generation === "string" && typeof seq === "number")
+        cursors[entity] = { generation, afterSeq: seq };
+      return true;
+    });
+  }
+
   private readCursors(): DirectoryCheckpoint {
     return this.cursors;
   }
@@ -975,6 +1053,12 @@ export class DirectorySync {
     const current = this.readCursors();
     const previous = current[entity];
     if (previous?.generation === cursor.generation && previous.afterSeq >= cursor.afterSeq) return;
+    if (this.retiredGenerations.get(entity)?.has(cursor.generation)) return;
+    if (previous && previous.generation !== cursor.generation) {
+      const retired = this.retiredGenerations.get(entity) ?? new Set<string>();
+      retired.add(previous.generation);
+      this.retiredGenerations.set(entity, retired);
+    }
     this.cursors = { ...current, [entity]: cursor };
   }
 
@@ -1038,8 +1122,10 @@ export class DirectorySync {
   }
 
   private flushAbortedTransactions(): void {
-    for (const delta of this.agentTransactions.abort()) this.agents.applyDelta(delta);
-    for (const delta of this.workspaceTransactions.abort()) this.applyWorkspaceDelta(delta);
+    for (const delta of this.agentTransactions.abort())
+      this.receiveAgentDelta(this.connection.source, delta);
+    for (const delta of this.workspaceTransactions.abort())
+      this.receiveWorkspaceDelta(this.connection.source, delta);
   }
 
   private abortPendingSessionWaits(): void {

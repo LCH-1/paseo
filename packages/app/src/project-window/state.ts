@@ -5,6 +5,13 @@ export function getProjectWindowScope(): DesktopProjectWindowScope | null {
   return getDesktopHost()?.projectWindow ?? null;
 }
 
+export function filterProjectWindowHosts<T extends { serverId: string }>(
+  hosts: T[],
+  scope = getProjectWindowScope(),
+): T[] {
+  return scope ? hosts.filter((host) => host.serverId === scope.serverId) : hosts;
+}
+
 const WINDOW_STORAGE_KEYS = new Set([
   "paseo-drafts",
   "panel-state",

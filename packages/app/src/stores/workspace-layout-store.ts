@@ -223,6 +223,7 @@ interface WorkspaceLayoutStore {
   unpinAgent: (workspaceKey: string, agentId: string) => void;
   hideAgent: (workspaceKey: string, agentId: string) => void;
   unhideAgent: (workspaceKey: string, agentId: string) => void;
+  removeDeletedAgentTabs: (serverId: string, agentId: string) => void;
   purgeWorkspace: (workspaceKey: string) => void;
 }
 
@@ -253,6 +254,19 @@ function rememberClosedTab(
       ],
     },
   };
+}
+
+function persistedClosedTabs(
+  histories: Record<string, readonly ClosedWorkspaceTab[]> = {},
+): Record<string, ClosedWorkspaceTab[]> {
+  return Object.fromEntries(
+    Object.entries(histories).map(([key, entries]) => [
+      key,
+      entries
+        .filter(({ tab }) => tab.target.kind !== "new_tab" && tab.target.kind !== "commit_diff")
+        .slice(-MAX_CLOSED_TABS),
+    ]),
+  );
 }
 
 const LEGACY_EXPLORER_SIDEBAR_REFERENCE_WIDTH = 1440;
@@ -2074,6 +2088,54 @@ export function createWorkspaceLayoutStore(
             };
           });
         },
+        removeDeletedAgentTabs: (serverId, agentId) => {
+          const targetsAgent = (tab: WorkspaceTab) =>
+            (tab.target.kind === "agent" && tab.target.agentId === agentId) ||
+            (tab.target.kind === "provider_subagent" && tab.target.parentAgentId === agentId) ||
+            (tab.target.kind === "plugin" &&
+              tab.target.context === "agent" &&
+              tab.target.agentId === agentId);
+          const keys = new Set(
+            [
+              ...Object.keys(get().layoutByWorkspace),
+              ...Object.keys(get().sheetsByWorkspace),
+              ...Object.keys(get().closedTabsByWorkspace),
+              ...Object.keys(get().pinnedAgentIdsByWorkspace),
+            ].filter((key) => key.startsWith(`${serverId}:`)),
+          );
+          for (const key of keys) {
+            const layout = get().layoutByWorkspace[key];
+            const tabs = [
+              ...(layout ? collectAllTabs(layout.root) : []),
+              ...getSheets(get(), key).map((sheet) => sheet.tab),
+            ];
+            for (const tab of tabs) if (targetsAgent(tab)) get().closeTab(key, tab.tabId);
+          }
+          set((state) => {
+            let pinned = state.pinnedAgentIdsByWorkspace;
+            let hidden = state.hiddenAgentIdsByWorkspace;
+            let closed = state.closedTabsByWorkspace;
+            for (const key of keys) {
+              pinned = removeAgentIdFromWorkspaceSet(pinned, key, agentId);
+              hidden = removeAgentIdFromWorkspaceSet(hidden, key, agentId);
+              const history = closed[key];
+              const retained = history?.filter(({ tab }) => !targetsAgent(tab));
+              if (history && retained?.length !== history.length) {
+                if (closed === state.closedTabsByWorkspace) closed = Object.assign({}, closed);
+                closed[key] = retained!;
+              }
+            }
+            return pinned === state.pinnedAgentIdsByWorkspace &&
+              hidden === state.hiddenAgentIdsByWorkspace &&
+              closed === state.closedTabsByWorkspace
+              ? state
+              : {
+                  pinnedAgentIdsByWorkspace: pinned,
+                  hiddenAgentIdsByWorkspace: hidden,
+                  closedTabsByWorkspace: closed,
+                };
+          });
+        },
         hideAgent: (workspaceKey, agentId) => {
           const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
           const normalizedAgentId = trimNonEmpty(agentId);
@@ -2198,6 +2260,8 @@ export function createWorkspaceLayoutStore(
             );
           }
           return {
+            closedTabsByWorkspace: persistedClosedTabs(state.closedTabsByWorkspace),
+            closedTabSequence: state.closedTabSequence,
             layoutByWorkspace,
             pinnedAgentIdsByWorkspace: Object.fromEntries(
               Object.entries(state.pinnedAgentIdsByWorkspace).map(([key, agentIds]) => [
@@ -2218,6 +2282,7 @@ export function createWorkspaceLayoutStore(
             return currentState;
           }
           const layoutByWorkspace: Record<string, WorkspaceLayout> = {};
+          const closedTabsByWorkspace = persistedClosedTabs(result.data.closedTabsByWorkspace);
           const explorerSidebarPaneIdByWorkspace: Record<string, string | null> = {
             ...(result.data.explorerSidebarPaneIdByWorkspace ??
               result.data.explorerPaneIdByWorkspace),
@@ -2245,6 +2310,12 @@ export function createWorkspaceLayoutStore(
           }
           return {
             ...currentState,
+            closedTabsByWorkspace,
+            closedTabSequence: Object.values(closedTabsByWorkspace).reduce(
+              (sequence, entries) =>
+                entries.reduce((max, entry) => Math.max(max, entry.sequence ?? 0), sequence),
+              result.data.closedTabSequence ?? 0,
+            ),
             layoutByWorkspace,
             pinnedAgentIdsByWorkspace: Object.fromEntries(
               Object.entries(result.data.pinnedAgentIdsByWorkspace ?? {}).map(([key, agentIds]) => [
