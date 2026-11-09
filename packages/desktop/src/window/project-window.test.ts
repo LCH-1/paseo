@@ -4,6 +4,7 @@ import {
   parseProjectWindowTarget,
   projectWindowArgument,
   projectWindowRoute,
+  resolveProjectWindowTitle,
 } from "./project-window.js";
 
 const target = {
@@ -14,6 +15,20 @@ const target = {
 };
 
 describe("project windows", () => {
+  it.each(["", "  ", "Paseo", "Workspace"])(
+    "keeps the project title for an empty page title %j",
+    (title) => {
+      expect(resolveProjectWindowTitle({ ...target, windowId: "window" }, title, "Paseo")).toBe(
+        "한글 프로젝트 · Paseo",
+      );
+    },
+  );
+
+  it("preserves a meaningful conversation or file title", () => {
+    expect(resolveProjectWindowTitle({ ...target, windowId: "window" }, "Review PR", "Paseo")).toBe(
+      "Review PR",
+    );
+  });
   it("isolates two windows for the same project and preserves the target through the native argument", () => {
     const first = createProjectWindowScope(target);
     const second = createProjectWindowScope(target);

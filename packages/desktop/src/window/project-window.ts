@@ -11,6 +11,18 @@ export interface ProjectWindowScope extends ProjectWindowTarget {
   windowId: string;
 }
 
+export function resolveProjectWindowTitle(
+  scope: ProjectWindowScope,
+  pageTitle: string,
+  appName: string,
+): string {
+  const title = pageTitle.trim();
+  if (!title || title === appName || title === "Paseo" || title === "Workspace") {
+    return `${scope.projectName} · ${appName}`;
+  }
+  return pageTitle;
+}
+
 export function parseProjectWindowTarget(value: unknown): ProjectWindowTarget {
   if (!value || typeof value !== "object") throw new Error("Invalid project window target");
   const fields = ["serverId", "projectId", "projectName", "directory"] as const;

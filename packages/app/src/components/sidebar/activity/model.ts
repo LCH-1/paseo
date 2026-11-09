@@ -4,7 +4,7 @@ import type { ConversationSummary } from "@/screens/session-history/conversation
 import { describeCompletionTimeAgo } from "@/utils/time";
 import type { TFunction } from "i18next";
 
-export type SidebarActivityView = "all" | "running" | "unreviewed";
+export type SidebarActivityView = "all" | "running" | "unreviewed" | "projects";
 
 export interface SidebarActivitySessions {
   running: AggregatedAgent[];

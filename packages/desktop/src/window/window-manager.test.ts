@@ -137,8 +137,10 @@ describe("multi-window session persistence", () => {
     const h = sessionHarness();
     const one = new SessionTestWindow(),
       two = new SessionTestWindow();
+    expect(h.manager.hasOpenWindows()).toBe(false);
     h.manager.track(one, h.entry("one"));
     h.manager.track(two, h.entry("two"));
+    expect(h.manager.hasOpenWindows()).toBe(true);
     one.emit("close");
     one.isDestroyed.mockReturnValue(true);
     one.emit("closed");
@@ -146,6 +148,7 @@ describe("multi-window session persistence", () => {
     two.emit("close");
     two.isDestroyed.mockReturnValue(true);
     two.emit("closed");
+    expect(h.manager.hasOpenWindows()).toBe(false);
     expect(h.saved().windows.map((entry) => entry.id)).toEqual(["two"]);
     h.manager.track(new SessionTestWindow(), h.entry("new"));
     h.manager.beginQuit();

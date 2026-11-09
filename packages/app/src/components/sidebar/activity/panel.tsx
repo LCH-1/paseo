@@ -15,6 +15,10 @@ import { create } from "zustand";
 import { RetainedPanel, useRetainedPanelActive } from "@/components/retained-panel";
 import { PressHighlight } from "@/components/ui/press-highlight";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/contexts/toast-context";
+import { getDesktopHost } from "@/desktop/host";
+import { useProjects } from "@/hooks/use-projects";
+import type { ProjectHostEntry } from "@/utils/projects";
 import { SidebarProviderIcon } from "../sidebar-provider-icon";
 import { useAggregatedAgents, type AggregatedAgent } from "@/hooks/use-aggregated-agents";
 import { getHostRuntimeStore, useHosts } from "@/runtime/host-runtime";
@@ -45,7 +49,7 @@ const useSidebarActivityStore = create<SidebarActivityState>((set) => ({
   view: "all",
   setView: (view) => set({ view }),
 }));
-const activityViews = ["all", "running", "unreviewed"] as const;
+const activityViews = ["all", "running", "unreviewed", "projects"] as const;
 
 function sessionKey(row: ActivityRow) {
   return `${row.agent.serverId}:${row.agent.id}`;
@@ -71,7 +75,9 @@ export function SidebarActivityPanel({
     [agents, serverIds, hostFilters],
   );
   const showingAll = view === "all";
-  const sessions = showingAll ? [] : groups[view];
+  const showingSessions = view === "running" || view === "unreviewed";
+  const sessions = showingSessions ? groups[view] : [];
+  const canOpenProjects = Boolean(getDesktopHost()?.window?.openProject);
   let emptyLabel = t("sidebar.activity.emptyUnreviewed");
   if (view === "running") emptyLabel = t("sidebar.activity.emptyRunning");
   if (isInitialLoad) emptyLabel = t("sidebar.activity.loading");
@@ -82,9 +88,10 @@ export function SidebarActivityPanel({
       <View style={styles.tabsSection} testID="sidebar-activity-filter-section">
         <View style={styles.tabs} accessibilityRole="tablist" testID="sidebar-activity-tabs">
           {activityViews.map((tab) => {
+            if (tab === "projects" && !canOpenProjects) return null;
             const selected = view === tab;
-            const label = t(`sidebar.activity.${tab}`);
-            const count = tab === "all" ? null : groups[tab].length;
+            const label = t(tab === "projects" ? "settings.projects" : `sidebar.activity.${tab}`);
+            const count = tab === "running" || tab === "unreviewed" ? groups[tab].length : null;
             return (
               <ActivityTab key={tab} tab={tab} selected={selected} label={label} count={count} />
             );
@@ -92,9 +99,9 @@ export function SidebarActivityPanel({
         </View>
       </View>
       <RetainedPanel active={showingAll}>{children}</RetainedPanel>
-      <RetainedPanel active={!showingAll}>
+      <RetainedPanel active={showingSessions}>
         {view === "unreviewed" ? <ActivityMarkAllRead agents={sessions} /> : null}
-        {showingAll ? null : (
+        {showingSessions ? (
           <ActivitySessionList
             key={view}
             active={active}
@@ -102,11 +109,158 @@ export function SidebarActivityPanel({
             emptyState={emptyState}
             onSessionPress={onSessionPress}
           />
-        )}
+        ) : null}
       </RetainedPanel>
+      {view === "projects" ? <ProjectWindowList active={active} /> : null}
     </View>
   );
 }
+
+type ProjectWindowListRow =
+  | { kind: "host"; key: string; label: string }
+  | { kind: "project"; key: string; host: ProjectHostEntry; name: string };
+
+function projectWindowRowKey(row: ProjectWindowListRow) {
+  return `${row.kind}:${row.key}`;
+}
+
+function ProjectWindowList({ active }: { active: boolean }) {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const hosts = useHosts();
+  const { projects, hostErrors, isLoading, refetch } = useProjects({ enabled: active });
+  const opening = useRef(false);
+  const [pending, setPending] = useState<string | null>(null);
+  const rows = useMemo(() => {
+    const result: ProjectWindowListRow[] = [];
+    for (const server of hosts) {
+      const entries = projects.flatMap((project) =>
+        project.hosts
+          .filter((host) => host.serverId === server.serverId)
+          .map((host) => ({
+            kind: "project" as const,
+            key: `${host.serverId}:${host.projectId}`,
+            host,
+            name: host.projectCustomName ?? project.projectCustomName ?? project.projectName,
+          })),
+      );
+      if (entries.length === 0) continue;
+      result.push({ kind: "host", key: server.serverId, label: server.label }, ...entries);
+    }
+    return result;
+  }, [hosts, projects]);
+  const open = useCallback(
+    async (row: Extract<ProjectWindowListRow, { kind: "project" }>) => {
+      const openProject = getDesktopHost()?.window?.openProject;
+      if (!openProject || opening.current) return;
+      opening.current = true;
+      setPending(row.key);
+      try {
+        await openProject({
+          serverId: row.host.serverId,
+          projectId: row.host.projectId,
+          projectName: row.name,
+          directory: row.host.repoRoot,
+        });
+      } catch (error) {
+        console.warn("Failed to open project window", error);
+        toast.error(t("sidebar.project.actions.openNewWindowFailed"));
+      } finally {
+        opening.current = false;
+        setPending(null);
+      }
+    },
+    [t, toast],
+  );
+  const header = useMemo(
+    () =>
+      hostErrors.length > 0 ? (
+        <View>
+          {hostErrors.map((error) => (
+            <Text key={error.serverId} accessibilityRole="alert" style={styles.readError}>
+              {t("settings.projectList.hostLoadFailed", {
+                hostName: error.serverName,
+                message: error.message,
+              })}
+            </Text>
+          ))}
+          <Button variant="ghost" size="xs" onPress={refetch}>
+            {t("common.actions.retry")}
+          </Button>
+        </View>
+      ) : null,
+    [hostErrors, refetch, t],
+  );
+  const empty = useMemo(
+    () => (
+      <Text style={styles.empty}>
+        {t(isLoading ? "common.states.loading" : "sidebar.project.empty.title")}
+      </Text>
+    ),
+    [isLoading, t],
+  );
+  const renderProject = useCallback(
+    ({ item }: { item: ProjectWindowListRow }) => (
+      <ProjectWindowRow item={item} pending={pending} onOpen={open} />
+    ),
+    [pending, open],
+  );
+  return (
+    <FlatList
+      testID="sidebar-project-list"
+      data={rows}
+      keyExtractor={projectWindowRowKey}
+      contentContainerStyle={styles.listContent}
+      ListHeaderComponent={header}
+      ListEmptyComponent={empty}
+      renderItem={renderProject}
+    />
+  );
+}
+
+const ProjectWindowRow = memo(function ProjectWindowRow({
+  item,
+  pending,
+  onOpen,
+}: {
+  item: ProjectWindowListRow;
+  pending: string | null;
+  onOpen: (row: Extract<ProjectWindowListRow, { kind: "project" }>) => Promise<void>;
+}) {
+  const open = useCallback(() => {
+    if (item.kind === "project") void onOpen(item);
+  }, [item, onOpen]);
+  const label = useMemo(
+    () =>
+      item.kind === "project" ? (
+        <View style={styles.projectLabel}>
+          <Text numberOfLines={1} style={styles.title}>
+            {item.name}
+          </Text>
+          <Text numberOfLines={1} style={styles.preview}>
+            {item.host.repoRoot}
+          </Text>
+        </View>
+      ) : null,
+    [item],
+  );
+  return item.kind === "host" ? (
+    <Text accessibilityRole="header" style={styles.projectHost}>
+      {item.label}
+    </Text>
+  ) : (
+    <Button
+      testID={`sidebar-project-${item.key}`}
+      accessibilityLabel={item.name}
+      variant="ghost"
+      disabled={pending !== null}
+      loading={pending === item.key}
+      onPress={open}
+      style={styles.projectButton}
+      trailing={label}
+    />
+  );
+});
 
 function ActivityMarkAllRead({ agents }: { agents: AggregatedAgent[] }) {
   const { t } = useTranslation();
@@ -385,6 +539,18 @@ function ActivityAges({
 
 const styles = StyleSheet.create((theme) => ({
   container: { flex: 1, minHeight: 0 },
+  projectHost: {
+    padding: theme.spacing[2],
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    fontWeight: "600",
+  },
+  projectButton: {
+    justifyContent: "flex-start",
+    height: "auto",
+    paddingVertical: theme.spacing[2],
+  },
+  projectLabel: { flex: 1, minWidth: 0, gap: theme.spacing[1] },
   readActions: { alignItems: "flex-end", paddingHorizontal: theme.spacing[2] },
   readError: {
     color: theme.colors.destructive,

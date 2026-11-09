@@ -15,6 +15,7 @@ import {
   createProjectWindowScope,
   projectWindowArgument,
   projectWindowRoute,
+  resolveProjectWindowTitle,
   type ProjectWindowScope,
 } from "./window/project-window.js";
 import { pathToFileURL } from "node:url";
@@ -760,6 +761,16 @@ async function createWindow(options: CreateDesktopWindowOptions = {}): Promise<B
   applyDesktopWindowChromeMode({ win: mainWindow, mode: DESKTOP_WINDOW_CHROME_MODE });
 
   const webContentsId = mainWindow.webContents.id;
+  const projectScope = options.projectWindow;
+  if (projectScope) {
+    mainWindow.on("page-title-updated", (event, title) => {
+      const resolvedTitle = resolveProjectWindowTitle(projectScope, title, APP_NAME);
+      if (resolvedTitle !== title) {
+        event.preventDefault();
+        mainWindow.setTitle(resolvedTitle);
+      }
+    });
+  }
   if (options.projectWindow) projectWindowIds.add(webContentsId);
   options.onCreated?.(webContentsId);
   mainWindow.webContents.on("did-start-navigation", (_event, _url, isSameDocument, isMainFrame) => {
@@ -1082,11 +1093,7 @@ async function bootstrap(): Promise<void> {
   });
   const initialAgentNavigation = pendingAgentNavigation;
   pendingAgentNavigation = null;
-  if (
-    BrowserWindow.getAllWindows().length === 0 ||
-    initialAgentNavigation ||
-    pendingOpenProjectPath
-  ) {
+  if (!windowSessionManager.hasOpenWindows() || initialAgentNavigation || pendingOpenProjectPath) {
     await desktopWindowOwner.openPrimary({
       initialRoute: initialAgentNavigation ? buildAgentDeepLinkRoute(initialAgentNavigation) : null,
       pendingProjectPath: pendingOpenProjectPath,
@@ -1106,7 +1113,7 @@ async function bootstrap(): Promise<void> {
   }
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length > 0) return;
+    if (windowSessionManager?.hasOpenWindows()) return;
     void desktopWindowOwner.restoreWhenActivated().catch((error) => {
       console.error("Failed to restore a desktop window after activation", error);
     });

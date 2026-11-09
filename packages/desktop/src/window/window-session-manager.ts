@@ -88,6 +88,9 @@ export function createWindowSessionManager(input: {
   }
 
   return {
+    hasOpenWindows() {
+      return [...active.values()].some((item) => !item.window.isDestroyed());
+    },
     async load() {
       session = await input.store.load();
       return session;
