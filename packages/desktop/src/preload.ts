@@ -30,16 +30,38 @@ interface AttachedBrowserRegistration {
   webContentsId: number;
 }
 
+const projectWindow: ProjectWindowScope | null = (() => {
+  const prefix = "--paseo-project-window=";
+  const value = process.argv.find((argument) => argument.startsWith(prefix));
+  return value ? JSON.parse(decodeURIComponent(value.slice(prefix.length))) : null;
+})();
+
+function scopeAttachmentCommand(command: string, args?: Record<string, unknown>) {
+  if (!projectWindow) return args;
+  const prefix = `pw_${projectWindow.windowId}__`;
+  const writes = ["write_attachment_base64", "write_attachment_bytes", "copy_attachment_file"];
+  if (writes.includes(command) && typeof args?.attachmentId === "string") {
+    return { ...args, attachmentId: prefix + args.attachmentId };
+  }
+  if (command === "garbage_collect_attachment_files") {
+    const referencedIds = args?.referencedIds;
+    return {
+      ...args,
+      projectWindowId: projectWindow.windowId,
+      referencedIds: Array.isArray(referencedIds)
+        ? referencedIds.map((id) => (typeof id === "string" ? prefix + id : id))
+        : referencedIds,
+    };
+  }
+  return args;
+}
+
 contextBridge.exposeInMainWorld("paseoDesktop", {
   platform: process.platform,
-  projectWindow: ((): ProjectWindowScope | null => {
-    const prefix = "--paseo-project-window=";
-    const value = process.argv.find((argument) => argument.startsWith(prefix));
-    return value ? JSON.parse(decodeURIComponent(value.slice(prefix.length))) : null;
-  })(),
+  projectWindow,
   windowChromeMode: readWindowChromeMode(),
   invoke: (command: string, args?: Record<string, unknown>) =>
-    ipcRenderer.invoke("paseo:invoke", command, args),
+    ipcRenderer.invoke("paseo:invoke", command, scopeAttachmentCommand(command, args)),
   getPendingOpenProject: () =>
     ipcRenderer.invoke("paseo:get-pending-open-project") as Promise<string | null>,
   agentNavigation: {
@@ -61,8 +83,8 @@ contextBridge.exposeInMainWorld("paseoDesktop", {
     },
   },
   window: {
-    openProject: (projectWindow: ProjectWindowTarget) =>
-      ipcRenderer.invoke("paseo:window:openNew", { projectWindow }),
+    openProject: (target: ProjectWindowTarget) =>
+      ipcRenderer.invoke("paseo:window:openNew", { projectWindow: target }),
     openNew: (options?: {
       pendingOpenProjectPath?: string | null;
       projectWindow?: ProjectWindowTarget;

@@ -162,7 +162,13 @@ export async function deleteManagedAttachmentFile(input: { path?: unknown }): Pr
 
 export async function garbageCollectManagedAttachmentFiles(input: {
   referencedIds?: unknown;
+  projectWindowId?: unknown;
 }): Promise<number> {
+  const scope = input.projectWindowId;
+  if (scope != null && (typeof scope !== "string" || !/^[0-9a-f-]{36}$/i.test(scope))) {
+    throw new Error("Invalid project window attachment scope");
+  }
+  const scopePrefix = typeof scope === "string" ? `pw_${scope}__` : null;
   const dirPath = await ensureAttachmentsDir();
   const referencedIds = Array.isArray(input.referencedIds)
     ? new Set(
@@ -174,9 +180,12 @@ export async function garbageCollectManagedAttachmentFiles(input: {
     : new Set<string>();
 
   const entries = await readdir(dirPath, { withFileTypes: true });
-  const toDelete = entries.filter(
-    (entry) => entry.isFile() && !referencedIds.has(path.parse(entry.name).name),
-  );
+  const toDelete = entries.filter((entry) => {
+    if (!entry.isFile()) return false;
+    const id = path.parse(entry.name).name;
+    const inScope = scopePrefix ? id.startsWith(scopePrefix) : !/^pw_[0-9a-f-]{36}__/i.test(id);
+    return inScope && !referencedIds.has(id);
+  });
 
   await Promise.all(toDelete.map((entry) => rm(path.join(dirPath, entry.name), { force: true })));
 

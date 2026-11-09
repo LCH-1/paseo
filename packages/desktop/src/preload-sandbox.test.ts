@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { PASEO_BROWSER_PROFILE_PARTITION } from "./features/browser-profile.js";
@@ -79,6 +80,74 @@ function runtimeModuleSpecifiers(source: string): string[] {
 }
 
 describe("preload sandbox safety", () => {
+  it("namespaces dedicated-window attachment writes and GC without changing other IPCs", async () => {
+    const source = readFileSync(preloadPath, "utf8");
+    const compiled = ts.transpileModule(source, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const scope = {
+      windowId: "11111111-1111-4111-8111-111111111111",
+      serverId: "host",
+      projectId: "project",
+      projectName: "Project",
+      directory: "/project",
+    };
+    const calls: unknown[][] = [];
+    const exposed: {
+      invoke?: (command: string, args: Record<string, unknown>) => Promise<unknown>;
+    } = {};
+    const electron = {
+      contextBridge: {
+        exposeInMainWorld(_name: string, value: typeof exposed) {
+          Object.assign(exposed, value);
+        },
+      },
+      ipcRenderer: {
+        invoke(...args: unknown[]) {
+          calls.push(args);
+          return Promise.resolve();
+        },
+      },
+      webUtils: {},
+    };
+    const context = {
+      exports: {},
+      require: (name: string) => {
+        if (name !== "electron") throw Error("Sandbox import");
+        return electron;
+      },
+      process: {
+        argv: [`--paseo-project-window=${encodeURIComponent(JSON.stringify(scope))}`],
+        platform: "win32",
+      },
+    };
+    runInNewContext(compiled, context);
+    if (!exposed.invoke) throw Error("Missing preload bridge");
+    await exposed.invoke("write_attachment_bytes", { attachmentId: "image", bytes: [1, 2] });
+    await exposed.invoke("garbage_collect_attachment_files", { referencedIds: ["image"] });
+    await exposed.invoke("unrelated", { id: "image" });
+    expect(JSON.parse(JSON.stringify(calls))).toEqual([
+      [
+        "paseo:invoke",
+        "write_attachment_bytes",
+        { attachmentId: `pw_${scope.windowId}__image`, bytes: [1, 2] },
+      ],
+      [
+        "paseo:invoke",
+        "garbage_collect_attachment_files",
+        { referencedIds: [`pw_${scope.windowId}__image`], projectWindowId: scope.windowId },
+      ],
+      ["paseo:invoke", "unrelated", { id: "image" }],
+    ]);
+    calls.length = 0;
+    runInNewContext(compiled, { ...context, process: { ...context.process, argv: [] } });
+    await exposed.invoke("write_attachment_bytes", { attachmentId: "image", bytes: [1] });
+    expect(JSON.parse(JSON.stringify(calls[0]))).toEqual([
+      "paseo:invoke",
+      "write_attachment_bytes",
+      { attachmentId: "image", bytes: [1] },
+    ]);
+  });
   it("only loads Electron's sandbox allowlist at runtime", () => {
     const source = readFileSync(preloadPath, "utf8");
     const disallowed = runtimeModuleSpecifiers(source).filter(
