@@ -4263,10 +4263,10 @@ describe("Codex app-server provider", () => {
 
       const interruptPromise = session.interrupt();
       appServer.startsTurn({ threadId: "thread-1", turnId: "turn-identified-late" });
-      await interruptPromise;
-
+      await appServer.waitForRequest("turn/interrupt");
       expect(interruptedTurns).toEqual([{ threadId: "thread-1", turnId: "turn-identified-late" }]);
-      appServer.completeTurn();
+      appServer.completeTurn({ status: "interrupted" });
+      await interruptPromise;
       await resultPromise;
       appServer.assertNoErrors();
     } finally {
@@ -4291,16 +4291,18 @@ describe("Codex app-server provider", () => {
     );
     try {
       await session.startTurn("Start without a notification.");
-      await expect(session.interrupt()).resolves.toBeUndefined();
+      const interrupt = session.interrupt();
+      await appServer.waitForRequest("turn/interrupt");
+      appServer.completeTurn({ status: "interrupted" });
+      await expect(interrupt).resolves.toBeUndefined();
       expect(interruptedTurns).toEqual([{ threadId: "thread-1", turnId: "native-from-response" }]);
-      appServer.completeTurn();
       appServer.assertNoErrors();
     } finally {
       await session.close();
     }
   });
 
-  test("an acknowledged interrupt retires the turn without a terminal notification", async () => {
+  test("retires an acknowledged interrupt only after a native terminal notification", async () => {
     const appServer = createFakeCodexAppServer({ "turn/interrupt": () => ({}) });
     const session = new CodexAppServerAgentSession(
       createConfig(),
@@ -4314,7 +4316,10 @@ describe("Codex app-server provider", () => {
       const run = session.run("stop this turn");
       await appServer.waitForTurnStart();
       appServer.startsTurn({ threadId: "thread-1", turnId: "stopped-native-turn" });
-      await session.interrupt();
+      const interrupt = session.interrupt();
+      await appServer.waitForRequest("turn/interrupt");
+      appServer.completeTurn({ status: "interrupted" });
+      await interrupt;
       await expect(run).resolves.toMatchObject({ sessionId: "thread-1" });
       expect(events.filter((event) => event.type === "turn_canceled")).toHaveLength(1);
 
@@ -4341,9 +4346,128 @@ describe("Codex app-server provider", () => {
     }
   });
 
+  test("an unconfirmed stop cannot start another prompt on the same native turn", async () => {
+    let nativeFinished = false;
+    const appServer = createFakeCodexAppServer({
+      "turn/start": () => ({
+        turn: { id: nativeFinished ? "next-native-turn" : "still-active-native-turn" },
+      }),
+      "turn/interrupt": () => ({}),
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig(),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+    try {
+      await session.startTurn("first prompt");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "still-active-native-turn" });
+      let stopSettled = false;
+      const stop = session.interrupt().then(() => {
+        stopSettled = true;
+        return undefined;
+      });
+      await appServer.waitForRequest("turn/interrupt");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(stopSettled).toBe(false);
+      await expect(session.startTurn("would reuse the running native id")).rejects.toThrow(
+        "already active",
+      );
+
+      nativeFinished = true;
+      appServer.completeTurn({ status: "interrupted" });
+      await stop;
+      await expect(session.startTurn("a distinct native turn")).resolves.toMatchObject({
+        turnId: expect.any(String),
+      });
+      appServer.startsTurn({ threadId: "thread-1", turnId: "next-native-turn" });
+      appServer.completeTurn();
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test.each([true, false])(
+    "duplicate Stops share native confirmation (terminal arrives: %s)",
+    async (terminalArrives) => {
+      let starts = 0;
+      const appServer = createFakeCodexAppServer({
+        "turn/start": () => ({ turn: { id: ++starts === 1 ? "native-A" : "native-B" } }),
+        "turn/interrupt": () => ({}),
+      });
+      const session = new CodexAppServerAgentSession(
+        createConfig(),
+        null,
+        createTestLogger(),
+        async () => appServer.child,
+      );
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+      const complete = (id: string, status: string) =>
+        appServer.child.stdout.write(
+          `${JSON.stringify({ method: "turn/completed", params: { threadId: "thread-1", turn: { id, status } } })}\n`,
+        );
+      try {
+        await session.startTurn("first");
+        appServer.startsTurn({ threadId: "thread-1", turnId: "native-A" });
+        vi.useFakeTimers();
+        const first = session.interrupt();
+        const second = session.interrupt();
+        const result = terminalArrives
+          ? Promise.all([first, second])
+          : Promise.all(
+              [first, second].map((stop) =>
+                expect(stop).rejects.toThrow(
+                  "Codex interrupt was acknowledged but the active turn did not terminate",
+                ),
+              ),
+            );
+        await appServer.waitForRequest("turn/interrupt");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(
+          appServer.requests().filter((request) => request.method === "turn/interrupt"),
+        ).toHaveLength(1);
+        await expect(session.startTurn("blocked until proven stopped")).rejects.toThrow(
+          "already active",
+        );
+        if (terminalArrives) {
+          complete("native-A", "interrupted");
+        } else {
+          await vi.advanceTimersByTimeAsync(2_000);
+          await result;
+          expect(events.filter((event) => event.type === "turn_canceled")).toEqual([]);
+          await expect(session.startTurn("still blocked after ambiguous timeout")).rejects.toThrow(
+            "already active",
+          );
+          complete("native-A", "interrupted");
+        }
+        await result;
+        expect(events.filter((event) => event.type === "turn_canceled")).toHaveLength(1);
+        const next = await session.startTurn("distinct second turn");
+        appServer.startsTurn({ threadId: "thread-1", turnId: "native-B" });
+        events.length = 0;
+        complete("native-A", "interrupted");
+        expect(events).toEqual([]);
+        complete("native-B", "completed");
+        expect(events).toContainEqual(
+          expect.objectContaining({ type: "turn_completed", turnId: next.turnId }),
+        );
+        appServer.assertNoErrors();
+      } finally {
+        vi.useRealTimers();
+        await session.close();
+      }
+    },
+  );
+
   test("a delayed interrupt acknowledgement cannot cancel the next foreground turn", async () => {
     const acknowledged = deferred<unknown>();
-    const appServer = createFakeCodexAppServer({ "turn/interrupt": () => acknowledged.promise });
+    let interruptCalls = 0;
+    const appServer = createFakeCodexAppServer({
+      "turn/interrupt": () => (++interruptCalls === 1 ? acknowledged.promise : {}),
+    });
     const session = new CodexAppServerAgentSession(
       createConfig(),
       null,
@@ -4362,13 +4486,22 @@ describe("Codex app-server provider", () => {
       const next = await session.startTurn("second turn");
       appServer.startsTurn({ threadId: "thread-1", turnId: "second-native-turn" });
       events.length = 0;
+      let secondStopSettled = false;
+      const secondStop = session.interrupt().then(() => {
+        secondStopSettled = true;
+        return undefined;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(interruptCalls).toBe(2);
       acknowledged.resolve({});
       await interrupt;
+      expect(secondStopSettled).toBe(false);
       expect(events.filter((event) => event.type === "turn_canceled")).toEqual([]);
       await expect(session.startTurn("must remain blocked")).rejects.toThrow("already active");
-      appServer.completeTurn();
+      appServer.completeTurn({ status: "interrupted" });
+      await secondStop;
       expect(events).toContainEqual(
-        expect.objectContaining({ type: "turn_completed", turnId: next.turnId }),
+        expect.objectContaining({ type: "turn_canceled", turnId: next.turnId }),
       );
       appServer.assertNoErrors();
     } finally {
@@ -4409,11 +4542,13 @@ describe("Codex app-server provider", () => {
       // out must not publish a false completion or permit another prompt.
       await expect(session.startTurn("must stay blocked")).rejects.toThrow("already active");
       appServer.startsTurn({ threadId: "thread-1", turnId: "native-identified-after-timeout" });
-      await expect(session.interrupt()).resolves.toBeUndefined();
+      const identifiedInterrupt = session.interrupt();
+      await appServer.waitForRequest("turn/interrupt");
+      appServer.completeTurn({ status: "interrupted" });
+      await expect(identifiedInterrupt).resolves.toBeUndefined();
       expect(interruptedTurns).toEqual([
         { threadId: "thread-1", turnId: "native-identified-after-timeout" },
       ]);
-      appServer.completeTurn();
       appServer.assertNoErrors();
     } finally {
       vi.useRealTimers();
@@ -4576,6 +4711,12 @@ describe("Codex app-server provider", () => {
     session.client = {
       request: async (method, params) => {
         requests.push({ method, params });
+        if (method === "turn/interrupt") {
+          asInternals(session).handleNotification("turn/completed", {
+            threadId: "test-thread",
+            turn: { id: "autonomous-turn", status: "interrupted" },
+          });
+        }
         return {};
       },
     };
@@ -7288,7 +7429,10 @@ describe("Codex denied plan approvals", () => {
 describe("Codex interactive resume startup", () => {
   test("delivers an autonomous turn that starts during resume to the first subscriber", async () => {
     const appServer = createFakeCodexAppServer({
-      "turn/interrupt": () => ({}),
+      "turn/interrupt": () => {
+        appServer.completeTurn({ threadId: "saved-thread", status: "interrupted" });
+        return {};
+      },
       "thread/resume": () => {
         appServer.startsTurn({ threadId: "saved-thread", turnId: "autonomous-turn" });
         appServer.says({ threadId: "saved-thread", text: "Working on the goal" });

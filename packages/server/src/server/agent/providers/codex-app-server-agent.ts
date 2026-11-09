@@ -3449,6 +3449,12 @@ export class CodexAppServerAgentSession implements AgentSession {
   private currentThreadId: string | null = null;
   private currentTurnId: string | null = null;
   private readonly completedRootTurnKeys = new Set<string>();
+  private interruption: {
+    foregroundTurnId: string | null;
+    nativeTurnId: string | null;
+    pendingStart: object | null;
+    promise: Promise<void>;
+  } | null = null;
   private pendingForegroundTurnIdentification: {
     foregroundTurnId: string;
     promise: Promise<string | null>;
@@ -5016,6 +5022,34 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   async interrupt(): Promise<void> {
+    const previous = this.interruption;
+    if (
+      previous &&
+      ((previous.foregroundTurnId !== null &&
+        previous.foregroundTurnId === this.activeForegroundTurnId) ||
+        (previous.foregroundTurnId === null &&
+          this.activeForegroundTurnId === null &&
+          previous.nativeTurnId !== null &&
+          previous.nativeTurnId === this.currentTurnId) ||
+        (previous.pendingStart !== null && previous.pendingStart === this.pendingForegroundStart))
+    ) {
+      return previous.promise;
+    }
+    const interruption = {
+      foregroundTurnId: this.activeForegroundTurnId,
+      nativeTurnId: this.currentTurnId,
+      pendingStart: this.pendingForegroundStart,
+      promise: this.interruptForegroundTurn(),
+    };
+    this.interruption = interruption;
+    try {
+      await interruption.promise;
+    } finally {
+      if (this.interruption === interruption) this.interruption = null;
+    }
+  }
+
+  private async interruptForegroundTurn(): Promise<void> {
     const pendingStart = this.pendingForegroundStart;
     if (pendingStart) {
       pendingStart.cancelRequested = true;
@@ -5061,26 +5095,68 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (!turnId || (foregroundTurnId && this.activeForegroundTurnId !== foregroundTurnId)) {
       throw new Error("Cannot interrupt Codex before turn/started identifies the active turn");
     }
-    try {
-      await this.client.request(
-        "turn/interrupt",
-        {
-          threadId: this.currentThreadId,
-          turnId,
-        },
-        INTERRUPT_TIMEOUT_MS,
-      );
-    } catch (error) {
-      if (!isCodexAlreadyIdleInterrupt(error)) {
-        throw error;
+    await this.interruptNativeTurn(this.client, this.currentThreadId, turnId, foregroundTurnId);
+  }
+
+  private async interruptNativeTurn(
+    client: CodexAppServerClient,
+    threadId: string,
+    turnId: string,
+    foregroundTurnId: string | null,
+  ): Promise<void> {
+    let confirmed = false;
+    let resolveTerminal!: () => void;
+    const terminal = new Promise<void>((resolve) => {
+      resolveTerminal = resolve;
+    });
+    const unsubscribe = this.subscribe((event) => {
+      if (
+        event.type !== "turn_completed" &&
+        event.type !== "turn_canceled" &&
+        event.type !== "turn_failed"
+      )
+        return;
+      const matches =
+        foregroundTurnId !== null
+          ? getAgentStreamEventTurnId(event) === foregroundTurnId
+          : this.currentTurnId === turnId && this.activeForegroundTurnId === null;
+      if (matches) {
+        confirmed = true;
+        resolveTerminal();
       }
+    });
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      try {
+        await client.request("turn/interrupt", { threadId, turnId }, INTERRUPT_TIMEOUT_MS);
+      } catch (error) {
+        if (isCodexAlreadyIdleInterrupt(error))
+          this.completeInterruptedTurn(turnId, foregroundTurnId);
+        else if (!confirmed) throw error;
+      }
+      // The RPC reply only acknowledges delivery. Codex can keep this native
+      // turn running and merge the next prompt into it until terminal arrives.
+      await Promise.race([
+        terminal,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error("Codex interrupt was acknowledged but the active turn did not terminate"),
+              ),
+            INTERRUPT_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      unsubscribe();
     }
-    this.completeInterruptedTurn(turnId, foregroundTurnId);
   }
 
   private completeInterruptedTurn(turnId: string, foregroundTurnId: string | null): void {
-    // An acknowledged stop need not be followed by turn/completed. Retire only
-    // the captured turn: its completion and a new start can race the RPC reply.
+    // An explicit already-idle error proves this turn cannot run again. Retire
+    // only the captured turn; its completion can race the RPC error response.
     if (this.currentTurnId !== turnId || this.activeForegroundTurnId !== foregroundTurnId) {
       return;
     }
