@@ -34,11 +34,15 @@ vi.mock("electron", () => ({
 class SessionTestWindow extends EventEmitter {
   url = "paseo://app/h/host/workspace/first";
   bounds = { x: 20, y: 30, width: 1000, height: 700 };
-  webContents = Object.assign(new EventEmitter(), {
+  private contents = Object.assign(new EventEmitter(), {
     getURL: () => this.url,
     isDestroyed: () => false,
   });
   isDestroyed = vi.fn(() => false);
+  get webContents() {
+    if (this.isDestroyed()) throw new Error("Object has been destroyed");
+    return this.contents;
+  }
   isMinimized = vi.fn(() => false);
   isFullScreen = vi.fn(() => false);
   isMaximized = vi.fn(() => false);

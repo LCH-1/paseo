@@ -113,17 +113,18 @@ export function createWindowSessionManager(input: {
       }
     },
     track(window: SessionWindow, entry: SavedDesktopWindow) {
+      // Electron's webContents getter throws after the native window is closed.
+      const contents = window.webContents;
       pendingRestores.delete(entry.id);
       active.set(entry.id, { window, entry: structuredClone(entry) });
       for (const event of ["move", "resize", "maximize", "unmaximize", "restore"])
         window.on(event, schedule);
-      for (const event of ["did-navigate", "did-navigate-in-page"])
-        window.webContents.on(event, schedule);
+      for (const event of ["did-navigate", "did-navigate-in-page"]) contents.on(event, schedule);
       window.on("close", persist);
       window.on("closed", () => {
         active.delete(entry.id);
         for (const event of ["did-navigate", "did-navigate-in-page"])
-          window.webContents.removeListener(event, schedule);
+          contents.removeListener(event, schedule);
         if (!quitting) persist();
       });
       schedule();
