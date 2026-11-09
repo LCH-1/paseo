@@ -58,8 +58,8 @@ it("keeps loaded registrations offline, refreshes on reconnect, and removes on h
   view.rerender(<PluginCatalogSync serverId="host-a" client={client} />);
   await waitFor(() => expect(registry.installCatalog).toHaveBeenCalledTimes(2));
   expect(registry.installCatalog.mock.calls.map((call) => call[2].replaceAll)).toEqual([
-    true,
-    true,
+    undefined,
+    undefined,
   ]);
   view.unmount();
   expect(registry.removeHost).toHaveBeenCalledExactlyOnceWith("host-a");

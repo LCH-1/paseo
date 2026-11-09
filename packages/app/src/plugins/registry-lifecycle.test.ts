@@ -93,6 +93,31 @@ test("teardown ends every subscription the plugin still holds", async () => {
   await expect.poll(() => h.open.size).toBe(0);
 });
 
+test("an identical catalog keeps installations and query data on the same client", () => {
+  const h = registry();
+  const entries = [catalog("kept")];
+  h.plugins.installCatalog("host", entries, { client: h.client, audio });
+  const [first] = h.plugins.getSnapshot();
+  first.queryClient.setQueryData(["draft"], "preserved");
+  h.plugins.installCatalog("host", entries, { client: h.client, audio });
+  expect(h.plugins.getSnapshot()[0]).toBe(first);
+  expect(first.queryClient.getQueryData(["draft"])).toBe("preserved");
+  expect(h.open).toEqual(new Set(["kept"]));
+});
+
+test("a replacement host client rebinds an identical plugin and releases the old client", async () => {
+  const h = registry();
+  const replacement = observingClient();
+  const entries = [catalog("rebound")];
+  h.plugins.installCatalog("host", entries, { client: h.client, audio });
+  const [first] = h.plugins.getSnapshot();
+  h.plugins.installCatalog("host", entries, { client: replacement.client, audio });
+  expect(h.plugins.getSnapshot()[0]).not.toBe(first);
+  await expect.poll(() => h.open.size).toBe(0);
+  expect(replacement.open).toEqual(new Set(["rebound"]));
+  expect(() => first.paseo.observeEvents(["project.update"])).toThrow("Paseo API is disposed");
+});
+
 test("reloading a plugin ends the old installation's subscriptions", async () => {
   const h = registry();
   h.plugins.installCatalog("host", [catalog("reloaded")], { client: h.client, audio });

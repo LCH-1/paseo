@@ -56,7 +56,7 @@ export function PluginCatalogSync({
     ]);
     observation.subscribe({
       snapshot: () => {
-        void refresh({ replaceAll: true });
+        void refresh();
       },
       update: (message) => {
         if (message.type !== "status") return;

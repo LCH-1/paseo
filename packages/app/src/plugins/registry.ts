@@ -17,6 +17,7 @@ export class PluginRegistry {
   private readonly listeners = new Set<() => void>();
   private snapshot: InstalledPlugin[] = [];
   private readonly disposed = new WeakSet<InstalledPlugin>();
+  private readonly clients = new WeakMap<InstalledPlugin, DaemonClient>();
   private readonly evaluationErrors = new Map<string, string>();
 
   constructor(
@@ -57,6 +58,7 @@ export class PluginRegistry {
           !options.replaceAll &&
           plugin.id !== options.replacePluginId &&
           plugin.id === entry.id &&
+          this.clients.get(plugin) === options.client &&
           plugin.clientBundle === entry.clientBundle &&
           plugin.requirements?.paseo === entry.requirements?.paseo,
       );
@@ -105,6 +107,7 @@ export class PluginRegistry {
           timelineTransformers: [],
           timelineRenderers: [],
         };
+        this.clients.set(installation, client);
         const runtime = this.dependencies.createRuntime(installation, options.audio);
         const evaluated = runPluginClientBundle(entry.id, entry.clientBundle, runtime, () =>
           this.publish(),
