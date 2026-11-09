@@ -45,7 +45,6 @@ import { SidebarFooterIconHighlight } from "@/components/sidebar/sidebar-footer-
 import { SidebarHelpMenu } from "@/components/sidebar/sidebar-help-menu";
 import { SidebarResizeHandle } from "@/components/sidebar-resize-handle";
 import { DensityIcon } from "@/components/ui/density-icon";
-import { SidebarSectionHeader } from "@/components/sidebar/sidebar-section-header";
 import { Shortcut } from "@/components/ui/shortcut";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { HEADER_INNER_HEIGHT, useIsCompactFormFactor } from "@/constants/layout";
@@ -575,6 +574,16 @@ function MobileSidebar({
     [insetsTop, insetsBottom, theme.colors.surfaceSidebar],
   );
 
+  const navigationTrailing = useMemo(
+    () => (
+      <View style={styles.workspaceActions}>
+        {workspaceActionsElement}
+        {closeButton}
+      </View>
+    ),
+    [closeButton],
+  );
+
   return (
     <MobilePanelOverlay
       panel="agent-list"
@@ -586,7 +595,7 @@ function MobileSidebar({
         <SidebarNavRows
           style={styles.sidebarHeaderGroup}
           onBeforeNavigate={closeSidebar}
-          firstRowTrailing={closeButton}
+          firstRowTrailing={navigationTrailing}
         />
 
         <SidebarActivityPanel active={active} onSessionPress={handleWorkspacePress}>
@@ -613,7 +622,6 @@ function MobileSidebar({
               onImportSession={handleImportSession}
               parentGestureRef={closeGestureRef}
               dragGestureHostActive={active}
-              listHeaderComponent={workspacesSectionHeaderElement}
             />
           )}
         </SidebarActivityPanel>
@@ -794,7 +802,10 @@ function DesktopSidebar({
           ) : (
             <TitlebarDragRegion />
           )}
-          <SidebarNavRows style={sidebarHeaderGroupStyle} />
+          <SidebarNavRows
+            style={sidebarHeaderGroupStyle}
+            firstRowTrailing={workspaceActionsElement}
+          />
         </View>
 
         <SidebarActivityPanel active={active}>
@@ -818,7 +829,6 @@ function DesktopSidebar({
               onRefresh={handleRefresh}
               onAddProject={handleOpenProject}
               onImportSession={handleImportSession}
-              listHeaderComponent={workspacesSectionHeaderElement}
             />
           )}
         </SidebarActivityPanel>
@@ -843,9 +853,9 @@ function DesktopSidebar({
   );
 }
 
-function WorkspacesSectionHeader() {
+function WorkspaceActions() {
   return (
-    <SidebarSectionHeader title="Workspaces">
+    <View style={styles.workspaceActions} testID="sidebar-workspace-actions">
       <SidebarCollapseAllHostsButton />
       <Tooltip delayDuration={300}>
         <TooltipTrigger asChild>
@@ -857,13 +867,11 @@ function WorkspacesSectionHeader() {
           <IconTooltipContent label="Display preferences" />
         </TooltipContent>
       </Tooltip>
-    </SidebarSectionHeader>
+    </View>
   );
 }
 
-// Stable element so the sidebar list's listHeaderComponent prop keeps identity across
-// renders (WorkspacesSectionHeader takes no props).
-const workspacesSectionHeaderElement = <WorkspacesSectionHeader />;
+const workspaceActionsElement = <WorkspaceActions />;
 
 // Static styles for Animated.Views — must NOT use Unistyles dynamic theme to
 // avoid the "Unable to find node on an unmounted component" crash when Unistyles
@@ -878,6 +886,11 @@ const staticStyles = RNStyleSheet.create({
 });
 
 const styles = StyleSheet.create((theme) => ({
+  workspaceActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+  },
   sidebarHeaderGroup: {
     paddingTop: theme.spacing[2],
     gap: 2,
