@@ -96,6 +96,34 @@ export function resolveWindowBounds(
   return { width, height };
 }
 
+export function restoreWindowBounds(
+  win: Pick<BrowserWindow, "getNormalBounds" | "setBounds">,
+  state: WindowState,
+): void {
+  const position = state.x !== undefined && state.y !== undefined ? { x: state.x, y: state.y } : {};
+  const target = { width: state.width, height: state.height, ...position };
+  const requested = { ...target };
+  // Windows can round the constructor's DIP bounds differently from setBounds.
+  // Correct against the reported rectangle so that each restore does not grow it.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const actual = win.getNormalBounds();
+    if (
+      actual.width === target.width &&
+      actual.height === target.height &&
+      (target.x === undefined || actual.x === target.x) &&
+      (target.y === undefined || actual.y === target.y)
+    )
+      return;
+    if (attempt > 0) {
+      requested.width += target.width - actual.width;
+      requested.height += target.height - actual.height;
+      if (requested.x !== undefined && target.x !== undefined) requested.x += target.x - actual.x;
+      if (requested.y !== undefined && target.y !== undefined) requested.y += target.y - actual.y;
+    }
+    win.setBounds(requested);
+  }
+}
+
 function readOverlayColor(input: unknown): string | null {
   if (typeof input !== "string") {
     return null;

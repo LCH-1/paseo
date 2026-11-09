@@ -17,6 +17,7 @@ import {
   readWindowChromeUpdate,
   readWindowTheme,
   resolveWindowBounds,
+  restoreWindowBounds,
   setupWindowStatePersistence,
 } from "./window-manager";
 
@@ -197,6 +198,33 @@ describe("multi-window session persistence", () => {
     ).toEqual(["failed", "good"]);
     expect(h.onError).toHaveBeenCalledTimes(1);
     h.manager.beginQuit();
+  });
+});
+
+describe("restored native window geometry", () => {
+  it("prevents repeated restores from accumulating fractional DPI frame rounding", () => {
+    const saved = { x: 1648, y: 71, width: 1618, height: 1219, isMaximized: false };
+    for (let restart = 0; restart < 10; restart++) {
+      let bounds = { ...saved, width: saved.width + 3, height: saved.height + 4 };
+      const setBounds = vi.fn((requested: Partial<Electron.Rectangle>) => {
+        bounds = {
+          ...bounds,
+          ...requested,
+          width: requested.width! + 1,
+          height: requested.height! + 1,
+        };
+      });
+      restoreWindowBounds({ getNormalBounds: () => bounds, setBounds }, saved);
+      expect(bounds).toMatchObject(saved);
+      expect(setBounds.mock.calls.length).toBeLessThanOrEqual(3);
+    }
+  });
+
+  it("leaves an exact native rectangle unchanged", () => {
+    const state = { x: 20, y: 30, width: 1200, height: 800, isMaximized: false };
+    const setBounds = vi.fn();
+    restoreWindowBounds({ getNormalBounds: () => state, setBounds }, state);
+    expect(setBounds).not.toHaveBeenCalled();
   });
 });
 

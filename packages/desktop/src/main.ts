@@ -42,6 +42,7 @@ import { parsePassthroughCliArgsFromArgv, runPassthroughCli } from "./daemon/cli
 import { closeAllTransportSessions } from "./daemon/local-transport.js";
 import {
   applyDesktopWindowChromeMode,
+  restoreWindowBounds,
   registerWindowManager,
   getMainWindowChromeOptions,
   getWindowBackgroundColor,
@@ -790,6 +791,7 @@ async function createWindow(options: CreateDesktopWindowOptions = {}): Promise<B
     app.dock?.setBadge(devWorktreeName);
   }
 
+  if (restoredWindowState) restoreWindowBounds(mainWindow, restoredWindowState);
   if (restoredWindowState?.isMaximized) {
     mainWindow.maximize();
   }
