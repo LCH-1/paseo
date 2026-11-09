@@ -4274,7 +4274,7 @@ describe("Codex app-server provider", () => {
     }
   });
 
-  test("interrupts using the turn/start response id when turn/started is missing", async () => {
+  test("waits for native turn/started even when the response supplied an id", async () => {
     const interruptedTurns: unknown[] = [];
     const appServer = createFakeCodexAppServer({
       "turn/start": () => ({ turn: { id: "native-from-response" } }),
@@ -4292,6 +4292,12 @@ describe("Codex app-server provider", () => {
     try {
       await session.startTurn("Start without a notification.");
       const interrupt = session.interrupt();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(interruptedTurns).toEqual([]);
+      await expect(session.startTurn("must stay blocked before native activation")).rejects.toThrow(
+        "already active",
+      );
+      appServer.startsTurn({ threadId: "thread-1", turnId: "native-from-response" });
       await appServer.waitForRequest("turn/interrupt");
       appServer.completeTurn({ status: "interrupted" });
       await expect(interrupt).resolves.toBeUndefined();
@@ -4510,51 +4516,56 @@ describe("Codex app-server provider", () => {
     }
   });
 
-  test("bounds interruption when neither a response nor a notification identifies the turn", async () => {
-    const interruptedTurns: unknown[] = [];
-    const appServer = createFakeCodexAppServer({
-      "turn/interrupt": (params) => {
-        interruptedTurns.push(params);
-        return {};
-      },
-    });
-    const session = new CodexAppServerAgentSession(
-      createConfig(),
-      null,
-      createTestLogger(),
-      async () => appServer.child,
-    );
-    const events: AgentStreamEvent[] = [];
-    session.subscribe((event) => events.push(event));
-    try {
-      await session.startTurn("Start without an identified turn.");
-      vi.useFakeTimers();
-      const interrupt = session.interrupt();
-      const rejection = expect(interrupt).rejects.toThrow(
-        "Timed out waiting for Codex to identify the active turn",
+  test.each([false, true])(
+    "bounds interruption before native activation (response has id: %s)",
+    async (responseHasId) => {
+      const interruptedTurns: unknown[] = [];
+      const appServer = createFakeCodexAppServer({
+        "turn/start": () =>
+          responseHasId ? { turn: { id: "native-identified-after-timeout" } } : {},
+        "turn/interrupt": (params) => {
+          interruptedTurns.push(params);
+          return {};
+        },
+      });
+      const session = new CodexAppServerAgentSession(
+        createConfig(),
+        null,
+        createTestLogger(),
+        async () => appServer.child,
       );
-      await vi.advanceTimersByTimeAsync(2_000);
-      await rejection;
-      expect(interruptedTurns).toEqual([]);
-      expect(events.filter((event) => event.type.startsWith("turn_"))).toEqual([]);
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+      try {
+        await session.startTurn("Start without an identified turn.");
+        vi.useFakeTimers();
+        const interrupt = session.interrupt();
+        const rejection = expect(interrupt).rejects.toThrow(
+          "Timed out waiting for Codex to identify the active turn",
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        await rejection;
+        expect(interruptedTurns).toEqual([]);
+        expect(events.filter((event) => event.type.startsWith("turn_"))).toEqual([]);
 
-      // A delayed notification can still identify the same live turn; timing
-      // out must not publish a false completion or permit another prompt.
-      await expect(session.startTurn("must stay blocked")).rejects.toThrow("already active");
-      appServer.startsTurn({ threadId: "thread-1", turnId: "native-identified-after-timeout" });
-      const identifiedInterrupt = session.interrupt();
-      await appServer.waitForRequest("turn/interrupt");
-      appServer.completeTurn({ status: "interrupted" });
-      await expect(identifiedInterrupt).resolves.toBeUndefined();
-      expect(interruptedTurns).toEqual([
-        { threadId: "thread-1", turnId: "native-identified-after-timeout" },
-      ]);
-      appServer.assertNoErrors();
-    } finally {
-      vi.useRealTimers();
-      await session.close();
-    }
-  });
+        // A delayed notification can still identify the same live turn; timing
+        // out must not publish a false completion or permit another prompt.
+        await expect(session.startTurn("must stay blocked")).rejects.toThrow("already active");
+        appServer.startsTurn({ threadId: "thread-1", turnId: "native-identified-after-timeout" });
+        const identifiedInterrupt = session.interrupt();
+        await appServer.waitForRequest("turn/interrupt");
+        appServer.completeTurn({ status: "interrupted" });
+        await expect(identifiedInterrupt).resolves.toBeUndefined();
+        expect(interruptedTurns).toEqual([
+          { threadId: "thread-1", turnId: "native-identified-after-timeout" },
+        ]);
+        appServer.assertNoErrors();
+      } finally {
+        vi.useRealTimers();
+        await session.close();
+      }
+    },
+  );
 
   test.each(["completed", "failed", "interrupted"] as const)(
     "ignores delayed and duplicate native turn notifications before a new %s completion",
@@ -4618,30 +4629,70 @@ describe("Codex app-server provider", () => {
     },
   );
 
-  test("acknowledges interruption when the accepted turn terminates before identification", async () => {
+  test.each([false, true])(
+    "acknowledges a terminal before native activation (response has id: %s)",
+    async (responseHasId) => {
+      const interruptedTurns: unknown[] = [];
+      const appServer = createFakeCodexAppServer({
+        "turn/start": () => (responseHasId ? { turn: { id: "terminal-before-started" } } : {}),
+        "turn/interrupt": async (params) => {
+          interruptedTurns.push(params);
+          return {};
+        },
+      });
+      const session = new CodexAppServerAgentSession(
+        createConfig({ cwd: "/workspace/project" }),
+        null,
+        createTestLogger(),
+        async () => appServer.child,
+      );
+
+      try {
+        const resultPromise = session.run("Finish before identification.");
+        await appServer.waitForTurnStart();
+        const interruptPromise = session.interrupt();
+        appServer.completeTurn();
+
+        await expect(interruptPromise).resolves.toBeUndefined();
+        await resultPromise;
+        expect(interruptedTurns).toEqual([]);
+        appServer.assertNoErrors();
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
+  test("a late native A start cannot release B's activation barrier", async () => {
+    let starts = 0;
     const interruptedTurns: unknown[] = [];
     const appServer = createFakeCodexAppServer({
-      "turn/interrupt": async (params) => {
+      "turn/start": () => ({ turn: { id: ++starts === 1 ? "native-A" : "native-B" } }),
+      "turn/interrupt": (params) => {
         interruptedTurns.push(params);
         return {};
       },
     });
     const session = new CodexAppServerAgentSession(
-      createConfig({ cwd: "/workspace/project" }),
+      createConfig(),
       null,
       createTestLogger(),
       async () => appServer.child,
     );
-
     try {
-      const resultPromise = session.run("Finish before identification.");
-      await appServer.waitForTurnStart();
-      const interruptPromise = session.interrupt();
+      await session.startTurn("A completes before its started notification");
       appServer.completeTurn();
-
-      await expect(interruptPromise).resolves.toBeUndefined();
-      await resultPromise;
+      await session.startTurn("B is accepted but not native-active");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "native-A" });
+      const stop = session.interrupt();
+      await new Promise((resolve) => setTimeout(resolve, 0));
       expect(interruptedTurns).toEqual([]);
+      await expect(session.startTurn("B must remain active")).rejects.toThrow("already active");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "native-B" });
+      await appServer.waitForRequest("turn/interrupt");
+      expect(interruptedTurns).toEqual([{ threadId: "thread-1", turnId: "native-B" }]);
+      appServer.completeTurn({ status: "interrupted" });
+      await stop;
       appServer.assertNoErrors();
     } finally {
       await session.close();

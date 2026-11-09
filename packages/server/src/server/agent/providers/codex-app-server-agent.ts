@@ -4455,8 +4455,9 @@ export class CodexAppServerAgentSession implements AgentSession {
         pendingIdentification?.foregroundTurnId === turnId
       ) {
         this.currentTurnId = nativeTurnId;
-        pendingIdentification.resolve(nativeTurnId);
-        this.pendingForegroundTurnIdentification = null;
+        // The response reserves an ID before Codex activates the turn. Keep
+        // the started-notification barrier for interruption; an early RPC can
+        // otherwise report already-idle while this accepted turn is queued.
       }
       return { turnId };
     } catch (error) {
@@ -5068,13 +5069,9 @@ export class CodexAppServerAgentSession implements AgentSession {
     let turnId = this.currentTurnId;
     const foregroundTurnId = this.activeForegroundTurnId;
     const pendingIdentification = this.pendingForegroundTurnIdentification;
-    // turn/start is accepted before Codex publishes the native turn id. Keep the
-    // interrupt attached to this foreground turn until that ordered notification arrives.
-    if (
-      !turnId &&
-      foregroundTurnId &&
-      pendingIdentification?.foregroundTurnId === foregroundTurnId
-    ) {
+    // turn/start can reserve a native ID before the turn is active. Wait for
+    // turn/started even when the response already supplied an ID.
+    if (foregroundTurnId && pendingIdentification?.foregroundTurnId === foregroundTurnId) {
       let identificationTimer: NodeJS.Timeout | undefined;
       try {
         turnId = await Promise.race([
