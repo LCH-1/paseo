@@ -22,6 +22,7 @@ import { NewWorkspaceTabsBar, useHistoryTabPresence } from "@/workspace-tabs/new
 import { DesktopTopTabsBar } from "@/workspace-tabs/desktop-top-tabs-bar";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { getDesktopHost } from "@/desktop/host";
+import { getProjectWindowScope } from "@/project-window/state";
 
 /** Long enough that a typed word is one request, short enough to feel live. */
 const SEARCH_DEBOUNCE_MS = 200;
@@ -66,7 +67,12 @@ function SessionsScreenContent() {
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const importSession = useImportSession();
-  const hosts = useHosts();
+  const allHosts = useHosts();
+  const scope = getProjectWindowScope();
+  const hosts = useMemo(
+    () => (scope ? allHosts.filter((host) => host.serverId === scope.serverId) : allHosts),
+    [allHosts, scope],
+  );
   const [selectedHost, setSelectedHost] = useState(ALL_HOSTS_OPTION_ID);
   const [searchInput, setSearchInput] = useState("");
   const search = useDebouncedValue(searchInput, SEARCH_DEBOUNCE_MS).trim();

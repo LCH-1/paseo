@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo } from "react";
+import { getProjectWindowScope } from "@/project-window/state";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { useCreateFlowStore } from "@/stores/create-flow-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -109,6 +110,8 @@ export function useSidebarWorkspacesList(options?: {
   const isActive = options?.enabled !== false;
 
   const serverIds = useMemo(() => {
+    const scope = getProjectWindowScope();
+    if (scope) return allServerIds.filter((id) => id === scope.serverId);
     if (hostFilters.length === 0) {
       return allServerIds;
     }

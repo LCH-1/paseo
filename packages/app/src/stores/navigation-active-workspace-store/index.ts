@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { projectWindowStorageKey, isProjectWindowWorkspace } from "@/project-window/state";
 import { useLocalSearchParams, usePathname } from "expo-router";
 import { useEffect, useSyncExternalStore } from "react";
 import {
@@ -24,9 +25,11 @@ export type { ActiveWorkspaceSelection } from "@/stores/last-workspace-selection
 export type { NavigateToWorkspaceInput } from "./navigation";
 
 const lastWorkspaceSelectionStorage: LastWorkspaceSelectionStorage = {
-  read: () => AsyncStorage.getItem(LAST_WORKSPACE_SELECTION_STORAGE_KEY),
-  write: (value) => AsyncStorage.setItem(LAST_WORKSPACE_SELECTION_STORAGE_KEY, value),
-  clear: () => AsyncStorage.removeItem(LAST_WORKSPACE_SELECTION_STORAGE_KEY),
+  read: () => AsyncStorage.getItem(projectWindowStorageKey(LAST_WORKSPACE_SELECTION_STORAGE_KEY)),
+  write: (value) =>
+    AsyncStorage.setItem(projectWindowStorageKey(LAST_WORKSPACE_SELECTION_STORAGE_KEY), value),
+  clear: () =>
+    AsyncStorage.removeItem(projectWindowStorageKey(LAST_WORKSPACE_SELECTION_STORAGE_KEY)),
 };
 
 const lastWorkspaceSelectionStore = createLastWorkspaceSelectionStore(
@@ -61,6 +64,12 @@ export function getIsLastWorkspaceSelectionHydrated(): boolean {
 }
 
 export function navigateToWorkspace(input: NavigateToWorkspaceInput): string {
+  const workspace = useSessionStore
+    .getState()
+    .sessions[input.serverId]?.workspaces.get(input.workspaceId);
+  if (!isProjectWindowWorkspace(input.serverId, workspace)) {
+    throw new Error("This workspace belongs to another project window");
+  }
   const route = navigateToWorkspacePure(input, navigateDeps());
   useSidebarRevealStore.getState().reveal(input);
   return route;

@@ -116,8 +116,23 @@ export interface DesktopWindowBridge {
   ) => Promise<() => void> | (() => void);
 }
 
+export interface DesktopProjectWindowTarget {
+  serverId: string;
+  projectId: string;
+  projectName: string;
+  directory: string;
+}
+
+export interface DesktopProjectWindowScope extends DesktopProjectWindowTarget {
+  windowId: string;
+}
+
 export interface DesktopWindowModuleBridge {
-  openNew?: (options?: { pendingOpenProjectPath?: string | null }) => Promise<void>;
+  openProject?: (target: DesktopProjectWindowTarget) => Promise<void>;
+  openNew?: (options?: {
+    pendingOpenProjectPath?: string | null;
+    projectWindow?: DesktopProjectWindowTarget;
+  }) => Promise<void>;
   getCurrentWindow?: () => DesktopWindowBridge;
 }
 
@@ -174,6 +189,7 @@ export interface DesktopInvokeBridge {
 
 export interface DesktopHostBridge {
   platform?: string;
+  projectWindow?: DesktopProjectWindowScope | null;
   windowChromeMode?: string;
   invoke?: DesktopInvokeBridge["invoke"];
   getPendingOpenProject?: () => Promise<string | null>;

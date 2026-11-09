@@ -3,6 +3,7 @@ import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import React, { type ReactNode } from "react";
 import { router } from "expo-router";
+import * as desktop from "@/desktop/host";
 import { useDraftStore } from "@/stores/draft-store";
 import { buildNewWorkspaceDraftKey } from "@/stores/draft-keys";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
@@ -44,6 +45,28 @@ afterEach(() => {
   route.focused = true;
   route.pathname = "/new";
   vi.clearAllMocks();
+});
+
+it("keeps every new conversation action inside the dedicated project", () => {
+  const scope = {
+    windowId: "one",
+    serverId: "host-project",
+    projectId: "project-only",
+    projectName: "Project",
+    directory: "/project",
+  };
+  const host = vi.spyOn(desktop, "getDesktopHost").mockReturnValue({ projectWindow: scope });
+  try {
+    bridge.open({ serverId: "other-host", projectId: "other-project", sourceDirectory: "/other" });
+    const entry = bridge.getSnapshot().entries.at(-1);
+    expect(entry?.serverId).toBe(scope.serverId);
+    const url = new URL(entry!.href, "https://paseo.local");
+    expect(url.searchParams.get("serverId")).toBe(scope.serverId);
+    expect(url.searchParams.get("projectId")).toBe(scope.projectId);
+    expect(url.searchParams.get("dir")).toBe(scope.directory);
+  } finally {
+    host.mockRestore();
+  }
 });
 
 it("keeps one history tab across navigation and closes it without clearing a composer draft", () => {

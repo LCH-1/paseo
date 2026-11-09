@@ -1,4 +1,5 @@
 import { isWeb } from "@/constants/platform";
+import { getProjectWindowScope } from "@/project-window/state";
 const WINDOW_KEY = "paseo-tab-group-window";
 const HANDOFF_KEY = "paseo-tab-group-window-handoff";
 export function getTabGroupWindow(): {
@@ -7,6 +8,8 @@ export function getTabGroupWindow(): {
   excludedKeys?: string[];
 } {
   if (!isWeb) return { key: "main", groupId: null };
+  const scope = getProjectWindowScope();
+  if (scope) return { key: scope.windowId, groupId: null };
   const saved = sessionStorage.getItem(WINDOW_KEY);
   if (saved) return JSON.parse(saved);
   const handoff = localStorage.getItem(HANDOFF_KEY);

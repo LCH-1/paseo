@@ -10,6 +10,12 @@ log.initialize({ spyRendererConsole: true });
 import { inheritLoginShellEnv } from "./login-shell-env.js";
 
 import path from "node:path";
+import {
+  createProjectWindowScope,
+  projectWindowArgument,
+  projectWindowRoute,
+  type ProjectWindowScope,
+} from "./window/project-window.js";
 import { pathToFileURL } from "node:url";
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -673,9 +679,12 @@ function getWorkAreasPrimaryFirst(): Electron.Rectangle[] {
   return [primary, ...others].map((display) => display.workArea);
 }
 
+const projectWindowIds = new Set<number>();
+
 async function createWindow(
   options: {
     initialRoute?: string | null;
+    projectWindow?: ProjectWindowScope;
     restoreWindowState?: boolean;
     onCreated?: (webContentsId: number) => void;
     onClosed?: (webContentsId: number) => void;
@@ -697,7 +706,8 @@ async function createWindow(
     ? clampWindowStateToWorkAreas(savedWindowState, getWorkAreasPrimaryFirst())
     : null;
 
-  const title = devWorktreeName ? `${APP_NAME} (${devWorktreeName})` : APP_NAME;
+  let title = devWorktreeName ? `${APP_NAME} (${devWorktreeName})` : APP_NAME;
+  if (options.projectWindow) title = `${options.projectWindow.projectName} · ${APP_NAME}`;
   const mainWindow = new BrowserWindow({
     title,
     ...resolveWindowBounds(restoredWindowState),
@@ -709,7 +719,10 @@ async function createWindow(
     }),
     webPreferences: {
       preload: getPreloadPath(),
-      additionalArguments: [windowChromeModeArgument(DESKTOP_WINDOW_CHROME_MODE)],
+      additionalArguments: [
+        windowChromeModeArgument(DESKTOP_WINDOW_CHROME_MODE),
+        ...(options.projectWindow ? [projectWindowArgument(options.projectWindow)] : []),
+      ],
       contextIsolation: true,
       nodeIntegration: false,
       webviewTag: true,
@@ -718,6 +731,7 @@ async function createWindow(
   applyDesktopWindowChromeMode({ win: mainWindow, mode: DESKTOP_WINDOW_CHROME_MODE });
 
   const webContentsId = mainWindow.webContents.id;
+  if (options.projectWindow) projectWindowIds.add(webContentsId);
   options.onCreated?.(webContentsId);
   mainWindow.webContents.on("did-start-navigation", (_event, _url, isSameDocument, isMainFrame) => {
     if (isMainFrame && !isSameDocument) {
@@ -725,6 +739,7 @@ async function createWindow(
     }
   });
   mainWindow.on("closed", () => {
+    projectWindowIds.delete(webContentsId);
     options.onClosed?.(webContentsId);
     agentNavigationInbox.removeWindow(webContentsId);
     unregisterPaseoBrowserHost(webContentsId);
@@ -824,10 +839,13 @@ desktopWindowOwner = createDesktopWindowOwner<AgentDeepLinkTarget>({
     });
     return ownedDesktopWindow(win);
   },
-  windows: () => BrowserWindow.getAllWindows().map(ownedDesktopWindow),
+  windows: () =>
+    BrowserWindow.getAllWindows()
+      .filter((win) => !projectWindowIds.has(win.webContents.id))
+      .map(ownedDesktopWindow),
   focusedWindow: () => {
     const win = BrowserWindow.getFocusedWindow();
-    if (!win) return null;
+    if (!win || projectWindowIds.has(win.webContents.id)) return null;
     return ownedDesktopWindow(win);
   },
   agentRoute: buildAgentDeepLinkRoute,
@@ -995,6 +1013,11 @@ async function bootstrap(): Promise<void> {
   // In-app "Open in new window": opens a window that lands on the given project
   // via the same open-project flow as a CLI launch (no move, no ownership).
   ipcMain.handle("paseo:window:openNew", async (_event, options?: unknown) => {
+    if (options && typeof options === "object" && "projectWindow" in options) {
+      const scope = createProjectWindowScope(options.projectWindow);
+      await createWindow({ initialRoute: projectWindowRoute(scope), projectWindow: scope });
+      return;
+    }
     const pendingPath =
       options && typeof options === "object" && "pendingOpenProjectPath" in options
         ? (options as { pendingOpenProjectPath?: unknown }).pendingOpenProjectPath

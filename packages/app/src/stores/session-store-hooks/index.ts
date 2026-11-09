@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { filterProjectWindowProjects } from "@/project-window/state";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { useSidebarOrderStore } from "@/stores/sidebar-order-store";
 import {
@@ -123,7 +124,7 @@ export function useWorkspaceStructure(serverIds: string[]): WorkspaceStructure {
   return useMemo(
     () =>
       composeWorkspaceStructure({
-        projects,
+        projects: filterProjectWindowProjects(projects),
         projectOrder,
         workspaceOrderByScope,
       }),

@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { BrowserKeyboardPolicy } from "./features/browser-keyboard/index.js";
 import type { DesktopWindowChromeMode } from "./window/chrome.js";
+import type { ProjectWindowTarget, ProjectWindowScope } from "./window/project-window.js";
 
 // This preload runs in Electron's sandbox and is tsc-compiled (not bundled), so it MUST
 // NOT emit any runtime module load other than "electron" — a require() of a local or
@@ -31,6 +32,11 @@ interface AttachedBrowserRegistration {
 
 contextBridge.exposeInMainWorld("paseoDesktop", {
   platform: process.platform,
+  projectWindow: ((): ProjectWindowScope | null => {
+    const prefix = "--paseo-project-window=";
+    const value = process.argv.find((argument) => argument.startsWith(prefix));
+    return value ? JSON.parse(decodeURIComponent(value.slice(prefix.length))) : null;
+  })(),
   windowChromeMode: readWindowChromeMode(),
   invoke: (command: string, args?: Record<string, unknown>) =>
     ipcRenderer.invoke("paseo:invoke", command, args),
@@ -55,8 +61,12 @@ contextBridge.exposeInMainWorld("paseoDesktop", {
     },
   },
   window: {
-    openNew: (options?: { pendingOpenProjectPath?: string | null }) =>
-      ipcRenderer.invoke("paseo:window:openNew", options),
+    openProject: (projectWindow: ProjectWindowTarget) =>
+      ipcRenderer.invoke("paseo:window:openNew", { projectWindow }),
+    openNew: (options?: {
+      pendingOpenProjectPath?: string | null;
+      projectWindow?: ProjectWindowTarget;
+    }) => ipcRenderer.invoke("paseo:window:openNew", options),
     getCurrentWindow: () => ({
       minimize: () => ipcRenderer.invoke("paseo:window:minimize"),
       close: () => ipcRenderer.invoke("paseo:window:close"),

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as desktop from "@/desktop/host";
 import { z } from "zod";
 import type { StateStorage } from "zustand/middleware";
 import { createValidatedPersistStorage } from "./validated-persist-storage";
@@ -22,6 +23,34 @@ class MemoryStorage implements StateStorage {
 const StateSchema = z.strictObject({ enabled: z.boolean() });
 
 describe("createValidatedPersistStorage", () => {
+  it("persists independent window drafts without reading or overwriting general-window drafts", async () => {
+    const backing = new MemoryStorage();
+    const storage = createValidatedPersistStorage(backing, StateSchema);
+    const scope = {
+      windowId: "one",
+      serverId: "host",
+      projectId: "project",
+      projectName: "Project",
+      directory: "/project",
+    };
+    const host = vi.spyOn(desktop, "getDesktopHost");
+    try {
+      host.mockReturnValue(null);
+      await storage.setItem("paseo-drafts", { state: { enabled: true } });
+      host.mockReturnValue({ projectWindow: scope });
+      await expect(storage.getItem("paseo-drafts")).resolves.toBeNull();
+      await storage.setItem("paseo-drafts", { state: { enabled: false } });
+      host.mockReturnValue({ projectWindow: { ...scope, windowId: "two" } });
+      await expect(storage.getItem("paseo-drafts")).resolves.toBeNull();
+      host.mockReturnValue({ projectWindow: scope });
+      await expect(storage.getItem("paseo-drafts")).resolves.toEqual({ state: { enabled: false } });
+      await storage.removeItem("paseo-drafts");
+      host.mockReturnValue(null);
+      await expect(storage.getItem("paseo-drafts")).resolves.toEqual({ state: { enabled: true } });
+    } finally {
+      host.mockRestore();
+    }
+  });
   it.each([
     ["malformed JSON", "{"],
     ["invalid state", JSON.stringify({ state: { enabled: "yes" }, version: 1 })],

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { PersistStorage, StateStorage } from "zustand/middleware";
+import { projectWindowStorageKey } from "@/project-window/state";
 
 export function createValidatedPersistStorage<State>(
   backingStorage: StateStorage,
@@ -12,6 +13,7 @@ export function createValidatedPersistStorage<State>(
 
   return {
     getItem: async (name) => {
+      name = projectWindowStorageKey(name);
       const raw = await backingStorage.getItem(name);
       if (raw === null) return null;
 
@@ -31,6 +33,7 @@ export function createValidatedPersistStorage<State>(
       return result.data;
     },
     setItem: async (name, value) => {
+      name = projectWindowStorageKey(name);
       const result = envelopeSchema.safeParse(value);
       if (!result.success) {
         await backingStorage.removeItem(name);
@@ -38,6 +41,6 @@ export function createValidatedPersistStorage<State>(
       }
       await backingStorage.setItem(name, JSON.stringify(result.data));
     },
-    removeItem: (name) => backingStorage.removeItem(name),
+    removeItem: (name) => backingStorage.removeItem(projectWindowStorageKey(name)),
   };
 }

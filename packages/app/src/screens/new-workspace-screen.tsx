@@ -66,6 +66,7 @@ import {
   resolveDraftCreationRetry,
 } from "@/composer/draft/workspace-tab-core";
 import { useOpenAddProject } from "@/hooks/use-open-add-project";
+import { getProjectWindowScope } from "@/project-window/state";
 import { isActiveCreateFlowForDraft, useCreateFlowStore } from "@/stores/create-flow-store";
 import {
   useWorkspaceDraftSubmissionStore,
@@ -841,7 +842,12 @@ function useNewWorkspaceInitialContext({
   projectId,
   displayName: displayNameProp,
 }: NewWorkspaceScreenProps): NewWorkspaceInitialContextState {
-  const allHosts = useHosts();
+  const hosts = useHosts();
+  const scope = getProjectWindowScope();
+  const allHosts = useMemo(
+    () => (scope ? hosts.filter((host) => host.serverId === scope.serverId) : hosts),
+    [hosts, scope],
+  );
   const allServerIds = useMemo(() => allHosts.map((h) => h.serverId), [allHosts]);
   const projects = useHostProjects(allServerIds);
   const routeDisplayName = displayNameProp?.trim() ?? "";
@@ -913,7 +919,21 @@ function useNewWorkspaceInitialContext({
   };
 }
 
-export function NewWorkspaceScreen({
+export function NewWorkspaceScreen(props: NewWorkspaceScreenProps) {
+  const scope = getProjectWindowScope();
+  const target = scope
+    ? {
+        ...props,
+        serverId: scope.serverId,
+        sourceDirectory: scope.directory,
+        projectId: scope.projectId,
+        displayName: scope.projectName,
+      }
+    : props;
+  return <NewWorkspaceScreenContent {...target} />;
+}
+
+function NewWorkspaceScreenContent({
   serverId,
   sourceDirectory: sourceDirectoryProp,
   projectId,

@@ -1,4 +1,5 @@
 import { Redirect, Stack, useLocalSearchParams } from "expo-router";
+import { ProjectWindowBoundary } from "@/project-window/boundary";
 import { useHostRuntimeBootstrapState } from "@/app/_layout";
 import { HostRouteProvider } from "@/navigation/host-route-context";
 import { resolveStartupRoute } from "@/navigation/host-runtime-bootstrap";
@@ -13,7 +14,11 @@ const HOST_STACK_SCREEN_OPTIONS = {
 const AGENT_SCREEN_OPTIONS = { gestureEnabled: false };
 
 export default function HostRouteLayout() {
-  return <KnownHostRoute />;
+  return (
+    <ProjectWindowBoundary>
+      <KnownHostRoute />
+    </ProjectWindowBoundary>
+  );
 }
 
 function KnownHostRoute() {

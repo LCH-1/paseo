@@ -564,6 +564,23 @@ function ProjectMenuItems({
     router.navigate(buildProjectSettingsRoute(settingsTarget.serverId, settingsTarget.projectId));
   }, [settingsTarget]);
   const canOpenInNewWindow = getIsElectron() && projectPath.trim().length > 0;
+  const canOpenProjectWindow = Boolean(settingsTarget && getDesktopHost()?.window?.openProject);
+  const handleOpenProjectWindow = useCallback(() => {
+    if (!settingsTarget) return;
+    const projectName =
+      projectPath.split(/[\\/]/).findLast((part) => part.length > 0) || settingsTarget.projectId;
+    void getDesktopHost()
+      ?.window?.openProject?.({
+        serverId: settingsTarget.serverId,
+        projectId: settingsTarget.projectId,
+        projectName,
+        directory: settingsTarget.iconWorkingDir,
+      })
+      .catch((error) => {
+        console.warn("[sidebar] project window failed", error);
+        toast.error(t("sidebar.project.actions.openNewWindowFailed"));
+      });
+  }, [projectPath, settingsTarget, t, toast]);
   const handleOpenInNewWindow = useCallback(() => {
     const trimmedPath = projectPath.trim();
     if (trimmedPath.length === 0) return;
@@ -595,6 +612,16 @@ function ProjectMenuItems({
           onSelect={handleOpenInNewWindow}
         >
           {t("sidebar.project.actions.openNewWindow")}
+        </ProjectMenuItem>
+      ) : null}
+      {canOpenProjectWindow ? (
+        <ProjectMenuItem
+          surface={surface}
+          testID={`sidebar-project-menu-open-project-window-${projectViewKey}`}
+          leading={openInNewWindowLeadingIcon}
+          onSelect={handleOpenProjectWindow}
+        >
+          {t("sidebar.project.actions.openProjectWindow")}
         </ProjectMenuItem>
       ) : null}
       {settingsTarget ? (

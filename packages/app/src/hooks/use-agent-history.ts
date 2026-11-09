@@ -9,6 +9,7 @@ import { useTranslation } from "react-i18next";
 import type { AggregatedAgent } from "@/hooks/use-aggregated-agents";
 import { getHostRuntimeStore, isHostRuntimeConnected, useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
+import { getProjectWindowScope } from "@/project-window/state";
 import { buildAgentDirectoryState } from "@/utils/agent-directory-sync";
 import { agentHistoryQueryKey, allAgentHistoryQueryKey } from "./agent-history-query-key";
 
@@ -220,6 +221,13 @@ export function useAgentHistory(options: {
   enabled?: boolean;
   search?: string;
 }): AgentHistoryResult {
+  const scope = getProjectWindowScope();
+  const scopedProject = useSessionStore((state) =>
+    scope ? state.sessions[scope.serverId]?.projects.get(scope.projectId) : undefined,
+  );
+  const scopedWorkspaces = useSessionStore((state) =>
+    scope ? state.sessions[scope.serverId]?.workspaces : undefined,
+  );
   const { t } = useTranslation();
   const daemons = useHosts();
   const runtime = getHostRuntimeStore();
@@ -229,9 +237,10 @@ export function useAgentHistory(options: {
     () => runtime.getVersion(),
   );
   const serverId = useMemo(() => {
+    if (scope) return scope.serverId;
     const value = options.serverId;
     return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-  }, [options.serverId]);
+  }, [options.serverId, scope]);
   const enabled = options.enabled ?? true;
   // A host the user asked about splits two ways: one this fetch can reach, and
   // one whose sessions will be missing from the answer. Both come out of here,
@@ -343,8 +352,22 @@ export function useAgentHistory(options: {
         serverLabel: serverLabelById.get(agent.serverId) ?? agent.serverLabel,
       }),
     );
-    return sortByLatestActivity(labelledAgents);
-  }, [data?.pages, serverLabelById]);
+    const visibleAgents = scope
+      ? labelledAgents.filter(
+          (agent) =>
+            agent.serverId === scope.serverId &&
+            (Boolean(
+              agent.workspaceId &&
+              scopedWorkspaces?.get(agent.workspaceId)?.projectId === scope.projectId,
+            ) ||
+              Boolean(
+                scopedProject?.projectKey &&
+                agent.projectPlacement?.projectKey === scopedProject.projectKey,
+              )),
+        )
+      : labelledAgents;
+    return sortByLatestActivity(visibleAgents);
+  }, [data?.pages, serverLabelById, scope, scopedProject, scopedWorkspaces]);
   const isInitialLoad = isLoading && agents.length === 0;
   const isRevalidating = isFetching && !isFetchingNextPage && agents.length > 0;
   const isSearchTruncated = Boolean(search && data?.pages.some((page) => page.isSearchTruncated));

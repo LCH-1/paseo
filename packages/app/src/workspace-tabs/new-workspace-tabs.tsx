@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useSyncExternalStore, type ComponentType } f
 import { router, useLocalSearchParams, usePathname } from "expo-router";
 import { useIsFocused } from "@react-navigation/native";
 import { buildNewWorkspaceRoute } from "@/utils/host-routes";
+import { getProjectWindowScope } from "@/project-window/state";
 import { buildNewWorkspaceDraftKey, generateDraftId } from "@/stores/draft-keys";
 import { useDraftStore } from "@/stores/draft-store";
 import { getLastWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
@@ -77,6 +78,15 @@ export const newWorkspaceTabsBridge = {
     return () => listeners.delete(listener);
   },
   open(options: NewWorkspaceOptions = {}): string {
+    const scope = getProjectWindowScope();
+    if (scope)
+      options = {
+        ...options,
+        serverId: scope.serverId,
+        projectId: scope.projectId,
+        sourceDirectory: scope.directory,
+        displayName: scope.projectName,
+      };
     const draftId = generateDraftId();
     const href = buildNewWorkspaceRoute({ ...options, draftId });
     registerDraft({ draftId, serverId: options.serverId ?? "", href });
