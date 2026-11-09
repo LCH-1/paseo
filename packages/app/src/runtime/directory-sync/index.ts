@@ -527,6 +527,10 @@ export class DirectorySync {
       })
       .finally(() => {
         this.demandRefresh = null;
+        if (!this.hasDemand()) {
+          this.releaseSubscriptions();
+          return;
+        }
         const current = this.connection.source;
         if (
           this.hasDemand() &&
@@ -933,7 +937,8 @@ export class DirectorySync {
   }
 
   private getOnlineConnection(): { client: DaemonClient; source: DirectorySourceToken } | null {
-    if (!this.connection.client || this.connection.status !== "online") return null;
+    if (this.disposed || !this.connection.client || this.connection.status !== "online")
+      return null;
     return { client: this.connection.client, source: this.connection.source };
   }
 

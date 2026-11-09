@@ -1359,6 +1359,65 @@ describe("DirectorySync session readiness", () => {
     },
   );
 
+  it.each(["no-demand", "disposed"])(
+    "does not leave late subscriptions after a pending cache read becomes %s",
+    async (state) => {
+      vi.useFakeTimers();
+      const serverId = `directory-late-cache-${state}`;
+      serverIds.add(serverId);
+      const client = new FakeDirectoryClient();
+      let releaseCache!: (
+        value: Awaited<ReturnType<DirectoryCheckpointStorage["readDirectory"]>>,
+      ) => void;
+      const cache = new Promise<Awaited<ReturnType<DirectoryCheckpointStorage["readDirectory"]>>>(
+        (resolve) => {
+          releaseCache = resolve;
+        },
+      );
+      const directory = new DirectorySync(
+        serverId,
+        {
+          onAgentStoppedRunning: () => undefined,
+          markAgentLoading: () => undefined,
+          markAgentReady: () => undefined,
+          markAgentError: () => undefined,
+        },
+        {
+          readDirectory: () => cache,
+          readAgent: async () => undefined,
+          readWorkspace: async () => undefined,
+          commitDirectoryMutations: () => undefined,
+        },
+      );
+      useSessionStore.getState().initializeSession(serverId, client as unknown as DaemonClient, 1);
+      useSessionStore.getState().updateSessionServerInfo(serverId, {
+        serverId,
+        hostname: null,
+        version: "test",
+        features: { projectList: true, workspaceMultiplicity: true },
+      });
+      directory.connectionChanged({
+        client: client as unknown as DaemonClient,
+        status: "online",
+        source: { clientGeneration: 1, connectionEpoch: 1 },
+      });
+      const demand = {};
+      try {
+        directory.setDemand(demand, true);
+        await vi.advanceTimersByTimeAsync(0);
+        if (state === "no-demand") directory.setDemand(demand, false);
+        else directory.dispose();
+        releaseCache({ agents: new Map(), workspaces: new Map(), projects: new Map() });
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(client.listenerCount("agent_update")).toBe(0);
+        expect(client.listenerCount("workspace_update")).toBe(0);
+        expect(client.listenerCount("project.update")).toBe(0);
+      } finally {
+        directory.dispose();
+      }
+    },
+  );
+
   it("coalesces synchronous loading callbacks into one directory refresh", async () => {
     const serverId = "directory-loading-reentry";
     serverIds.add(serverId);
