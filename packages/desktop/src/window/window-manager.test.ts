@@ -5,6 +5,8 @@ import path from "node:path";
 import { app, BrowserWindow } from "electron";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWindowStateStore } from "../settings/window-state";
+import type { DesktopWindowSession, SavedDesktopWindow } from "../settings/window-session";
+import { createWindowSessionManager } from "./window-session-manager";
 
 import {
   applyMacWindowControlsUpdate,
@@ -28,6 +30,168 @@ vi.mock("electron", () => ({
     isDestroyed = vi.fn(() => false);
   },
 }));
+
+class SessionTestWindow extends EventEmitter {
+  url = "paseo://app/h/host/workspace/first";
+  bounds = { x: 20, y: 30, width: 1000, height: 700 };
+  webContents = Object.assign(new EventEmitter(), {
+    getURL: () => this.url,
+    isDestroyed: () => false,
+  });
+  isDestroyed = vi.fn(() => false);
+  isMinimized = vi.fn(() => false);
+  isFullScreen = vi.fn(() => false);
+  isMaximized = vi.fn(() => false);
+  getNormalBounds = () => this.bounds;
+}
+
+function sessionHarness() {
+  let saved: DesktopWindowSession = { version: 1, restoreAtLogin: true, windows: [] };
+  const saveSync = vi.fn((value: DesktopWindowSession) => {
+    saved = structuredClone(value);
+  });
+  const onError = vi.fn();
+  const manager = createWindowSessionManager({
+    store: { load: async () => structuredClone(saved), saveSync },
+    appUrl: "paseo://app",
+    onError,
+  });
+  const entry = (id: string): SavedDesktopWindow => ({
+    id,
+    projectWindow: {
+      windowId: id,
+      serverId: "host",
+      projectId: "project",
+      projectName: "Project",
+      directory: "/repo",
+    },
+    route: "/h/host/workspace/first",
+    state: { x: 20, y: 30, width: 1000, height: 700, isMaximized: false },
+  });
+  return {
+    manager,
+    entry,
+    saveSync,
+    onError,
+    saved: () => saved,
+    seed: (value: DesktopWindowSession) => {
+      saved = value;
+    },
+  };
+}
+
+describe("multi-window session persistence", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("restores project identities and independent window geometry without partial startup writes", async () => {
+    vi.useFakeTimers();
+    const h = sessionHarness();
+    const one = h.entry("one"),
+      two = h.entry("two");
+    two.state = { x: -1500, y: 100, width: 900, height: 600, isMaximized: false };
+    h.seed({ version: 1, restoreAtLogin: true, windows: [one, two] });
+    await h.manager.load();
+    await h.manager.restore(async (entry) => {
+      const win = new SessionTestWindow();
+      win.bounds = { ...entry.state, x: entry.state.x ?? 0, y: entry.state.y ?? 0 };
+      h.manager.track(win, entry);
+      expect(h.saveSync).not.toHaveBeenCalled();
+    });
+    expect(h.saved().windows).toEqual([one, two]);
+    h.manager.beginQuit();
+  });
+
+  it("persists moves, routes and maximized geometry for each window independently", async () => {
+    vi.useFakeTimers();
+    const h = sessionHarness();
+    const one = new SessionTestWindow(),
+      two = new SessionTestWindow();
+    h.manager.track(one, h.entry("one"));
+    h.manager.track(two, h.entry("two"));
+    two.bounds = { x: -1200, y: 80, width: 1100, height: 950 };
+    two.isMaximized.mockReturnValue(true);
+    two.url = "paseo://app/h/host/workspace/second?tab=other";
+    two.emit("move");
+    two.webContents.emit("did-navigate-in-page");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(h.saved().windows[0].state.width).toBe(1000);
+    expect(h.saved().windows[1]).toMatchObject({
+      route: "/h/host/workspace/second?tab=other",
+      state: { ...two.bounds, isMaximized: true },
+    });
+    two.isMinimized.mockReturnValue(true);
+    two.isMaximized.mockReturnValue(false);
+    two.bounds = { x: -32000, y: -32000, width: 1, height: 1 };
+    two.emit("resize");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(h.saved().windows[1].state.width).toBe(1100);
+    expect(h.saved().windows[1].state.isMaximized).toBe(true);
+    one.url = "https://external.example/private";
+    one.webContents.emit("did-navigate");
+    h.manager.beginQuit();
+    expect(h.saved().windows[0].route).toBe("/h/host/workspace/first");
+  });
+
+  it("removes a manually closed sibling but retains the final window for next startup", () => {
+    vi.useFakeTimers();
+    const h = sessionHarness();
+    const one = new SessionTestWindow(),
+      two = new SessionTestWindow();
+    h.manager.track(one, h.entry("one"));
+    h.manager.track(two, h.entry("two"));
+    one.emit("close");
+    one.isDestroyed.mockReturnValue(true);
+    one.emit("closed");
+    expect(h.saved().windows.map((entry) => entry.id)).toEqual(["two"]);
+    two.emit("close");
+    two.isDestroyed.mockReturnValue(true);
+    two.emit("closed");
+    expect(h.saved().windows.map((entry) => entry.id)).toEqual(["two"]);
+    h.manager.track(new SessionTestWindow(), h.entry("new"));
+    h.manager.beginQuit();
+    expect(h.saved().windows.map((entry) => entry.id)).toEqual(["new"]);
+  });
+
+  it("freezes the complete session before quit or reboot closes windows", async () => {
+    vi.useFakeTimers();
+    const h = sessionHarness();
+    const one = new SessionTestWindow(),
+      two = new SessionTestWindow();
+    h.manager.track(one, h.entry("one"));
+    h.manager.track(two, h.entry("two"));
+    two.bounds = { x: 700, y: 40, width: 1200, height: 900 };
+    two.emit("resize");
+    h.manager.beginQuit();
+    for (const win of [one, two]) {
+      win.emit("close");
+      win.isDestroyed.mockReturnValue(true);
+      win.emit("closed");
+    }
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(h.saveSync).toHaveBeenCalledTimes(1);
+    expect(h.saved().windows.map((entry) => entry.id)).toEqual(["one", "two"]);
+    expect(h.saved().windows[1].state).toMatchObject(two.bounds);
+  });
+
+  it("continues restoring other windows after a failed creation and retains its retry entry", async () => {
+    vi.useFakeTimers();
+    const h = sessionHarness();
+    h.seed({ version: 1, restoreAtLogin: false, windows: [h.entry("failed"), h.entry("good")] });
+    await h.manager.load();
+    await h.manager.restore(async (entry) => {
+      if (entry.id === "failed") throw Error("Window failed to open");
+      h.manager.track(new SessionTestWindow(), entry);
+    });
+    expect(
+      h
+        .saved()
+        .windows.map((entry) => entry.id)
+        .sort(),
+    ).toEqual(["failed", "good"]);
+    expect(h.onError).toHaveBeenCalledTimes(1);
+    h.manager.beginQuit();
+  });
+});
 
 describe("window state persistence", () => {
   const directories: string[] = [];

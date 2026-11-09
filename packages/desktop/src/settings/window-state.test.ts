@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createWindowSessionStore, type SavedDesktopWindow } from "./window-session";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -21,6 +22,73 @@ function stateFilePath(userDataPath: string): string {
 }
 
 const PRIMARY: WorkArea = { x: 0, y: 0, width: 1920, height: 1080 };
+
+describe("desktop window sessions", () => {
+  const directories: string[] = [];
+  afterEach(async () => {
+    await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
+  });
+
+  function savedWindow(id: string): SavedDesktopWindow {
+    return {
+      id,
+      projectWindow: {
+        windowId: id,
+        serverId: "host",
+        projectId: "project",
+        projectName: "프로젝트",
+        directory: "/repo",
+      },
+      route: "/h/host/workspace/workspace?tab=agent",
+      state: { x: -1800, y: 100, width: 1200, height: 800, isMaximized: true },
+    };
+  }
+
+  it("restores separate identities for two windows of the same project", async () => {
+    const userDataPath = await createTempUserDataDir();
+    directories.push(userDataPath);
+    const session = {
+      version: 1 as const,
+      restoreAtLogin: true,
+      windows: [savedWindow("one"), savedWindow("two")],
+    };
+    createWindowSessionStore(userDataPath).saveSync(session);
+    expect(await createWindowSessionStore(userDataPath).load()).toEqual(session);
+    expect(await readdir(userDataPath)).toEqual(["window-session.json"]);
+  });
+
+  it("discards unsafe routes and duplicate or mismatched identities without losing good windows", async () => {
+    const userDataPath = await createTempUserDataDir();
+    directories.push(userDataPath);
+    await writeFile(
+      path.join(userDataPath, "window-session.json"),
+      JSON.stringify({
+        version: 1,
+        restoreAtLogin: true,
+        windows: [
+          savedWindow("one"),
+          savedWindow("one"),
+          { ...savedWindow("two"), route: "//external.example" },
+          { ...savedWindow("three"), route: "/\\external.example" },
+          { ...savedWindow("four"), projectWindow: savedWindow("one").projectWindow },
+          { ...savedWindow("normal"), projectWindow: null },
+        ],
+      }),
+    );
+    expect(
+      (await createWindowSessionStore(userDataPath).load()).windows.map((window) => window.id),
+    ).toEqual(["one", "normal"]);
+  });
+
+  it("starts clean on a first launch or malformed session document", async () => {
+    const userDataPath = await createTempUserDataDir();
+    directories.push(userDataPath);
+    const store = createWindowSessionStore(userDataPath);
+    expect((await store.load()).windows).toEqual([]);
+    await writeFile(path.join(userDataPath, "window-session.json"), "{broken");
+    expect(await store.load()).toEqual({ version: 1, restoreAtLogin: false, windows: [] });
+  });
+});
 
 describe("window-state store", () => {
   const directories = new Set<string>();

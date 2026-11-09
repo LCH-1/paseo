@@ -10,6 +10,7 @@ log.initialize({ spyRendererConsole: true });
 import { inheritLoginShellEnv } from "./login-shell-env.js";
 
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   createProjectWindowScope,
   projectWindowArgument,
@@ -119,9 +120,14 @@ import {
   type AgentDeepLinkTarget,
 } from "@getpaseo/protocol/agent-deep-link";
 import { AgentNavigationInbox, parseAgentDeepLinkFromArgv } from "./agent-navigation.js";
+import { createWindowSessionStore, type SavedDesktopWindow } from "./settings/window-session.js";
+import { createWindowSessionManager } from "./window/window-session-manager.js";
+import type { WindowState } from "./settings/window-state.js";
 
 const DEV_SERVER_URL = process.env.EXPO_DEV_URL ?? "http://localhost:8081";
 const APP_SCHEME = "paseo";
+const RESTORE_WINDOWS_ARGUMENT = "--restore-window-session";
+const startupArgv = process.argv.filter((argument) => argument !== RESTORE_WINDOWS_ARGUMENT);
 const PASEO_DEBUG = process.env.PASEO_DEBUG === "1";
 const DISABLE_SINGLE_INSTANCE_LOCK = process.env.PASEO_DISABLE_SINGLE_INSTANCE_LOCK === "1";
 const APP_NAME = process.env.PASEO_TEST_APP_NAME?.trim() || "Paseo";
@@ -369,10 +375,10 @@ if (process.platform === "linux") {
 }
 
 let pendingOpenProjectPath = parseOpenProjectPathFromArgv({
-  argv: process.argv,
+  argv: startupArgv,
   isDefaultApp: process.defaultApp,
 });
-let pendingAgentNavigation = parseAgentDeepLinkFromArgv(process.argv);
+let pendingAgentNavigation = parseAgentDeepLinkFromArgv(startupArgv);
 
 // Each window pulls its own pending open-project path on mount, keyed by
 // webContents id, so deep-linked windows (second-instance launches, the
@@ -680,36 +686,59 @@ function getWorkAreasPrimaryFirst(): Electron.Rectangle[] {
 }
 
 const projectWindowIds = new Set<number>();
+let windowSessionManager: ReturnType<typeof createWindowSessionManager> | null = null;
 
-async function createWindow(
-  options: {
-    initialRoute?: string | null;
-    projectWindow?: ProjectWindowScope;
-    restoreWindowState?: boolean;
-    onCreated?: (webContentsId: number) => void;
-    onClosed?: (webContentsId: number) => void;
-  } = {},
-): Promise<BrowserWindow> {
-  const iconPath = await getEffectiveAppIconPath();
-  const systemTheme = resolveSystemWindowTheme();
+interface CreateDesktopWindowOptions {
+  initialRoute?: string | null;
+  projectWindow?: ProjectWindowScope;
+  savedWindow?: SavedDesktopWindow;
+  restoreWindowState?: boolean;
+  onCreated?: (webContentsId: number) => void;
+  onClosed?: (webContentsId: number) => void;
+}
 
-  // Only the first window of a session restores and persists saved geometry.
-  // Additional windows (⌘N, second-instance, "Open in new window") open at the
-  // default size and let the OS cascade them, so they neither stack on top of
-  // the restored window nor fight over the single window-state store.
+async function getRestoredWindowGeometry(options: CreateDesktopWindowOptions) {
+  // Keep the legacy primary-window preference for a first launch/migration.
+  // A restored multi-window session owns each window's geometry independently.
   const restoreWindowState = options.restoreWindowState ?? false;
   const windowStateStore = restoreWindowState
     ? createWindowStateStore({ userDataPath: app.getPath("userData") })
     : null;
-  const savedWindowState = windowStateStore ? await windowStateStore.load() : null;
+  const savedWindowState =
+    options.savedWindow?.state ?? (windowStateStore ? await windowStateStore.load() : null);
   const restoredWindowState = savedWindowState
     ? clampWindowStateToWorkAreas(savedWindowState, getWorkAreasPrimaryFirst())
     : null;
+  return { windowStateStore, restoredWindowState };
+}
 
+function getDesktopWindowTitle(options: CreateDesktopWindowOptions): string {
   let title = devWorktreeName ? `${APP_NAME} (${devWorktreeName})` : APP_NAME;
   if (options.projectWindow) title = `${options.projectWindow.projectName} · ${APP_NAME}`;
+  return title;
+}
+
+function trackDesktopWindowSession(
+  window: BrowserWindow,
+  options: CreateDesktopWindowOptions,
+  restoredState: WindowState | null,
+): void {
+  windowSessionManager?.track(window, {
+    id: options.savedWindow?.id ?? options.projectWindow?.windowId ?? randomUUID(),
+    projectWindow: options.projectWindow ?? null,
+    route: options.initialRoute ?? "/",
+    state: restoredState ?? { ...window.getNormalBounds(), isMaximized: false },
+  });
+  window.on("query-session-end", () => windowSessionManager?.beginQuit());
+  window.on("session-end", () => windowSessionManager?.beginQuit());
+}
+
+async function createWindow(options: CreateDesktopWindowOptions = {}): Promise<BrowserWindow> {
+  const iconPath = await getEffectiveAppIconPath();
+  const systemTheme = resolveSystemWindowTheme();
+  const { windowStateStore, restoredWindowState } = await getRestoredWindowGeometry(options);
   const mainWindow = new BrowserWindow({
-    title,
+    title: getDesktopWindowTitle(options),
     ...resolveWindowBounds(restoredWindowState),
     show: false,
     backgroundColor: getWindowBackgroundColor(systemTheme),
@@ -759,6 +788,7 @@ async function createWindow(
   if (windowStateStore) {
     setupWindowStatePersistence(mainWindow, windowStateStore);
   }
+  trackDesktopWindowSession(mainWindow, options, restoredWindowState);
   setupDefaultContextMenu(mainWindow);
   setupDragDropPrevention(mainWindow);
   mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
@@ -901,6 +931,9 @@ function setupSingleInstanceLock(): boolean {
   }
 
   app.on("second-instance", (_event, commandLine) => {
+    // Windows may also restore applications during sign-in. A duplicate login
+    // launch must not append another ordinary window to the restored session.
+    if (commandLine.includes(RESTORE_WINDOWS_ARGUMENT)) return;
     const agentTarget = parseAgentDeepLinkFromArgv(commandLine);
     if (agentTarget) {
       void bootstrapComplete
@@ -929,7 +962,7 @@ function setupSingleInstanceLock(): boolean {
 }
 
 async function runCliPassthroughIfRequested(): Promise<boolean> {
-  const cliArgs = parsePassthroughCliArgsFromArgv(process.argv);
+  const cliArgs = parsePassthroughCliArgsFromArgv(startupArgv);
   if (!cliArgs) {
     return false;
   }
@@ -952,6 +985,19 @@ async function bootstrap(): Promise<void> {
   }
 
   await app.whenReady();
+  windowSessionManager = createWindowSessionManager({
+    store: createWindowSessionStore(app.getPath("userData")),
+    appUrl: app.isPackaged ? `${APP_SCHEME}://app` : DEV_SERVER_URL,
+    onError: (error) => log.error("[window-session] Failed to save or restore a window", error),
+  });
+  const savedSession = await windowSessionManager.load();
+  if (app.isPackaged && process.platform === "win32" && savedSession.restoreAtLogin) {
+    app.setLoginItemSettings({
+      openAtLogin: true,
+      path: process.execPath,
+      args: [RESTORE_WINDOWS_ARGUMENT],
+    });
+  }
   configureDesktopDownloads(session.defaultSession, app.getPath("desktop"));
 
   if (app.isPackaged) {
@@ -1027,13 +1073,25 @@ async function bootstrap(): Promise<void> {
     });
   });
 
-  // The first window of the session restores and persists saved geometry.
+  await windowSessionManager.restore(async (entry) => {
+    await createWindow({
+      initialRoute: entry.route,
+      projectWindow: entry.projectWindow ?? undefined,
+      savedWindow: entry,
+    });
+  });
   const initialAgentNavigation = pendingAgentNavigation;
   pendingAgentNavigation = null;
-  await desktopWindowOwner.openPrimary({
-    initialRoute: initialAgentNavigation ? buildAgentDeepLinkRoute(initialAgentNavigation) : null,
-    pendingProjectPath: pendingOpenProjectPath,
-  });
+  if (
+    BrowserWindow.getAllWindows().length === 0 ||
+    initialAgentNavigation ||
+    pendingOpenProjectPath
+  ) {
+    await desktopWindowOwner.openPrimary({
+      initialRoute: initialAgentNavigation ? buildAgentDeepLinkRoute(initialAgentNavigation) : null,
+      pendingProjectPath: pendingOpenProjectPath,
+    });
+  }
   pendingOpenProjectPath = null;
 
   // Protocol + IPC handlers and the first window now exist: release any
@@ -1048,6 +1106,7 @@ async function bootstrap(): Promise<void> {
   }
 
   app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length > 0) return;
     void desktopWindowOwner.restoreWhenActivated().catch((error) => {
       console.error("Failed to restore a desktop window after activation", error);
     });
@@ -1055,7 +1114,11 @@ async function bootstrap(): Promise<void> {
 }
 
 void runDesktopStartup({
-  hasPendingGuiLaunchRequest: Boolean(pendingOpenProjectPath || pendingAgentNavigation),
+  hasPendingGuiLaunchRequest: Boolean(
+    pendingOpenProjectPath ||
+    pendingAgentNavigation ||
+    process.argv.includes(RESTORE_WINDOWS_ARGUMENT),
+  ),
   runCliPassthroughIfRequested,
   inheritLoginShellEnv,
   bootstrapGui: bootstrap,
@@ -1103,6 +1166,7 @@ electronAutoUpdater.on("before-quit-for-update", () => {
   log.info("[auto-updater] before-quit-for-update", { currentVersion: app.getVersion() });
   quitLifecycle.handleBeforeQuitForUpdate();
 });
+app.on("before-quit", () => windowSessionManager?.beginQuit());
 app.on("before-quit", quitLifecycle.handleBeforeQuit);
 registerExternalQuitSignals({ signals: process, quit: () => app.quit() });
 
