@@ -21,6 +21,7 @@ describe("project window state", () => {
     expect(filterProjectWindowHosts(hosts, scope)).toEqual([hosts[0]]);
     expect(hosts).toHaveLength(2);
     expect(filterProjectWindowHosts(hosts, null)).toBe(hosts);
+    expect(filterProjectWindowHosts(hosts, scope, "other")).toEqual(hosts);
     expect(filterProjectWindowHosts(hosts, { ...scope, serverId: "missing" })).toEqual([]);
   });
 

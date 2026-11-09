@@ -8,8 +8,13 @@ export function getProjectWindowScope(): DesktopProjectWindowScope | null {
 export function filterProjectWindowHosts<T extends { serverId: string }>(
   hosts: T[],
   scope = getProjectWindowScope(),
+  localPluginServerId: string | null = null,
 ): T[] {
-  return scope ? hosts.filter((host) => host.serverId === scope.serverId) : hosts;
+  return scope
+    ? hosts.filter(
+        (host) => host.serverId === scope.serverId || host.serverId === localPluginServerId,
+      )
+    : hosts;
 }
 
 const WINDOW_STORAGE_KEYS = new Set([

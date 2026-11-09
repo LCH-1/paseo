@@ -33,7 +33,7 @@ import {
 import { resolveAppVersion } from "@/utils/app-version";
 import { ConnectionOfferSchema, type ConnectionOffer } from "@getpaseo/protocol/connection-offer";
 import { HostConfirmations, type HostConfirmationRequest } from "./host-confirmation";
-import { shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
+import { getDesktopDaemonStatus, shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
 import { isWeb } from "@/constants/platform";
 import { connectToDaemon, getConnectionAuthFailureReason } from "@/utils/test-daemon-connection";
 import { getOrCreateClientId } from "@/utils/client-id";
@@ -49,7 +49,7 @@ import {
   createDesktopDaemonTransportFactory,
 } from "@/desktop/daemon/desktop-daemon-transport";
 import { getDesktopHost } from "@/desktop/host";
-import { filterProjectWindowHosts } from "@/project-window/state";
+import { filterProjectWindowHosts, getProjectWindowScope } from "@/project-window/state";
 import { readDesktopManagedLocalCredential } from "@/desktop/daemon/local-credential";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 import { BROWSER_AUTOMATION_COMMAND_NAMES } from "@getpaseo/protocol/browser-automation/rpc-schemas";
@@ -1498,6 +1498,7 @@ export class HostRuntimeStore {
   private hostListVersion = 0;
   private hostRegistryLoaded = false;
   private hosts: HostProfile[] = [];
+  private localPluginServerId: string | null = null;
   private hostAppearanceMutationTail: Promise<void> = Promise.resolve();
   private hostRegistryStatus: HostRegistryStatus = "loading";
   private deps: HostRuntimeControllerDeps;
@@ -1584,6 +1585,17 @@ export class HostRuntimeStore {
     }
 
     if (shouldUseDesktopDaemon()) {
+      if (getProjectWindowScope()) {
+        try {
+          const local = await getDesktopDaemonStatus();
+          if (local.status === "running" && local.serverId) {
+            this.localPluginServerId = local.serverId;
+            this.syncHosts(this.hosts);
+          }
+        } catch (error) {
+          console.warn("[HostRuntime] Local UI host is unavailable", error);
+        }
+      }
       return;
     }
 
@@ -2274,8 +2286,12 @@ export class HostRuntimeStore {
   ): void {
     this.replicaCache.setHosts(hosts.map((host) => host.serverId));
     projectIconCache.setHosts(hosts.map((host) => host.serverId));
-    // The registry/cache stay complete; a dedicated window only owns its host's live work.
-    const connectedHosts = filterProjectWindowHosts(hosts);
+    // Local plugins supply window-wide UI, including when the project host is offline.
+    const connectedHosts = filterProjectWindowHosts(
+      hosts,
+      getProjectWindowScope(),
+      this.localPluginServerId,
+    );
     const nextIds = new Set(connectedHosts.map((host) => host.serverId));
     for (const [serverId, controller] of this.controllers) {
       if (nextIds.has(serverId)) {

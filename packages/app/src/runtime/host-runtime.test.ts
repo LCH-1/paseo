@@ -33,6 +33,52 @@ import { subscriptionFixture } from "./subscription-fixture";
 import { readDesktopManagedLocalCredential } from "@/desktop/daemon/local-credential";
 import type { HostConfirmationRequest } from "./host-confirmation";
 import * as desktopHost from "@/desktop/host";
+import * as desktopDaemon from "@/desktop/daemon/desktop-daemon";
+
+it("keeps the local UI host available beside a dedicated remote project", async () => {
+  const selected = makeHost({ serverId: "srv_remote_project_ui" });
+  const local = makeHost({ serverId: "srv_local_ui_support" });
+  const other = makeHost({ serverId: "srv_other_ui_host" });
+  const storage = createMemoryHostRuntimeStorage();
+  await storage.setItem("@paseo:daemon-registry", JSON.stringify([selected, local, other]));
+  const bridge = vi.spyOn(desktopHost, "getDesktopHost").mockReturnValue({
+    projectWindow: {
+      serverId: selected.serverId,
+      projectId: "project",
+      projectName: "Project",
+      directory: "/project",
+      windowId: "remote-window",
+    },
+  });
+  const desktop = vi.spyOn(desktopDaemon, "shouldUseDesktopDaemon").mockReturnValue(true);
+  const status = vi.spyOn(desktopDaemon, "getDesktopDaemonStatus").mockResolvedValue({
+    serverId: local.serverId,
+    status: "running",
+    listen: null,
+    hostname: null,
+    pid: 1,
+    home: "/local",
+    version: "0.12.0",
+    desktopManaged: true,
+    ownedByDesktop: false,
+    startedAt: null,
+    error: null,
+  });
+  const store = createAppearanceStore(storage);
+  try {
+    await store.boot();
+    expect(useSessionStore.getState().sessions[selected.serverId]).toBeDefined();
+    expect(useSessionStore.getState().sessions[local.serverId]).toBeDefined();
+    expect(useSessionStore.getState().sessions[other.serverId]).toBeUndefined();
+    expect(store.getHosts()).toHaveLength(3);
+    expect(status).toHaveBeenCalledOnce();
+  } finally {
+    store.syncHosts([]);
+    status.mockRestore();
+    desktop.mockRestore();
+    bridge.mockRestore();
+  }
+});
 import { collectAllTabs, useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 
 it("releases timeline demand and only the deleted conversation's saved tabs", () => {
