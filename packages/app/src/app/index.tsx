@@ -1,4 +1,5 @@
 import React from "react";
+import { getProjectWindowScope } from "@/project-window/state";
 import { Redirect, usePathname } from "expo-router";
 import { StartupSplashScreen } from "@/screens/startup-splash-screen";
 import { useEarliestOnlineHostServerId, useHostRuntimeBootstrapState } from "@/app/_layout";
@@ -33,6 +34,7 @@ export default function Index() {
   );
 
   const startupRoute = resolveStartupRoute({
+    projectWindow: getProjectWindowScope(),
     route: { kind: "index", pathname },
     startupBlocker: bootstrapState.startupBlocker,
     hostRegistryStatus,

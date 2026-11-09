@@ -20,6 +20,8 @@ export function ProjectWindowBoundary({ children }: { children: ReactNode }) {
     sourceDirectory: scope.directory,
     displayName: scope.projectName,
   });
+  if (pathname === "/open-project" || pathname.endsWith("/open-project"))
+    return <Redirect href={newRoute} />;
   const hostSegment = pathname.split("/")[2];
   if (pathname.startsWith("/h/") && decodeURIComponent(hostSegment) !== scope.serverId) {
     return <Redirect href={newRoute} />;

@@ -1,4 +1,5 @@
 import type { AppState } from "react-native";
+import type { DesktopProjectWindowScope } from "@/desktop/host";
 import type { ActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import type {
   DaemonStartCondition,
@@ -10,6 +11,7 @@ import {
   buildHostRootRoute,
   buildHostWorkspaceRoute,
   buildOpenProjectRoute,
+  buildNewWorkspaceRoute,
 } from "@/utils/host-routes";
 
 export interface HostRuntimeBootstrapStore {
@@ -111,6 +113,7 @@ interface ResolveStartupRouteBaseInput {
 }
 
 export interface ResolveIndexStartupRouteInput extends ResolveStartupRouteBaseInput {
+  projectWindow?: DesktopProjectWindowScope | null;
   route: IndexStartupRouteTarget;
   anyOnlineHostServerId: string | null;
   workspaceSelection: ActiveWorkspaceSelection | null;
@@ -188,13 +191,27 @@ function resolveReadyIndexStartupRoute(input: ResolveIndexStartupRouteInput): St
 
   if (
     shouldRestoreWorkspaceSelection(input) &&
-    hostExists(input.hosts, input.workspaceSelection.serverId)
+    hostExists(input.hosts, input.workspaceSelection.serverId) &&
+    (!input.projectWindow || input.projectWindow.serverId === input.workspaceSelection.serverId)
   ) {
     // Native cold launch must enter the host boundary first. The host index
     // owns workspace restore after its local dynamic params exist.
     return {
       kind: "redirect",
       href: buildHostRootRoute(input.workspaceSelection.serverId),
+    };
+  }
+
+  if (input.projectWindow) {
+    const scope = input.projectWindow;
+    return {
+      kind: "redirect",
+      href: buildNewWorkspaceRoute({
+        serverId: scope.serverId,
+        projectId: scope.projectId,
+        sourceDirectory: scope.directory,
+        displayName: scope.projectName,
+      }),
     };
   }
 

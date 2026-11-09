@@ -185,6 +185,44 @@ describe("resolveStartupRoute", () => {
     hosts: [],
   };
 
+  it("starts an empty project window at its own project and restores only its remembered host", () => {
+    const projectWindow = {
+      windowId: "one",
+      serverId: "project-host",
+      projectId: "project",
+      projectName: "Project",
+      directory: "/project",
+    };
+    const input = {
+      ...baseIndexInput,
+      projectWindow,
+      hosts: [{ serverId: "project-host" }, { serverId: "other-host" }],
+      anyOnlineHostServerId: "other-host",
+    };
+    const result = resolveStartupRoute(input);
+    if (result.kind !== "redirect" || typeof result.href !== "string")
+      throw Error("Missing project redirect");
+    const route = new URL(result.href, "https://paseo.local");
+    expect(route.pathname).toBe("/new");
+    expect(route.searchParams.get("serverId")).toBe(projectWindow.serverId);
+    expect(route.searchParams.get("projectId")).toBe(projectWindow.projectId);
+    expect(
+      resolveStartupRoute({
+        ...input,
+        workspaceSelection: { serverId: "project-host", workspaceId: "w" },
+      }),
+    ).toEqual({ kind: "redirect", href: "/h/project-host" });
+    expect(
+      resolveStartupRoute({
+        ...input,
+        workspaceSelection: { serverId: "other-host", workspaceId: "w" },
+      }),
+    ).toEqual(result);
+    expect(resolveStartupRoute({ ...input, isWorkspaceSelectionLoaded: false })).toEqual({
+      kind: "splash",
+    });
+  });
+
   it("renders non-index routes instead of making an index startup decision", () => {
     expect(
       resolveStartupRoute({
