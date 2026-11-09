@@ -44,6 +44,14 @@ type PromptHandler = (input: {
 
 const queryFactory = vi.fn();
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function createAsyncQueue<T>(): AsyncQueue<T> {
   const items: T[] = [];
   const resolvers: Array<(value: IteratorResult<T, void>) => void> = [];
@@ -273,7 +281,270 @@ function buildCommandLifecycle(commandUuid: string | null | undefined, state: st
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   queryFactory.mockReset();
+});
+
+async function startControlledTurn(sessionId: string) {
+  const queries: ScriptedQuery[] = [];
+  queryFactory.mockImplementation(({ prompt }: { prompt: AsyncIterable<unknown> }) => {
+    const query = createScriptedQuery({ prompt, sessionId });
+    queries.push(query);
+    return query;
+  });
+  const session = await new ClaudeAgentClient({
+    logger: createTestLogger(),
+    queryFactory,
+    resolveBinary: async () => "/test/claude/bin",
+  }).createSession({ provider: "claude", cwd: process.cwd() });
+  const observed: AgentStreamEvent[] = [];
+  const unsubscribe = session.subscribe((event) => observed.push(event));
+  const turn = streamSession(session, "original prompt");
+  await turn.next();
+  await waitFor(() => queries[0]?.prompts.length === 1);
+  await waitForInitRouted(() => queries[0]);
+  return { session, queries, query: queries[0]!, observed, unsubscribe, turn };
+}
+
+test("interrupt rejection preserves the foreground turn and permits a confirmed retry", async () => {
+  const { session, query, observed, unsubscribe } = await startControlledTurn("interrupt-reject");
+  try {
+    query.interrupt.mockRejectedValueOnce(new Error("interrupt transport failed"));
+    await expect(session.interrupt()).rejects.toThrow("interrupt transport failed");
+    expect(observed.some((event) => event.type === "turn_canceled")).toBe(false);
+    await expect(session.startTurn("overlapping prompt")).rejects.toThrow(
+      "A foreground turn is already active",
+    );
+    expect(query.prompts).toHaveLength(1);
+
+    await session.interrupt();
+    expect(observed.filter((event) => event.type === "turn_canceled")).toHaveLength(1);
+    expect(query.interrupt).toHaveBeenCalledTimes(2);
+  } finally {
+    unsubscribe();
+    await session.close();
+  }
+});
+
+test("interrupt waits for confirmation and shares concurrent cancellation", async () => {
+  const { session, query, observed, unsubscribe } = await startControlledTurn("interrupt-ack");
+  const confirmation = createDeferred<void>();
+  try {
+    query.interrupt.mockReturnValueOnce(confirmation.promise);
+    const firstStop = session.interrupt();
+    const secondStop = session.interrupt();
+    await waitFor(() => query.interrupt.mock.calls.length > 0);
+    expect(query.interrupt).toHaveBeenCalledTimes(1);
+    expect(observed.some((event) => event.type === "turn_canceled")).toBe(false);
+    await expect(session.startTurn("overlapping prompt")).rejects.toThrow(
+      "A foreground turn is already active",
+    );
+
+    confirmation.resolve();
+    await Promise.all([firstStop, secondStop]);
+    expect(observed.filter((event) => event.type === "turn_canceled")).toHaveLength(1);
+
+    query.interrupt.mockRejectedValueOnce(new Error("idle should not be interrupted"));
+    await expect(session.interrupt()).resolves.toBeUndefined();
+    expect(query.interrupt).toHaveBeenCalledTimes(1);
+    query.interrupt.mockResolvedValue(undefined);
+  } finally {
+    confirmation.resolve();
+    unsubscribe();
+    await session.close();
+  }
+});
+
+test("interrupt timeout preserves the turn and ignores a late confirmation", async () => {
+  const { session, query, observed, unsubscribe } = await startControlledTurn("interrupt-timeout");
+  const confirmation = createDeferred<void>();
+  try {
+    vi.useFakeTimers();
+    query.interrupt.mockReturnValueOnce(confirmation.promise);
+    const stop = expect(session.interrupt()).rejects.toThrow(/timed out/i);
+    await vi.advanceTimersByTimeAsync(3_001);
+    await stop;
+    expect(observed.some((event) => event.type === "turn_canceled")).toBe(false);
+    await expect(session.startTurn("overlapping prompt")).rejects.toThrow(
+      "A foreground turn is already active",
+    );
+    confirmation.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(observed.some((event) => event.type === "turn_canceled")).toBe(false);
+
+    await session.interrupt();
+    expect(observed.filter((event) => event.type === "turn_canceled")).toHaveLength(1);
+  } finally {
+    vi.useRealTimers();
+    confirmation.resolve();
+    unsubscribe();
+    await session.close();
+  }
+});
+
+test("timed-out queued withdrawal cannot interrupt a later turn", async () => {
+  const { session, query, observed, unsubscribe } = await startControlledTurn("withdraw-timeout");
+  const withdrawal = createDeferred<boolean>();
+  try {
+    vi.useFakeTimers();
+    query.cancelAsyncMessage.mockReturnValueOnce(withdrawal.promise);
+    const stop = expect(session.interrupt()).rejects.toThrow(/timed out/i);
+    await vi.advanceTimersByTimeAsync(3_001);
+    await stop;
+    expect(query.interrupt).not.toHaveBeenCalled();
+    expect(observed.some((event) => event.type === "turn_canceled")).toBe(false);
+    query.emit(buildSuccessResult("withdraw-timeout"));
+    await vi.advanceTimersByTimeAsync(0);
+    const nextTurn = await session.startTurn("replacement prompt");
+    withdrawal.resolve(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(query.interrupt).not.toHaveBeenCalled();
+    query.emit(buildSuccessResult("withdraw-timeout"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(observed.at(-1)).toMatchObject({ type: "turn_completed", turnId: nextTurn.turnId });
+  } finally {
+    vi.useRealTimers();
+    withdrawal.resolve(false);
+    unsubscribe();
+    await session.close();
+  }
+});
+
+test("interrupt rejection preserves an autonomous turn", async () => {
+  const { session, query, observed, unsubscribe } = await startControlledTurn("autonomous-reject");
+  try {
+    query.emit(buildSuccessResult("autonomous-reject"));
+    await waitFor(() => observed.some((event) => event.type === "turn_completed"));
+    query.emit(buildTurnInit("autonomous-reject"));
+    await waitFor(() => observed.filter((event) => event.type === "turn_started").length === 2);
+    query.interrupt.mockRejectedValueOnce(new Error("autonomous interrupt failed"));
+    await expect(session.interrupt()).rejects.toThrow("autonomous interrupt failed");
+    expect(observed.filter((event) => event.type === "turn_completed")).toHaveLength(1);
+    await session.interrupt();
+    expect(observed.filter((event) => event.type === "turn_completed")).toHaveLength(2);
+  } finally {
+    unsubscribe();
+    await session.close();
+  }
+});
+
+test("concurrent autonomous stops share confirmation without affecting a later turn", async () => {
+  const { session, query, observed, unsubscribe } = await startControlledTurn("autonomous-ack");
+  const confirmation = createDeferred<void>();
+  try {
+    query.emit(buildSuccessResult("autonomous-ack"));
+    await waitFor(() => observed.some((event) => event.type === "turn_completed"));
+    query.emit(buildTurnInit("autonomous-ack"));
+    await waitFor(() => observed.filter((event) => event.type === "turn_started").length === 2);
+    query.interrupt.mockReturnValue(confirmation.promise);
+    const firstStop = session.interrupt();
+    const secondStop = session.interrupt();
+    await waitFor(() => query.interrupt.mock.calls.length > 0);
+    expect(query.interrupt).toHaveBeenCalledTimes(1);
+    expect(observed.filter((event) => event.type === "turn_completed")).toHaveLength(1);
+
+    query.emit(buildSuccessResult("autonomous-ack"));
+    await waitFor(() => observed.filter((event) => event.type === "turn_completed").length === 2);
+    const replacement = await session.startTurn("replacement prompt");
+    confirmation.resolve();
+    await Promise.all([firstStop, secondStop]);
+    expect(observed.filter((event) => event.type === "turn_completed")).toHaveLength(2);
+    expect(observed.some((event) => event.type === "turn_canceled")).toBe(false);
+    await expect(session.startTurn("overlapping prompt")).rejects.toThrow(
+      "A foreground turn is already active",
+    );
+    query.emit(buildSuccessResult("autonomous-ack"));
+    await waitFor(() => observed.filter((event) => event.type === "turn_completed").length === 3);
+    expect(observed.at(-1)).toMatchObject({ type: "turn_completed", turnId: replacement.turnId });
+  } finally {
+    confirmation.resolve();
+    unsubscribe();
+    await session.close();
+  }
+});
+
+test("closing a session settles its active foreground stream", async () => {
+  const { session, query, turn, observed, unsubscribe } =
+    await startControlledTurn("close-running");
+  try {
+    await session.close();
+    const events = await collectUntilTerminal(turn);
+    expect(events.filter((event) => event.type === "turn_canceled")).toHaveLength(1);
+    expect(observed.filter((event) => event.type === "turn_canceled")).toHaveLength(1);
+    expect(query.interrupt).toHaveBeenCalledTimes(1);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test("an abort result without a requested interrupt fails its foreground turn", async () => {
+  const { session, query, observed, unsubscribe } = await startControlledTurn("unsolicited-abort");
+  try {
+    const nextCalls = query.next.mock.calls.length;
+    query.emit({
+      type: "result",
+      subtype: "error_during_execution",
+      errors: ["Request was aborted."],
+      session_id: "unsolicited-abort",
+    });
+    await waitFor(() => query.next.mock.calls.length > nextCalls);
+    expect(observed.filter((event) => event.type === "turn_failed")).toHaveLength(1);
+    await session.startTurn("retry prompt");
+    query.emit(buildSuccessResult("unsolicited-abort"));
+    await waitFor(() => observed.some((event) => event.type === "turn_completed"));
+  } finally {
+    unsubscribe();
+    await session.close();
+  }
+});
+
+test("an abort exception without a requested interrupt fails and retires the query", async () => {
+  const { session, query, queries, observed, unsubscribe } = await startControlledTurn(
+    "unsolicited-abort-exception",
+  );
+  try {
+    query.next.mockRejectedValueOnce(new Error("Request was aborted."));
+    query.emit({ type: "assistant", message: { content: "LAST_ACTIVITY" } });
+    await waitFor(() =>
+      observed.some((event) => collectAssistantText([event]).includes("LAST_ACTIVITY")),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(observed.filter((event) => event.type === "turn_failed")).toHaveLength(1);
+    await session.startTurn("retry prompt");
+    await waitFor(() => queries.length === 2);
+    queries[1]!.emit(buildSuccessResult("unsolicited-abort-exception"));
+    await waitFor(() => observed.some((event) => event.type === "turn_completed"));
+  } finally {
+    unsubscribe();
+    await session.close();
+  }
+});
+
+test("late interrupt confirmation cannot cancel the next foreground turn", async () => {
+  const { session, query, observed, unsubscribe } = await startControlledTurn("interrupt-late-ack");
+  const confirmation = createDeferred<void>();
+  try {
+    query.interrupt.mockReturnValueOnce(confirmation.promise);
+    const stop = session.interrupt();
+    await waitFor(() => query.interrupt.mock.calls.length > 0);
+    query.emit(buildSuccessResult("interrupt-late-ack"));
+    await waitFor(() => observed.some((event) => event.type === "turn_completed"));
+    const nextTurn = await session.startTurn("replacement prompt");
+    confirmation.resolve();
+    await stop;
+    expect(observed.some((event) => event.type === "turn_canceled")).toBe(false);
+    await expect(session.startTurn("overlapping prompt")).rejects.toThrow(
+      "A foreground turn is already active",
+    );
+    query.emit(buildSuccessResult("interrupt-late-ack"));
+    await waitFor(() => observed.filter((event) => event.type === "turn_completed").length === 2);
+    expect(observed.at(-1)).toMatchObject({ type: "turn_completed", turnId: nextTurn.turnId });
+  } finally {
+    confirmation.resolve();
+    unsubscribe();
+    await session.close();
+  }
 });
 
 test("interrupt only calls query.interrupt and leaves the query open", async () => {
@@ -366,10 +637,10 @@ test("interrupt discards a queued steer so it cannot resume the stopped turn", a
     expect.objectContaining({ type: "turn_canceled" }),
   );
 
-  // Nothing is queued any more, so a second interrupt has no steer left to discard.
+  // The acknowledged stop is idle: repeating it must leave the background runtime alone.
   query()?.cancelAsyncMessage.mockClear();
   await session.interrupt();
-  await waitFor(() => query()?.interrupt.mock.calls.length === 2);
+  expect(query()?.interrupt).toHaveBeenCalledTimes(1);
   expect(query()?.cancelAsyncMessage).not.toHaveBeenCalled();
 
   await session.close();

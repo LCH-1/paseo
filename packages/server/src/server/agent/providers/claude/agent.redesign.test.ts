@@ -1521,7 +1521,7 @@ test("session state never opens or closes a foreground turn", async () => {
 });
 
 interface InterruptInternals extends SessionStateInternals {
-  pendingInterruptAbort: boolean;
+  pendingInterruptTurnId: string | null;
 }
 
 type InterruptibleQueryMock = QueryMock & { cancelAsyncMessage: ReturnType<typeof vi.fn> };
@@ -1564,7 +1564,7 @@ test("an interrupt before Claude starts the message withdraws it instead of inte
   expect(queryMock.cancelAsyncMessage).toHaveBeenCalledWith(await readFirstPromptUuid());
   expect(queryMock.interrupt).not.toHaveBeenCalled();
   // No result follows an interrupt that never happened, so no flag may wait for one.
-  expect(internal.pendingInterruptAbort).toBe(false);
+  expect(internal.pendingInterruptTurnId).toBeNull();
   expect(events.filter((event) => event.type === "turn_canceled")).toHaveLength(1);
 
   await session.close();
@@ -1584,12 +1584,12 @@ test("an interrupt after Claude took the message but before it started stops it"
 
   await vi.waitFor(() => expect(queryMock.interrupt).toHaveBeenCalledTimes(1));
   expect(queryMock.cancelAsyncMessage).toHaveBeenCalledWith(await readFirstPromptUuid());
-  expect(internal.pendingInterruptAbort).toBe(true);
+  expect(internal.pendingInterruptTurnId).toBe("foreground-turn-1");
 
   await session.close();
 });
 
-test("a prompt sent while a stopped prompt is being withdrawn is not withdrawn too", async () => {
+test("a prompt cannot start until the previous prompt withdrawal is confirmed", async () => {
   const queryMock = createInterruptibleQueryMock();
   let settleWithdrawal: (cancelled: boolean) => void = () => {};
   queryMock.cancelAsyncMessage.mockImplementationOnce(
@@ -1600,11 +1600,13 @@ test("a prompt sent while a stopped prompt is being withdrawn is not withdrawn t
 
   await session.startTurn("first");
   const firstUuid = await readFirstPromptUuid();
-  await session.interrupt();
+  const stop = session.interrupt();
   await vi.waitFor(() => expect(queryMock.cancelAsyncMessage).toHaveBeenCalledTimes(1));
 
-  await session.startTurn("second");
+  await expect(session.startTurn("second")).rejects.toThrow("A foreground turn is already active");
   settleWithdrawal(false);
+  await stop;
+  await session.startTurn("second");
 
   await vi.waitFor(() => expect(queryMock.interrupt).toHaveBeenCalledTimes(1));
   expect(queryMock.cancelAsyncMessage).toHaveBeenCalledTimes(1);
@@ -1634,7 +1636,7 @@ test("an interrupt while only background subagents run never reaches Claude", as
 
   expect(queryMock.interrupt).not.toHaveBeenCalled();
   expect(queryMock.cancelAsyncMessage).not.toHaveBeenCalled();
-  expect(internal.pendingInterruptAbort).toBe(false);
+  expect(internal.pendingInterruptTurnId).toBeNull();
 
   await session.close();
 });
@@ -1656,13 +1658,13 @@ test("an interrupt during a main turn interrupts Claude once and drops the abort
   await vi.waitFor(() => expect(queryMock.interrupt).toHaveBeenCalledTimes(1));
   // Claude already started the message, so there is nothing to withdraw.
   expect(queryMock.cancelAsyncMessage).not.toHaveBeenCalled();
-  expect(internal.pendingInterruptAbort).toBe(true);
+  expect(internal.pendingInterruptTurnId).toBe("foreground-turn-1");
 
   // A replacement starts before the aborted turn reports its result.
   const { turnId } = await session.startTurn("replacement");
   await internal.routeSdkMessageFromPump(abortedResult(), queryMock);
   expect(internal.activeForegroundTurnId).toBe(turnId);
-  expect(internal.pendingInterruptAbort).toBe(false);
+  expect(internal.pendingInterruptTurnId).toBeNull();
   expect(events.filter((event) => event.type === "turn_failed")).toHaveLength(0);
 
   await internal.routeSdkMessageFromPump(claudeTurnInit(), queryMock);
@@ -1681,10 +1683,10 @@ test("a new turn clears an interrupt flag no result will consume", async () => {
   session.subscribe((event) => events.push(event));
 
   // An interrupt that landed just after its turn had ended: Claude emits no result for it.
-  internal.pendingInterruptAbort = true;
+  internal.pendingInterruptTurnId = "foreground-turn-prior";
 
   await internal.routeSdkMessageFromPump(claudeTurnInit(), queryMock);
-  expect(internal.pendingInterruptAbort).toBe(false);
+  expect(internal.pendingInterruptTurnId).toBeNull();
   expect(internal.autonomousTurn?.id).toBe("autonomous-turn-1");
 
   // This turn's own failure is reported, not swallowed as the interrupted turn's leftover.

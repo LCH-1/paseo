@@ -2199,6 +2199,7 @@ class ClaudeAgentSession implements AgentSession {
   private readonly queryFactory?: ClaudeQueryFactory;
   private readonly resolveBinary: () => Promise<string>;
   private query: Query | null = null;
+  private readonly exitedQueries = new WeakSet<Query>();
   private readonly harnessEnvironment: Record<string, string>;
   private readonly usageSessionKey = randomUUID();
   private childProcess: ChildProcess | null = null;
@@ -2272,7 +2273,7 @@ class ClaudeAgentSession implements AgentSession {
   private historyPending = false;
   private turnState: TurnState = "idle";
   private nextTurnOrdinal = 1;
-  private cancelCurrentTurn: (() => void) | null = null;
+  private cancelCurrentTurn: (() => Promise<void>) | null = null;
   private cachedRuntimeInfo: AgentRuntimeInfo | null = null;
   private lastOptionsModel: string | null = null;
   private lastRuntimeModel: string | null = null;
@@ -2280,7 +2281,7 @@ class ClaudeAgentSession implements AgentSession {
   private compactionMarkerOpen = false;
   private queryPumpPromise: Promise<void> | null = null;
   private queryRestartNeeded = false;
-  private pendingInterruptAbort = false;
+  private pendingInterruptTurnId: string | null = null;
   /**
    * Whether Claude's main session is inside one of its own turns: set by system/init and by a
    * pushed message's command_lifecycle "started" (/compact works for seconds before its init),
@@ -2436,28 +2437,34 @@ class ClaudeAgentSession implements AgentSession {
     if (sdkUserMessageId) this.unstartedMessageUuids.add(sdkUserMessageId);
 
     let cancelIssued = false;
+    let cancelPromise: Promise<void> | null = null;
     const requestCancel = () => {
-      if (cancelIssued) {
-        return;
+      if (cancelPromise) {
+        return cancelPromise;
       }
       cancelIssued = true;
-      if (this.cancelCurrentTurn === requestCancel) {
-        this.cancelCurrentTurn = null;
-      }
       // Whether Claude has this message in hand. A late idle from the previous turn can clear
       // mainTurnInFlight after Claude started it, so the message's own lifecycle counts too.
       const claudeStartedTurn =
         this.mainTurnInFlight ||
         (sdkUserMessageId !== null && !this.unstartedMessageUuids.has(sdkUserMessageId));
-      this.rejectAllPendingPermissions(new Error("Permission request canceled"));
-      this.finishForegroundTurn({
-        type: "turn_canceled",
-        provider: "claude",
-        reason: "Interrupted",
-      });
-      void this.interruptActiveTurn(claudeStartedTurn).catch((error) => {
-        this.logger.warn({ err: error }, "Failed to interrupt during cancel");
-      });
+      cancelPromise = this.interruptActiveTurn(claudeStartedTurn)
+        .then(() => {
+          // A result may finish this turn while the control request is still pending.
+          if (this.activeForegroundTurnId !== turnId) return;
+          this.rejectAllPendingPermissions(new Error("Permission request canceled"));
+          return this.finishForegroundTurn({
+            type: "turn_canceled",
+            provider: "claude",
+            reason: "Interrupted",
+          });
+        })
+        .catch((error) => {
+          cancelIssued = false;
+          cancelPromise = null;
+          throw error;
+        });
+      return cancelPromise;
     };
     this.cancelCurrentTurn = requestCancel;
 
@@ -2484,9 +2491,13 @@ class ClaudeAgentSession implements AgentSession {
       }, 0);
     } catch (error) {
       if (sdkUserMessageId) this.unstartedMessageUuids.delete(sdkUserMessageId);
-      this.finishForegroundTurn(
-        this.buildTurnFailedEvent(error instanceof Error ? error.message : "Claude stream failed"),
-      );
+      if (this.activeForegroundTurnId === turnId) {
+        this.finishForegroundTurn(
+          this.buildTurnFailedEvent(
+            error instanceof Error ? error.message : "Claude stream failed",
+          ),
+        );
+      }
     }
 
     return { turnId };
@@ -2559,16 +2570,26 @@ class ClaudeAgentSession implements AgentSession {
 
   async interrupt(): Promise<void> {
     if (this.cancelCurrentTurn) {
-      this.cancelCurrentTurn();
+      await this.cancelCurrentTurn();
       return;
     }
 
-    if (this.autonomousTurn) {
-      this.flushPendingToolCalls();
-      this.completeAutonomousTurn();
+    const autonomousTurnId = this.autonomousTurn?.id;
+    if (!autonomousTurnId && !this.activeForegroundTurnId) return;
+    const cancellation = this.interruptActiveTurn().then(() => {
+      if (autonomousTurnId && this.autonomousTurn?.id === autonomousTurnId) {
+        this.flushPendingToolCalls();
+        return this.completeAutonomousTurn();
+      }
+      return;
+    });
+    const requestCancel = () => cancellation;
+    this.cancelCurrentTurn = requestCancel;
+    try {
+      await cancellation;
+    } finally {
+      if (this.cancelCurrentTurn === requestCancel) this.cancelCurrentTurn = null;
     }
-
-    await this.interruptActiveTurn();
   }
 
   async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
@@ -2890,7 +2911,13 @@ class ClaudeAgentSession implements AgentSession {
     );
     this.closed = true;
     this.rejectAllPendingPermissions(new Error("Claude session closed"));
-    this.cancelCurrentTurn?.();
+    if (this.activeForegroundTurnId) {
+      this.finishForegroundTurn({
+        type: "turn_canceled",
+        provider: "claude",
+        reason: "Session closed",
+      });
+    }
     this.subscribers.clear();
     this.activeForegroundTurnId = null;
     this.activeForegroundQuery = null;
@@ -3340,10 +3367,13 @@ class ClaudeAgentSession implements AgentSession {
       if (retiredChild) this.failRunningRuntimeTasks();
       oldInput?.end();
       oldQuery.close?.();
-      try {
-        await oldQuery.return?.();
-      } catch {
-        /* ignore */
+      // Once its child exited, a pending SDK next()/return() cannot release a live writer.
+      if (!this.exitedQueries.has(oldQuery)) {
+        try {
+          await oldQuery.return?.();
+        } catch {
+          /* ignore */
+        }
       }
       // Tree-kill the old process tree now that the SDK has cleaned up.
       // If we skip this, MCP children of the previous claude process can
@@ -3368,6 +3398,7 @@ class ClaudeAgentSession implements AgentSession {
     this.input = input;
     // A fresh Claude process has no turn of its own in flight.
     this.mainTurnInFlight = false;
+    this.queryRestartNeeded = false;
     this.query = claudeQuery(
       { prompt: input.iterable, options },
       {
@@ -3709,11 +3740,6 @@ class ClaudeAgentSession implements AgentSession {
     this.transitionTurnState("idle", reason);
   }
 
-  private isAbortError(message: SDKMessage): boolean {
-    const errors = "errors" in message && Array.isArray(message.errors) ? message.errors : [];
-    return errors.some((e: string) => /\baborted\b/i.test(e));
-  }
-
   private buildTurnFailedEvent(
     errorMessage: string,
   ): Extract<AgentStreamEvent, { type: "turn_failed" }> {
@@ -3819,7 +3845,12 @@ class ClaudeAgentSession implements AgentSession {
     error: unknown,
     consecutiveRecoveries: number,
   ): boolean {
-    if (consecutiveRecoveries >= 3) {
+    const activeTurnId = this.activeForegroundTurnId ?? this.autonomousTurn?.id;
+    if (
+      !this.pendingInterruptTurnId ||
+      activeTurnId === this.pendingInterruptTurnId ||
+      consecutiveRecoveries >= 3
+    ) {
       return false;
     }
     let message: string;
@@ -3867,6 +3898,7 @@ class ClaudeAgentSession implements AgentSession {
         this.syncTurnState("foreground turn terminal");
       } else if (this.autonomousTurn) {
         this.autonomousTurn = null;
+        this.cancelCurrentTurn = null;
         this.activeForegroundQuery = null;
         this.activeForegroundInput = null;
         this.activeTurnHasAssistantText = false;
@@ -3896,6 +3928,7 @@ class ClaudeAgentSession implements AgentSession {
     }
     this.notifySubscribers({ type: "turn_completed", provider: "claude" });
     this.autonomousTurn = null;
+    this.cancelCurrentTurn = null;
     this.activeForegroundQuery = null;
     this.activeForegroundInput = null;
     this.activeTurnHasAssistantText = false;
@@ -3915,11 +3948,8 @@ class ClaudeAgentSession implements AgentSession {
     }
   }
 
-  // Background Bash shells, Monitor watches and workflows live inside the Claude
-  // Code process, so they die with it. When the process exits mid-turn the query
-  // pump reports it, but when it exits between turns nothing observes the death:
-  // the agent stays "idle" and the wake-back that would have continued the work
-  // never arrives.
+  // Background tasks die with the process. The SDK can leave its iterator pending on exit,
+  // so allow its buffered result/stderr to drain before falling back to the process exit.
   private handleRuntimeExit(
     child: ChildProcess,
     code: number | null,
@@ -3929,21 +3959,40 @@ class ClaudeAgentSession implements AgentSession {
       return;
     }
     this.childProcess = null;
+    const exitedQuery = this.query;
+    if (exitedQuery) this.exitedQueries.add(exitedQuery);
     this.logger.warn(
       { agentId: this.agentId, pid: child.pid, code, signal },
       "Claude runtime exited unexpectedly",
     );
     this.failRunningRuntimeTasks();
     if (this.activeForegroundTurnId || this.autonomousTurn) {
-      // The pump is about to throw. It waits for stderr to flush and reports the
-      // real cause; reporting here first would replace that with a bare exit code
-      // and detach this.query, which is how the pump recognizes its own stream.
+      const exitedTurnId = this.activeForegroundTurnId ?? this.autonomousTurn?.id;
+      this.queryRestartNeeded = true;
+      setTimeout(() => {
+        if (this.closed || this.query !== exitedQuery) return;
+        if ((this.activeForegroundTurnId ?? this.autonomousTurn?.id) === exitedTurnId) {
+          this.failActiveTurns(
+            `Claude Code process ${signal ? `terminated by signal ${signal}` : `exited with code ${code ?? "unknown"}`}`,
+          );
+        }
+        this.query = null;
+        this.input?.end();
+        this.input = null;
+        this.queryPumpPromise = null;
+        this.queryRestartNeeded = false;
+        exitedQuery?.close?.();
+      }, STDERR_FLUSH_WAIT_MS);
       return;
     }
     // Drop the dead handles so the next write spawns a fresh process instead of
     // failing against a dead transport forever.
     this.query = null;
+    this.input?.end();
     this.input = null;
+    this.queryPumpPromise = null;
+    this.queryRestartNeeded = false;
+    exitedQuery?.close?.();
     this.dispatchEvents([
       this.buildTurnFailedEvent(
         `Claude stopped unexpectedly (${signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`}). Any background shells, monitors or other work it had running were terminated with it.`,
@@ -4004,6 +4053,7 @@ class ClaudeAgentSession implements AgentSession {
       return;
     }
 
+    const ownsQuery = () => !this.closed && this.query === activeQuery;
     let consecutiveInterruptAbortRecoveries = 0;
     const logRawMessage = (message: SDKMessage): void => {
       this.logger.trace(
@@ -4021,6 +4071,7 @@ class ClaudeAgentSession implements AgentSession {
       );
     };
     const handlePumpedMessage = async (message: SDKMessage): Promise<boolean> => {
+      if (!ownsQuery()) return true;
       logRawMessage(message);
       consecutiveInterruptAbortRecoveries = 0;
       if (await this.handleMissingResumedConversation(message, activeQuery)) {
@@ -4038,19 +4089,18 @@ class ClaudeAgentSession implements AgentSession {
       return false;
     };
     try {
-      while (!this.closed && this.query === activeQuery) {
+      while (ownsQuery()) {
         try {
           if (await drainActiveQuery()) {
             return;
           }
-          if (!this.closed && this.query === activeQuery) {
+          if (ownsQuery()) {
             this.failActiveTurns("Claude stream ended before terminal result");
           }
           return;
         } catch (error) {
           if (
-            !this.closed &&
-            this.query === activeQuery &&
+            ownsQuery() &&
             this.shouldRecoverInterruptedQueryAbort(error, consecutiveInterruptAbortRecoveries)
           ) {
             consecutiveInterruptAbortRecoveries += 1;
@@ -4060,8 +4110,9 @@ class ClaudeAgentSession implements AgentSession {
             );
             continue;
           }
-          if (!this.closed && this.query === activeQuery) {
-            await this.awaitRecentStderrAfterProcessExit(error);
+          if (!ownsQuery()) return;
+          await this.awaitRecentStderrAfterProcessExit(error);
+          if (ownsQuery()) {
             this.failActiveTurns(error instanceof Error ? error.message : "Claude stream failed");
           }
           return;
@@ -4071,24 +4122,22 @@ class ClaudeAgentSession implements AgentSession {
       if (this.query === activeQuery) {
         this.query = null;
         this.input = null;
+        this.queryRestartNeeded = false;
       }
     }
   }
 
   private shouldSuppressStaleResult(message: SDKMessage): boolean {
-    // Suppress stale results from interrupted requests. The cancel path already
-    // emitted the terminal event; this result is leftover from the killed API
-    // request. Consume the flag on ANY result so it doesn't linger.
-    if (message.type === "result" && this.pendingInterruptAbort) {
-      this.pendingInterruptAbort = false;
-      if (message.subtype !== "success") {
+    // Only a settled, explicitly interrupted turn can leave a stale abort behind. An abort
+    // from the current turn is terminal even when its interrupt acknowledgement is pending.
+    if (message.type === "result" && this.pendingInterruptTurnId) {
+      const interruptedTurnId = this.pendingInterruptTurnId;
+      this.pendingInterruptTurnId = null;
+      const activeTurnId = this.activeForegroundTurnId ?? this.autonomousTurn?.id;
+      if (message.subtype !== "success" && activeTurnId !== interruptedTurnId) {
         this.logger.debug("Suppressing stale non-success result from interrupted request");
         return true;
       }
-    }
-    if (message.type === "result" && message.subtype !== "success" && this.isAbortError(message)) {
-      this.logger.debug("Suppressing abort result by content");
-      return true;
     }
     return false;
   }
@@ -4126,7 +4175,7 @@ class ClaudeAgentSession implements AgentSession {
       this.mainTurnInFlight = true;
       // A new turn has begun, so the interrupted one is over. An interrupt that landed after its
       // turn had already ended gets no result, and the leftover flag would swallow this turn's.
-      this.pendingInterruptAbort = false;
+      this.pendingInterruptTurnId = null;
       return;
     }
     if (readClaudeCommandLifecycle(message)?.state === "started") {
@@ -4183,12 +4232,12 @@ class ClaudeAgentSession implements AgentSession {
       return;
     }
     if (
-      this.pendingInterruptAbort &&
+      this.pendingInterruptTurnId &&
       message.type === "result" &&
       events.some((event) => event.type === "turn_completed" || event.type === "turn_failed") &&
       (!this.activeForegroundTurnId || !this.foregroundHasVisibleActivity)
     ) {
-      this.pendingInterruptAbort = false;
+      this.pendingInterruptTurnId = null;
       this.logger.debug("Suppressing stale Claude interrupt terminal result");
       return;
     }
@@ -4299,7 +4348,7 @@ class ClaudeAgentSession implements AgentSession {
    * Interrupts Claude only when a turn of its main session is running. With nothing running there
    * is nothing to stop but our own queued messages, so those are withdrawn instead: an interrupt
    * would reach only background helpers (and kill them on a CLI that ignores
-   * perTaskStopAffordance), and no result would follow to consume pendingInterruptAbort.
+   * perTaskStopAffordance), and no result would follow to consume pendingInterruptTurnId.
    */
   private async interruptActiveTurn(claudeStartedTurn = this.mainTurnInFlight): Promise<void> {
     const queryToInterrupt = this.query;
@@ -4315,23 +4364,26 @@ class ClaudeAgentSession implements AgentSession {
       );
       return;
     }
-    if (claudeStartedTurn) {
-      this.pendingInterruptAbort = true;
-      await this.withdrawUnstartedMessages(queryToInterrupt);
-    } else {
-      // Claude can dequeue a message for its next turn before announcing it started; withdrawing
-      // it is then a no-op, and only an interrupt stops it. Withdraw once: a prompt sent while
-      // this withdrawal was in flight belongs to the next turn.
-      if (await this.withdrawUnstartedMessages(queryToInterrupt)) return;
-      this.pendingInterruptAbort = true;
-    }
+    const interruptedTurnId = this.activeForegroundTurnId ?? this.autonomousTurn?.id;
+    let requestActive = true;
+    const interrupt = async () => {
+      const withdrewAll = await this.withdrawUnstartedMessages(queryToInterrupt);
+      // A timed-out withdrawal must not send an interrupt when it eventually settles.
+      const currentTurnId = this.activeForegroundTurnId ?? this.autonomousTurn?.id;
+      if (!requestActive || currentTurnId !== interruptedTurnId) return;
+      if (!claudeStartedTurn && withdrewAll) return;
+      this.pendingInterruptTurnId = interruptedTurnId ?? null;
+      await queryToInterrupt.interrupt();
+    };
     try {
-      await this.awaitWithTimeout(
-        queryToInterrupt.interrupt(),
-        "interruptActiveTurn query.interrupt()",
-      );
+      await withTimeout({ promise: interrupt(), timeoutMs: 3_000, label: "Claude interrupt" });
     } catch (error) {
-      this.logger.warn({ err: error }, "Failed to interrupt active turn");
+      if ((this.activeForegroundTurnId ?? this.autonomousTurn?.id) === interruptedTurnId) {
+        this.pendingInterruptTurnId = null;
+        throw error;
+      }
+    } finally {
+      requestActive = false;
     }
   }
 

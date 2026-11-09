@@ -8,6 +8,7 @@ import { terminateWithTreeKill } from "../../../../utils/tree-kill.js";
 const DEFAULT_TIMEOUT_MS = 14 * 24 * 60 * 60 * 1000;
 const APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 2_000;
 const APP_SERVER_FORCE_SHUTDOWN_TIMEOUT_MS = 1_000;
+const APP_SERVER_STDOUT_DRAIN_TIMEOUT_MS = 1_000;
 const STDERR_BUFFER_LIMIT = 8192;
 
 interface JsonRpcRequest {
@@ -196,8 +197,22 @@ function createNewlineLineReader(
       unterminated.push(text.slice(lineStart));
     }
   };
+  const onEnd = (): void => {
+    unterminated.push(decoder.end());
+    const line = unterminated.join("");
+    unterminated = [];
+    if (line) {
+      onLine(line.endsWith("\r") ? line.slice(0, -1) : line);
+    }
+  };
   input.on("data", onData);
-  return { close: () => void input.off("data", onData) };
+  input.on("end", onEnd);
+  return {
+    close: () => {
+      input.off("data", onData);
+      input.off("end", onEnd);
+    },
+  };
 }
 
 export class CodexAppServerClient {
@@ -209,6 +224,12 @@ export class CodexAppServerClient {
   private nextId = 1;
   private disposed = false;
   private stderrBuffer = "";
+  private processExit: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+  private stdoutDrainTimer: NodeJS.Timeout | null = null;
+  private resolveTermination!: () => void;
+  private readonly terminationPromise = new Promise<void>((resolve) => {
+    this.resolveTermination = resolve;
+  });
 
   constructor(
     private readonly child: ChildProcessWithoutNullStreams,
@@ -233,18 +254,50 @@ export class CodexAppServerClient {
       this.handleUnexpectedTermination(err);
     });
 
+    for (const stream of [child.stdin, child.stdout, child.stderr]) {
+      // Pipe errors are emitted by the stream, not ChildProcess. Keep these
+      // listeners after disposal too, since an in-flight write may fail later.
+      stream.on("error", (error) => this.handleUnexpectedTermination(error));
+    }
+    const onStdoutClosed = (): void => {
+      this.handleUnexpectedTermination(
+        this.processExit
+          ? this.createExitError()
+          : new Error("Codex app-server stdout closed before the process exited"),
+      );
+    };
+    child.stdout.on("end", onStdoutClosed);
+    child.stdout.on("close", onStdoutClosed);
+
     child.on("exit", (code, signal) => {
-      const message =
-        code === 0 && !signal
-          ? "Codex app-server exited"
-          : `Codex app-server exited with code ${code ?? "null"} and signal ${signal ?? "null"}`;
-      const error = new Error(`${message}\n${this.stderrBuffer}`.trim());
-      this.handleUnexpectedTermination(error);
+      this.processExit = { code, signal };
+      if (this.disposed || this.stdoutDrainTimer) {
+        return;
+      }
+      // `exit` can precede the final stdout data. Prefer EOF/close so the last
+      // response or turn/completed is delivered before termination, but bound
+      // the wait when an inherited pipe remains open in a wrapper descendant.
+      this.stdoutDrainTimer = setTimeout(() => {
+        this.handleUnexpectedTermination(this.createExitError());
+      }, APP_SERVER_STDOUT_DRAIN_TIMEOUT_MS);
+      this.stdoutDrainTimer.unref();
+    });
+    child.on("close", (code, signal) => {
+      this.processExit ??= { code, signal };
+      this.handleUnexpectedTermination(this.createExitError());
     });
   }
 
   setUnexpectedTerminationHandler(handler: UnexpectedTerminationHandler): void {
     this.unexpectedTerminationHandler = handler;
+  }
+
+  get isClosed(): boolean {
+    return this.disposed || this.processExit !== null;
+  }
+
+  waitForTermination(): Promise<void> {
+    return this.terminationPromise;
   }
 
   setNotificationHandler(handler: NotificationHandler): void {
@@ -259,16 +312,19 @@ export class CodexAppServerClient {
     if (this.disposed) {
       return Promise.reject(new Error("Codex app-server client is closed"));
     }
+    if (this.processExit) {
+      return Promise.reject(this.createExitError());
+    }
     const id = this.nextId++;
     const payload: JsonRpcRequest = { id, method, params };
     const serialized = JSON.stringify(payload);
-    this.child.stdin.write(`${serialized}\n`);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Codex app-server request timed out for ${method}`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
+      this.write(`${serialized}\n`);
     });
   }
 
@@ -285,11 +341,13 @@ export class CodexAppServerClient {
       return;
     }
     const payload: JsonRpcNotification = { method, params };
-    this.child.stdin.write(`${JSON.stringify(payload)}\n`);
+    this.write(`${JSON.stringify(payload)}\n`);
   }
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.clearStdoutDrainTimer();
+    this.resolveTermination();
     this.unexpectedTerminationHandler = null;
     this.stdoutLineReader.close();
     this.rejectPending(new Error("Codex app-server client is closed"));
@@ -318,6 +376,8 @@ export class CodexAppServerClient {
       return;
     }
     this.disposed = true;
+    this.clearStdoutDrainTimer();
+    this.resolveTermination();
     this.stdoutLineReader.close();
     this.rejectPending(error);
     const handler = this.unexpectedTerminationHandler;
@@ -332,6 +392,41 @@ export class CodexAppServerClient {
     }
   }
 
+  private createExitError(): Error {
+    const { code, signal } = this.processExit ?? { code: null, signal: null };
+    const message =
+      code === 0 && !signal
+        ? "Codex app-server exited"
+        : `Codex app-server exited with code ${code ?? "null"} and signal ${signal ?? "null"}`;
+    return new Error(`${message}\n${this.stderrBuffer}`.trim());
+  }
+
+  private clearStdoutDrainTimer(): void {
+    if (this.stdoutDrainTimer) {
+      clearTimeout(this.stdoutDrainTimer);
+      this.stdoutDrainTimer = null;
+    }
+  }
+
+  private write(message: string): void {
+    if (this.isClosed) {
+      return;
+    }
+    if (
+      this.child.stdin.destroyed ||
+      !this.child.stdin.writable ||
+      this.child.stdin.writableEnded
+    ) {
+      this.handleUnexpectedTermination(new Error("Codex app-server stdin is closed"));
+      return;
+    }
+    try {
+      this.child.stdin.write(message);
+    } catch (error) {
+      this.handleUnexpectedTermination(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
   private rejectPending(error: Error): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
@@ -341,14 +436,7 @@ export class CodexAppServerClient {
   }
 
   private writeJsonRpcResponse(response: JsonRpcResponse): void {
-    if (this.disposed || this.child.stdin.destroyed || !this.child.stdin.writable) {
-      return;
-    }
-    try {
-      this.child.stdin.write(`${JSON.stringify(response)}\n`);
-    } catch (error) {
-      this.logger.debug({ error }, "Failed to write Codex app-server JSON-RPC response");
-    }
+    this.write(`${JSON.stringify(response)}\n`);
   }
 
   private async handleLine(line: string): Promise<void> {

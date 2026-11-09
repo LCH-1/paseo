@@ -2347,9 +2347,11 @@ function getCodexEventTurnId(params: {
 const CodexEventTurnAbortedNotificationSchema = z
   .object({
     ...CodexEventThreadIdFields,
+    ...CodexEventTurnIdFields,
     msg: z
       .object({
         ...CodexEventThreadIdFields,
+        ...CodexEventTurnIdFields,
         type: z.literal("turn_aborted"),
         reason: z.string().optional(),
       })
@@ -2360,9 +2362,11 @@ const CodexEventTurnAbortedNotificationSchema = z
 const CodexEventTaskCompleteNotificationSchema = z
   .object({
     ...CodexEventThreadIdFields,
+    ...CodexEventTurnIdFields,
     msg: z
       .object({
         ...CodexEventThreadIdFields,
+        ...CodexEventTurnIdFields,
         type: z.literal("task_complete"),
       })
       .passthrough(),
@@ -2540,6 +2544,7 @@ type ParsedCodexNotification =
   | { kind: "turn_started"; turnId: string; threadId: string | null }
   | {
       kind: "turn_completed";
+      turnId: string | null;
       status: string;
       errorMessage: string | null;
       threadId: string | null;
@@ -2692,6 +2697,7 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        turnId: params.turn.id ?? null,
         status: params.turn.status,
         errorMessage: params.turn.error?.message ?? null,
         threadId: params.threadId ?? null,
@@ -3116,6 +3122,7 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        turnId: getCodexEventTurnId(params),
         status: "interrupted",
         errorMessage: null,
         threadId: getCodexEventThreadId(params),
@@ -3136,6 +3143,7 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        turnId: getCodexEventTurnId(params),
         status: "completed",
         errorMessage: null,
         threadId: getCodexEventThreadId(params),
@@ -3440,6 +3448,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   private resolvedSandboxPolicy: Record<string, unknown> | null = null;
   private currentThreadId: string | null = null;
   private currentTurnId: string | null = null;
+  private readonly completedRootTurnKeys = new Set<string>();
   private pendingForegroundTurnIdentification: {
     foregroundTurnId: string;
     promise: Promise<string | null>;
@@ -3594,7 +3603,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (this.closed) {
       throw this.createClosedError();
     }
-    if (this.connectionState !== "disconnected") return;
+    if (this.connectionState !== "disconnected" && !this.client?.isClosed) return;
     if (this.connectionPromise) {
       await this.connectionPromise;
       if (this.closed) {
@@ -3618,6 +3627,17 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private async establishConnection(): Promise<void> {
+    if (this.client) {
+      // An exited process may still have a final completion buffered in stdout.
+      // Settle that active turn before retiring its transport and reconnecting.
+      if (this.client.isClosed && (this.activeForegroundTurnId || this.currentTurnId)) {
+        await this.client.waitForTermination();
+      }
+      await this.disposeClient();
+      if (this.closed) {
+        throw this.createClosedError();
+      }
+    }
     if (this.initialResumePurpose === "history") {
       await this.readArchivedHistory();
       this.connectionState = "history-ready";
@@ -4158,7 +4178,11 @@ export class CodexAppServerAgentSession implements AgentSession {
       return expandCodexCustomPrompt(parsed.body, args);
     }
 
-    if (this.connectionState === "disconnected") {
+    if (
+      this.connectionState === "disconnected" ||
+      this.client?.isClosed ||
+      this.connectionPromise
+    ) {
       await this.connect();
     } else {
       await this.loadSkills();
@@ -4414,7 +4438,20 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (pendingStart.cancelRequested) {
         throw new Error("Codex turn start was interrupted before reaching Codex");
       }
-      await this.client.request("turn/start", turnStart.params, TURN_START_TIMEOUT_MS);
+      const response = toObjectRecord(
+        await this.client.request("turn/start", turnStart.params, TURN_START_TIMEOUT_MS),
+      );
+      const nativeTurnId = toObjectRecord(response?.turn)?.id;
+      const pendingIdentification = this.pendingForegroundTurnIdentification;
+      if (
+        typeof nativeTurnId === "string" &&
+        this.activeForegroundTurnId === turnId &&
+        pendingIdentification?.foregroundTurnId === turnId
+      ) {
+        this.currentTurnId = nativeTurnId;
+        pendingIdentification.resolve(nativeTurnId);
+        this.pendingForegroundTurnIdentification = null;
+      }
       return { turnId };
     } catch (error) {
       this.pendingForegroundTurnIdentification?.resolve(null);
@@ -4581,7 +4618,11 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   async getRuntimeInfo(): Promise<AgentRuntimeInfo> {
     if (this.cachedRuntimeInfo) return { ...this.cachedRuntimeInfo };
-    if (this.connectionState === "disconnected") {
+    if (
+      this.connectionState === "disconnected" ||
+      this.client?.isClosed ||
+      this.connectionPromise
+    ) {
       await this.connect();
     }
     if (!this.currentThreadId) {
@@ -5000,7 +5041,19 @@ export class CodexAppServerAgentSession implements AgentSession {
       foregroundTurnId &&
       pendingIdentification?.foregroundTurnId === foregroundTurnId
     ) {
-      turnId = await pendingIdentification.promise;
+      let identificationTimer: NodeJS.Timeout | undefined;
+      try {
+        turnId = await Promise.race([
+          pendingIdentification.promise,
+          new Promise<never>((_, reject) => {
+            identificationTimer = setTimeout(() => {
+              reject(new Error("Timed out waiting for Codex to identify the active turn"));
+            }, INTERRUPT_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        clearTimeout(identificationTimer);
+      }
     }
     if (!turnId && !this.activeForegroundTurnId && !this.currentTurnId) {
       return;
@@ -5021,12 +5074,24 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (!isCodexAlreadyIdleInterrupt(error)) {
         throw error;
       }
-      this.activeForegroundTurnId = null;
-      this.activeClientMessageId = null;
-      this.currentTurnId = null;
-      this.pendingForegroundTurnIdentification?.resolve(null);
-      this.pendingForegroundTurnIdentification = null;
     }
+    this.completeInterruptedTurn(turnId, foregroundTurnId);
+  }
+
+  private completeInterruptedTurn(turnId: string, foregroundTurnId: string | null): void {
+    // An acknowledged stop need not be followed by turn/completed. Retire only
+    // the captured turn: its completion and a new start can race the RPC reply.
+    if (this.currentTurnId !== turnId || this.activeForegroundTurnId !== foregroundTurnId) {
+      return;
+    }
+    this.rememberCompletedRootTurn(turnId);
+    this.dismissInterruptedAsyncQuestions();
+    this.emitEvent({ type: "turn_canceled", provider: CODEX_PROVIDER, reason: "interrupted" });
+    this.activeForegroundTurnId = null;
+    this.activeClientMessageId = null;
+    this.currentTurnId = null;
+    this.pendingForegroundTurnIdentification?.resolve(null);
+    this.pendingForegroundTurnIdentification = null;
   }
 
   async close(): Promise<void> {
@@ -5071,7 +5136,11 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   async listCommands(): Promise<AgentSlashCommand[]> {
     const prompts = await listCodexCustomPrompts(this.codexHome);
-    if (this.connectionState === "disconnected") {
+    if (
+      this.connectionState === "disconnected" ||
+      this.client?.isClosed ||
+      this.connectionPromise
+    ) {
       await this.connect();
     } else {
       await this.loadSkills();
@@ -6125,6 +6194,9 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.emitSubAgentActivityUpdate(subAgentCallId, "running", { reopen: true });
       return;
     }
+    if (this.completedRootTurnKeys.has(this.rootTurnKey(parsed.turnId))) {
+      return;
+    }
     this.currentTurnId = parsed.turnId;
     const pendingIdentification = this.pendingForegroundTurnIdentification;
     if (
@@ -6152,6 +6224,14 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.emitSubAgentActivityUpdate(subAgentCallId, status);
       return;
     }
+    if (
+      (parsed.turnId && this.completedRootTurnKeys.has(this.rootTurnKey(parsed.turnId))) ||
+      (parsed.turnId && this.currentTurnId && parsed.turnId !== this.currentTurnId) ||
+      (!this.activeForegroundTurnId && !this.currentTurnId)
+    ) {
+      return;
+    }
+    this.rememberCompletedRootTurn(parsed.turnId ?? this.currentTurnId);
     this.completePendingRootCompactions();
     if (parsed.status === "failed") {
       this.emitEvent({
@@ -6179,6 +6259,19 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.pendingForegroundTurnIdentification = null;
     this.pendingSubAgentNotificationsByThreadId.clear();
     this.resetTurnTrackingState();
+  }
+
+  private rootTurnKey(turnId: string): string {
+    return JSON.stringify([this.currentThreadId, turnId]);
+  }
+
+  private rememberCompletedRootTurn(turnId: string | null): void {
+    if (!turnId) return;
+    this.completedRootTurnKeys.add(this.rootTurnKey(turnId));
+    if (this.completedRootTurnKeys.size > 128) {
+      const oldestKey = this.completedRootTurnKeys.values().next().value;
+      if (oldestKey) this.completedRootTurnKeys.delete(oldestKey);
+    }
   }
 
   private resetTurnTrackingState(): void {

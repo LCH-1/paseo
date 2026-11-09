@@ -7033,6 +7033,75 @@ test("ignores stale autonomous terminals without lowering the active turn lifecy
   });
 });
 
+test.each(["turn_completed", "turn_failed", "turn_canceled"] as const)(
+  "foreground consumers receive %s without a provider turn ID and ignore old terminals",
+  async (type) => {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-terminal-identity-"));
+    class IdentitylessTerminalSession extends TestAgentSession {
+      private starts = 0;
+
+      override async startTurn(): Promise<{ turnId: string }> {
+        return { turnId: `identity-turn-${++this.starts}` };
+      }
+    }
+    const session = new IdentitylessTerminalSession({ provider: "codex", cwd: workdir });
+    const client = new (class extends TestAgentClient {
+      override async createSession(): Promise<AgentSession> {
+        return session;
+      }
+    })();
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    const terminal: AgentStreamEvent =
+      type === "turn_failed"
+        ? { type, provider: "codex", error: "non-retryable failure" }
+        : { type, provider: "codex" };
+    const drains: Promise<void>[] = [];
+
+    try {
+      for (let turn = 1; turn <= 2; turn += 1) {
+        const received: AgentStreamEvent[] = [];
+        let finished = false;
+        const stream = manager.streamAgent(agent.id, `prompt ${turn}`);
+        const drain = (async () => {
+          for await (const event of stream) received.push(event);
+          finished = true;
+        })();
+        drains.push(drain);
+        await manager.waitForAgentRunStart(agent.id);
+
+        if (turn === 2) {
+          session.pushEvent({ ...terminal, turnId: "identity-turn-1" });
+          await manager.flush();
+          expect(finished).toBe(false);
+          expect(manager.getAgent(agent.id)).toMatchObject({
+            lifecycle: "running",
+            activeForegroundTurnId: "identity-turn-2",
+          });
+          expect(received.some((event) => event.type === type)).toBe(false);
+        }
+
+        session.pushEvent(terminal);
+        await vi.waitFor(() => expect(finished).toBe(true), { timeout: 500, interval: 10 });
+        await drain;
+        expect(received).toContainEqual({ ...terminal, turnId: `identity-turn-${turn}` });
+        expect(manager.getAgent(agent.id)).toMatchObject({
+          lifecycle: type === "turn_failed" ? "error" : "idle",
+          activeForegroundTurnId: null,
+          activeTurnId: null,
+        });
+      }
+    } finally {
+      await manager.closeAgent(agent.id);
+      await Promise.all(drains);
+      await manager.flush();
+      rmSync(workdir, { recursive: true, force: true });
+    }
+  },
+);
+
 test("preserves terminal fallback when no active turn identity was observed", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-untracked-terminal-"));
   const storage = new AgentStorage(join(workdir, "agents"), logger);

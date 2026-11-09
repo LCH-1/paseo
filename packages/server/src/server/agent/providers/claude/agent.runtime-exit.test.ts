@@ -20,6 +20,7 @@ interface QueryMockOptions {
   // Awaited once the scripted events run out, so the query stays open the way a
   // real one does. Resolving it with a value delivers one more event.
   tail?: Promise<unknown>;
+  afterTail?: Promise<unknown>;
 }
 
 function createQueryMock(events: unknown[], options: QueryMockOptions = {}): Query {
@@ -31,7 +32,8 @@ function createQueryMock(events: unknown[], options: QueryMockOptions = {}): Que
       }
       const late = await options.tail;
       if (late !== undefined) {
-        options.tail = undefined;
+        options.tail = options.afterTail;
+        options.afterTail = undefined;
         return { done: false, value: late };
       }
       return { done: true, value: undefined };
@@ -131,6 +133,10 @@ const SPAWN_OPTIONS: ClaudeSpawnOptions = {
   env: {},
   signal: new AbortController().signal,
 };
+
+function countEvents(events: AgentStreamEvent[], type: AgentStreamEvent["type"]): number {
+  return events.filter((event) => event.type === type).length;
+}
 
 describe("Claude runtime exit", () => {
   afterEach(() => {
@@ -345,6 +351,227 @@ describe("Claude runtime exit", () => {
         "exited with code 1",
       );
     } finally {
+      await session.close();
+    }
+  });
+
+  test("settles a mid-turn process exit even when the SDK iterator remains pending", async () => {
+    let capturedOptions: Options | undefined;
+    let deliverOldResult: ((event: unknown) => void) | undefined;
+    let deliverNewResult: ((event: unknown) => void) | undefined;
+    const oldTail = new Promise<unknown>((resolve) => {
+      deliverOldResult = resolve;
+    });
+    const newTail = new Promise<unknown>((resolve) => {
+      deliverNewResult = resolve;
+    });
+    const queryFactory = vi.fn(({ options }: ClaudeQueryInput) => {
+      capturedOptions = options;
+      return createQueryMock(COMPLETED_TURN_EVENTS.slice(0, 2), {
+        tail: queryFactory.mock.calls.length === 1 ? oldTail : newTail,
+      });
+    });
+    const child = createChildProcessStub();
+    vi.spyOn(spawnUtils, "spawnProcess").mockReturnValue(child);
+    const session = await new ClaudeAgentClient({
+      logger: createTestLogger(),
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    }).createSession({ provider: "claude", cwd: process.cwd() });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    try {
+      const turn = session.run("original prompt");
+      const failure = expect(turn).rejects.toThrow("exited with code 1");
+      await vi.waitFor(() => expect(countEvents(events, "timeline")).toBeGreaterThan(0));
+      capturedOptions?.spawnClaudeCodeProcess?.(SPAWN_OPTIONS);
+      child.emit("exit", 1, null);
+      await vi.waitFor(() => expect(countEvents(events, "turn_failed")).toBe(1));
+      await failure;
+
+      await session.startTurn("replacement prompt");
+      await vi.waitFor(() => expect(queryFactory).toHaveBeenCalledTimes(2));
+      deliverOldResult?.(COMPLETED_TURN_EVENTS[2]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(0);
+      await expect(session.startTurn("overlapping prompt")).rejects.toThrow(
+        "A foreground turn is already active",
+      );
+      deliverNewResult?.(COMPLETED_TURN_EVENTS[2]);
+      await vi.waitFor(() => expect(countEvents(events, "turn_completed")).toBe(1));
+      expect(events.filter((event) => event.type === "turn_failed")).toHaveLength(1);
+    } finally {
+      deliverOldResult?.(undefined);
+      deliverNewResult?.(undefined);
+      await session.close();
+    }
+  });
+
+  test("lets a process's final result drain before retiring its query", async () => {
+    let capturedOptions: Options | undefined;
+    let deliverResult: ((event: unknown) => void) | undefined;
+    const tail = new Promise<unknown>((resolve) => {
+      deliverResult = resolve;
+    });
+    const queryFactory = vi.fn(({ options }: ClaudeQueryInput) => {
+      capturedOptions = options;
+      return createQueryMock(COMPLETED_TURN_EVENTS.slice(0, 2), { tail });
+    });
+    const child = createChildProcessStub();
+    vi.spyOn(spawnUtils, "spawnProcess").mockReturnValue(child);
+    const session = await new ClaudeAgentClient({
+      logger: createTestLogger(),
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    }).createSession({ provider: "claude", cwd: process.cwd() });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    try {
+      const turn = session.run("finish while exiting");
+      await vi.waitFor(() => expect(countEvents(events, "timeline")).toBeGreaterThan(0));
+      capturedOptions?.spawnClaudeCodeProcess?.(SPAWN_OPTIONS);
+      child.emit("exit", 0, null);
+      deliverResult?.(COMPLETED_TURN_EVENTS[2]);
+      await turn;
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "turn_failed")).toHaveLength(0);
+    } finally {
+      deliverResult?.(undefined);
+      await session.close();
+    }
+  });
+
+  test("does not await a dead query's pending return before opening the next turn", async () => {
+    let capturedOptions: Options | undefined;
+    let deliverResult: ((event: unknown) => void) | undefined;
+    let releaseReturn: (() => void) | undefined;
+    let finishOldStream: (() => void) | undefined;
+    const tail = new Promise<unknown>((resolve) => {
+      deliverResult = resolve;
+    });
+    const pendingReturn = new Promise<void>((resolve) => {
+      releaseReturn = resolve;
+    });
+    const afterTail = new Promise<void>((resolve) => {
+      finishOldStream = resolve;
+    });
+    const oldQuery = createQueryMock(COMPLETED_TURN_EVENTS.slice(0, 2), { tail, afterTail });
+    oldQuery.return = vi.fn(async () => {
+      await pendingReturn;
+      return { done: true, value: undefined };
+    });
+    const queryFactory = vi.fn(({ options }: ClaudeQueryInput) => {
+      capturedOptions = options;
+      return queryFactory.mock.calls.length === 1
+        ? oldQuery
+        : createQueryMock(COMPLETED_TURN_EVENTS);
+    });
+    const child = createChildProcessStub();
+    vi.spyOn(spawnUtils, "spawnProcess").mockReturnValue(child);
+    const session = await new ClaudeAgentClient({
+      logger: createTestLogger(),
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    }).createSession({ provider: "claude", cwd: process.cwd() });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    try {
+      const first = session.run("finish while exiting");
+      await vi.waitFor(() => expect(countEvents(events, "timeline")).toBeGreaterThan(0));
+      capturedOptions?.spawnClaudeCodeProcess?.(SPAWN_OPTIONS);
+      child.emit("exit", 0, null);
+      deliverResult?.(COMPLETED_TURN_EVENTS[2]);
+      await first;
+      const next = session.run("next prompt");
+      await vi.waitFor(() => expect(queryFactory).toHaveBeenCalledTimes(2));
+      await next;
+      expect(oldQuery.return).not.toHaveBeenCalled();
+      expect(countEvents(events, "turn_failed")).toBe(0);
+    } finally {
+      releaseReturn?.();
+      finishOldStream?.();
+      deliverResult?.(undefined);
+      await session.close();
+    }
+  });
+
+  test("restarts its query pump after an idle process exits with an open stream", async () => {
+    let capturedOptions: Options | undefined;
+    let finishOldStream: (() => void) | undefined;
+    const tail = new Promise<void>((resolve) => {
+      finishOldStream = resolve;
+    });
+    const queryFactory = vi.fn(({ options }: ClaudeQueryInput) => {
+      capturedOptions = options;
+      return createQueryMock(COMPLETED_TURN_EVENTS, {
+        tail: queryFactory.mock.calls.length === 1 ? tail : undefined,
+      });
+    });
+    const child = createChildProcessStub();
+    vi.spyOn(spawnUtils, "spawnProcess").mockReturnValue(child);
+    const session = await new ClaudeAgentClient({
+      logger: createTestLogger(),
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    }).createSession({ provider: "claude", cwd: process.cwd() });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    try {
+      await session.run("original prompt");
+      capturedOptions?.spawnClaudeCodeProcess?.(SPAWN_OPTIONS);
+      child.emit("exit", 1, null);
+      await session.startTurn("replacement prompt");
+      await vi.waitFor(() => expect(countEvents(events, "turn_completed")).toBe(2));
+      expect(queryFactory).toHaveBeenCalledTimes(2);
+      expect(countEvents(events, "turn_failed")).toBe(1);
+    } finally {
+      finishOldStream?.();
+      await session.close();
+    }
+  });
+
+  test("waits for a live query's return before opening a replacement", async () => {
+    let capturedOptions: Options | undefined;
+    let releaseReturn: (() => void) | undefined;
+    let finishOldStream: (() => void) | undefined;
+    const tail = new Promise<void>((resolve) => {
+      finishOldStream = resolve;
+    });
+    const pendingReturn = new Promise<void>((resolve) => {
+      releaseReturn = resolve;
+    });
+    const oldQuery = createQueryMock(COMPLETED_TURN_EVENTS, { tail });
+    oldQuery.return = vi.fn(async () => {
+      await pendingReturn;
+      return { done: true, value: undefined };
+    });
+    const queryFactory = vi.fn(({ options }: ClaudeQueryInput) => {
+      capturedOptions = options;
+      return queryFactory.mock.calls.length === 1
+        ? oldQuery
+        : createQueryMock(COMPLETED_TURN_EVENTS);
+    });
+    const child = createChildProcessStub();
+    vi.spyOn(spawnUtils, "spawnProcess").mockReturnValue(child);
+    const session = await new ClaudeAgentClient({
+      logger: createTestLogger(),
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    }).createSession({ provider: "claude", cwd: process.cwd() });
+    try {
+      await session.run("original prompt");
+      capturedOptions?.spawnClaudeCodeProcess?.(SPAWN_OPTIONS);
+      await session.setThinkingOption(null);
+      const replacement = session.run("replacement prompt");
+      await vi.waitFor(() => expect(oldQuery.return).toHaveBeenCalledTimes(1));
+      expect(queryFactory).toHaveBeenCalledTimes(1);
+      releaseReturn?.();
+      await replacement;
+      expect(queryFactory).toHaveBeenCalledTimes(2);
+    } finally {
+      releaseReturn?.();
+      finishOldStream?.();
       await session.close();
     }
   });

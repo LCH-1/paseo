@@ -4009,6 +4009,9 @@ export class AgentManager {
       this.dispatch({ type: "provider_subagent", event: update });
       return;
     }
+    // State transitions and foreground consumers must use the same turn identity.
+    // Providers may omit it, including on the terminal that releases a waiter.
+    event = attachManagedTurnIdentity(agent, event, false).event;
     const turnId = getAgentStreamEventTurnId(event);
     const matchingWaiters = this.runs.getMatchingWaiters(agent, turnId);
     this.logger.trace(

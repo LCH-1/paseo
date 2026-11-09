@@ -4274,6 +4274,215 @@ describe("Codex app-server provider", () => {
     }
   });
 
+  test("interrupts using the turn/start response id when turn/started is missing", async () => {
+    const interruptedTurns: unknown[] = [];
+    const appServer = createFakeCodexAppServer({
+      "turn/start": () => ({ turn: { id: "native-from-response" } }),
+      "turn/interrupt": (params) => {
+        interruptedTurns.push(params);
+        return {};
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig(),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+    try {
+      await session.startTurn("Start without a notification.");
+      await expect(session.interrupt()).resolves.toBeUndefined();
+      expect(interruptedTurns).toEqual([{ threadId: "thread-1", turnId: "native-from-response" }]);
+      appServer.completeTurn();
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("an acknowledged interrupt retires the turn without a terminal notification", async () => {
+    const appServer = createFakeCodexAppServer({ "turn/interrupt": () => ({}) });
+    const session = new CodexAppServerAgentSession(
+      createConfig(),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    try {
+      const run = session.run("stop this turn");
+      await appServer.waitForTurnStart();
+      appServer.startsTurn({ threadId: "thread-1", turnId: "stopped-native-turn" });
+      await session.interrupt();
+      await expect(run).resolves.toMatchObject({ sessionId: "thread-1" });
+      expect(events.filter((event) => event.type === "turn_canceled")).toHaveLength(1);
+
+      const next = await session.startTurn("continue in a new turn");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "next-native-turn" });
+      events.length = 0;
+      appServer.child.stdout.write(
+        `${JSON.stringify({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-1",
+            turn: { id: "stopped-native-turn", status: "interrupted" },
+          },
+        })}\n`,
+      );
+      expect(events).toEqual([]);
+      appServer.completeTurn();
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "turn_completed", turnId: next.turnId }),
+      );
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("a delayed interrupt acknowledgement cannot cancel the next foreground turn", async () => {
+    const acknowledged = deferred<unknown>();
+    const appServer = createFakeCodexAppServer({ "turn/interrupt": () => acknowledged.promise });
+    const session = new CodexAppServerAgentSession(
+      createConfig(),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    try {
+      await session.startTurn("first turn");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "first-native-turn" });
+      const interrupt = session.interrupt();
+      await appServer.waitForRequest("turn/interrupt");
+      appServer.completeTurn();
+
+      const next = await session.startTurn("second turn");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "second-native-turn" });
+      events.length = 0;
+      acknowledged.resolve({});
+      await interrupt;
+      expect(events.filter((event) => event.type === "turn_canceled")).toEqual([]);
+      await expect(session.startTurn("must remain blocked")).rejects.toThrow("already active");
+      appServer.completeTurn();
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "turn_completed", turnId: next.turnId }),
+      );
+      appServer.assertNoErrors();
+    } finally {
+      acknowledged.resolve({});
+      await session.close();
+    }
+  });
+
+  test("bounds interruption when neither a response nor a notification identifies the turn", async () => {
+    const interruptedTurns: unknown[] = [];
+    const appServer = createFakeCodexAppServer({
+      "turn/interrupt": (params) => {
+        interruptedTurns.push(params);
+        return {};
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig(),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    try {
+      await session.startTurn("Start without an identified turn.");
+      vi.useFakeTimers();
+      const interrupt = session.interrupt();
+      const rejection = expect(interrupt).rejects.toThrow(
+        "Timed out waiting for Codex to identify the active turn",
+      );
+      await vi.advanceTimersByTimeAsync(2_000);
+      await rejection;
+      expect(interruptedTurns).toEqual([]);
+      expect(events.filter((event) => event.type.startsWith("turn_"))).toEqual([]);
+
+      // A delayed notification can still identify the same live turn; timing
+      // out must not publish a false completion or permit another prompt.
+      await expect(session.startTurn("must stay blocked")).rejects.toThrow("already active");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "native-identified-after-timeout" });
+      await expect(session.interrupt()).resolves.toBeUndefined();
+      expect(interruptedTurns).toEqual([
+        { threadId: "thread-1", turnId: "native-identified-after-timeout" },
+      ]);
+      appServer.completeTurn();
+      appServer.assertNoErrors();
+    } finally {
+      vi.useRealTimers();
+      await session.close();
+    }
+  });
+
+  test.each(["completed", "failed", "interrupted"] as const)(
+    "ignores delayed and duplicate native turn notifications before a new %s completion",
+    (status) => {
+      const session = createSession();
+      const internals = asInternals(session);
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+      internals.handleNotification("turn/started", {
+        threadId: "test-thread",
+        turn: { id: "native-A" },
+      });
+      internals.handleNotification("turn/completed", {
+        threadId: "test-thread",
+        turn: { id: "native-A", status: "completed" },
+      });
+      events.length = 0;
+      session.activeForegroundTurnId = "second-local-turn";
+
+      for (const method of ["turn/completed", "turn/started"]) {
+        internals.handleNotification(method, {
+          threadId: "test-thread",
+          turn: { id: "native-A", status: "completed" },
+        });
+      }
+      expect(events).toEqual([]);
+      internals.handleNotification("turn/started", {
+        threadId: "test-thread",
+        turn: { id: "native-B" },
+      });
+      events.length = 0;
+      internals.handleNotification("turn/completed", {
+        threadId: "test-thread",
+        turn: { id: "unrelated-native-turn", status: "completed" },
+      });
+      internals.handleNotification("codex/event/task_complete", {
+        thread_id: "test-thread",
+        msg: { type: "task_complete", turn_id: "native-A" },
+      });
+      expect(events).toEqual([]);
+      expect(session.activeForegroundTurnId).toBe("second-local-turn");
+
+      const completion = {
+        threadId: "test-thread",
+        turn: { id: "native-B", status, error: { message: "native failure" } },
+      };
+      internals.handleNotification("turn/completed", completion);
+      internals.handleNotification("turn/completed", completion);
+      const terminalTypes = {
+        completed: "turn_completed",
+        failed: "turn_failed",
+        interrupted: "turn_canceled",
+      } as const;
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: terminalTypes[status],
+          turnId: "second-local-turn",
+        }),
+      ]);
+      expect(session.activeForegroundTurnId).toBeNull();
+    },
+  );
+
   test("acknowledges interruption when the accepted turn terminates before identification", async () => {
     const interruptedTurns: unknown[] = [];
     const appServer = createFakeCodexAppServer({

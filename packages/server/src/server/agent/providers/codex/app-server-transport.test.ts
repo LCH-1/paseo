@@ -70,6 +70,162 @@ describe("Codex app-server transport", () => {
     await expect(request).rejects.toThrow("Codex app-server client is closed");
   });
 
+  test.each(["stdin", "stdout", "stderr"] as const)(
+    "%s errors reject pending requests and report termination once",
+    async (streamName) => {
+      const child = createCodexAppServerChildProcess();
+      const client = new CodexAppServerClient(child, createTestLogger());
+      const onTermination = vi.fn();
+      const onNotification = vi.fn();
+      client.setUnexpectedTerminationHandler(onTermination);
+      client.setNotificationHandler(onNotification);
+      const request = client.request("initialize", {});
+      const rejection = expect(request).rejects.toThrow("broken pipe");
+      const error = Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+
+      expect(() => child[streamName].emit("error", error)).not.toThrow();
+      await rejection;
+      child.emit("exit", 1, null);
+      child.emit("close", 1, null);
+      child.stdout.write('{"method":"turn/completed","params":{}}\n');
+      expect(onTermination).toHaveBeenCalledExactlyOnceWith(error);
+      expect(onNotification).not.toHaveBeenCalled();
+      await expect(client.request("model/list", {})).rejects.toThrow("client is closed");
+      child.stdout.end();
+      child.stderr.end();
+      child.stdin.end();
+    },
+  );
+
+  test.each(["end", "close"] as const)(
+    "stdout %s rejects pending requests even when the child stays alive",
+    async (event) => {
+      const child = createCodexAppServerChildProcess();
+      const client = new CodexAppServerClient(child, createTestLogger());
+      const onTermination = vi.fn();
+      client.setUnexpectedTerminationHandler(onTermination);
+      const request = client.request("initialize", {});
+      const rejection = expect(request).rejects.toThrow("stdout closed");
+
+      child.stdout.emit(event);
+
+      await rejection;
+      expect(onTermination).toHaveBeenCalledOnce();
+      child.emit("close", 0, null);
+      expect(onTermination).toHaveBeenCalledOnce();
+      child.stdout.end();
+      child.stderr.end();
+      child.stdin.end();
+    },
+  );
+
+  test("synchronous stdin write failures reject the returned request and settle transport", async () => {
+    const child = createCodexAppServerChildProcess();
+    const client = new CodexAppServerClient(child, createTestLogger());
+    const onTermination = vi.fn();
+    client.setUnexpectedTerminationHandler(onTermination);
+    const error = new Error("synchronous broken pipe");
+    const write = vi.spyOn(child.stdin, "write").mockImplementationOnce(() => {
+      throw error;
+    });
+    try {
+      await expect(client.request("initialize", {})).rejects.toBe(error);
+      await client.waitForTermination();
+      expect(client.isClosed).toBe(true);
+      expect(onTermination).toHaveBeenCalledExactlyOnceWith(error);
+    } finally {
+      write.mockRestore();
+      child.stdout.end();
+      child.stderr.end();
+      child.stdin.end();
+    }
+  });
+
+  test("a closed stdin rejects requests without attempting an invalid write", async () => {
+    const child = createCodexAppServerChildProcess();
+    const client = new CodexAppServerClient(child, createTestLogger());
+    child.stdin.end();
+    await expect(client.request("initialize", {})).rejects.toThrow("stdin is closed");
+    expect(client.isClosed).toBe(true);
+    child.stdout.end();
+    child.stderr.end();
+  });
+
+  test.each(["\n", ""])(
+    "drains final stdout after child exit, including an EOF-delimited response %j",
+    async (lineEnding) => {
+      const child = createCodexAppServerChildProcess();
+      const client = new CodexAppServerClient(child, createTestLogger());
+      const events: string[] = [];
+      client.setUnexpectedTerminationHandler(() => events.push("terminated"));
+      client.setNotificationHandler((method) => events.push(method));
+      const request = client.request("turn/start", {});
+      expect(client.isClosed).toBe(false);
+
+      child.emit("exit", 0, null);
+      expect(client.isClosed).toBe(true);
+      expect(events).toEqual([]);
+      await expect(client.request("model/list", {})).rejects.toThrow("app-server exited");
+      child.stdout.write('{"method":"turn/completed","params":{}}\n');
+      const ended = new Promise<void>((resolve) => child.stdout.once("end", resolve));
+      child.stdout.end(`{"id":1,"result":{"ok":true}}${lineEnding}`);
+
+      await expect(request).resolves.toEqual({ ok: true });
+      await ended;
+      await client.waitForTermination();
+      expect(events).toEqual(["turn/completed", "terminated"]);
+      child.emit("close", 0, null);
+      expect(events).toEqual(["turn/completed", "terminated"]);
+      child.stderr.end();
+      child.stdin.end();
+    },
+  );
+
+  test("bounds stdout drain when an exited wrapper leaves its pipe open", async () => {
+    vi.useFakeTimers();
+    const child = createCodexAppServerChildProcess();
+    const client = new CodexAppServerClient(child, createTestLogger());
+    const onTermination = vi.fn();
+    client.setUnexpectedTerminationHandler(onTermination);
+    const request = client.request("initialize", {});
+    const rejection = expect(request).rejects.toThrow("exited with code 17");
+    try {
+      child.emit("exit", 17, null);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(onTermination).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await rejection;
+      expect(onTermination).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+      child.stdout.end();
+      child.stderr.end();
+      child.stdin.end();
+    }
+  });
+
+  test("intentional disposal suppresses late stream errors and output", async () => {
+    const child = createCodexAppServerChildProcess();
+    const client = new CodexAppServerClient(child, createTestLogger());
+    const onTermination = vi.fn();
+    const onNotification = vi.fn();
+    client.setUnexpectedTerminationHandler(onTermination);
+    client.setNotificationHandler(onNotification);
+    const request = client.request("initialize", {});
+    const rejection = expect(request).rejects.toThrow("client is closed");
+
+    await client.dispose();
+    await rejection;
+    for (const stream of [child.stdin, child.stdout, child.stderr]) {
+      expect(() => stream.emit("error", new Error("late pipe error"))).not.toThrow();
+    }
+    child.stdout.write('{"method":"turn/completed","params":{}}\n');
+    child.stdout.end();
+    child.stderr.end();
+    expect(onTermination).not.toHaveBeenCalled();
+    expect(onNotification).not.toHaveBeenCalled();
+  });
+
   test("dispose rejects until the child has actually exited", async () => {
     vi.useFakeTimers();
     const child = createCodexAppServerChildProcess();

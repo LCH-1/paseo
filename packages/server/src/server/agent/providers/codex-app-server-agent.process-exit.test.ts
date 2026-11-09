@@ -614,16 +614,90 @@ test("concurrent session APIs share one reconnect after an idle provider exit", 
 
     const runtimeInfo = session.getRuntimeInfo();
     const turnStart = session.startTurn("continue after reconnect");
-    const reconnectSpawnCount = spawnCount - 1;
     releaseReconnect?.();
 
     await expect(runtimeInfo).resolves.toMatchObject({ provider: "codex" });
     await expect(turnStart).resolves.toMatchObject({ turnId: expect.any(String) });
-    expect(reconnectSpawnCount).toBe(1);
+    expect(spawnCount - 1).toBe(1);
   } finally {
     releaseReconnect?.();
     await session.close();
     rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("stdout EOF disposes its live wrapper before reconnecting", async () => {
+  const initial = createFakeCodexAppServer();
+  const replacement = createFakeCodexAppServer();
+  let spawnCount = 0;
+  let killCount = 0;
+  const kill = initial.child.kill.bind(initial.child);
+  initial.child.kill = (signal) => {
+    killCount += 1;
+    return kill(signal);
+  };
+  const session = new CodexAppServerAgentSession(
+    { provider: "codex", cwd: process.cwd(), modeId: "auto", model: "gpt-5.4" },
+    null,
+    logger,
+    async () => {
+      spawnCount += 1;
+      if (spawnCount === 1) return initial.child;
+      expect(killCount).toBe(1);
+      return replacement.child;
+    },
+  );
+  try {
+    await session.connect();
+    const ended = new Promise<void>((resolve) => initial.child.stdout.once("end", resolve));
+    initial.child.stdout.end();
+    await ended;
+    await session.startTurn("continue with a fresh transport");
+    expect(spawnCount).toBe(2);
+    expect(killCount).toBe(1);
+    initial.assertNoErrors();
+    replacement.assertNoErrors();
+  } finally {
+    await session.close();
+    initial.child.stderr.end();
+    replacement.child.stdout.end();
+    replacement.child.stderr.end();
+  }
+});
+
+test("final completion drains after process exit before reconnecting an active session", async () => {
+  const initial = createFakeCodexAppServer();
+  const replacement = createFakeCodexAppServer();
+  let spawnCount = 0;
+  const session = new CodexAppServerAgentSession(
+    { provider: "codex", cwd: process.cwd(), modeId: "auto", model: "gpt-5.4" },
+    null,
+    logger,
+    async () => (++spawnCount === 1 ? initial.child : replacement.child),
+  );
+  const events: AgentStreamEvent[] = [];
+  session.subscribe((event) => events.push(event));
+  try {
+    const run = session.run("finish at the process boundary");
+    await initial.waitForTurnStart();
+    initial.startsTurn({ threadId: "thread-1", turnId: "native-draining-turn" });
+    initial.child.emit("exit", 0, null);
+    const runtimeInfo = session.getRuntimeInfo();
+    initial.completeTurn();
+    initial.child.stdout.end();
+
+    await expect(run).resolves.toMatchObject({ sessionId: "thread-1" });
+    await expect(runtimeInfo).resolves.toMatchObject({ provider: "codex" });
+    expect(spawnCount).toBe(2);
+    expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn_failed")).toHaveLength(0);
+    initial.assertNoErrors();
+    replacement.assertNoErrors();
+  } finally {
+    await session.close();
+    initial.child.stderr.end();
+    replacement.child.stdout.end();
+    replacement.child.stderr.end();
   }
 });
 
