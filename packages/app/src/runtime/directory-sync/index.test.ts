@@ -1045,6 +1045,62 @@ describe("DirectorySync session readiness", () => {
     directory.dispose();
   });
 
+  it("refreshes cached projects when an existing connection becomes online in the same epoch", async () => {
+    const serverId = "same-epoch-directory-online";
+    const { client, directory } = createDirectory(serverId);
+    const connection = {
+      client: client as unknown as DaemonClient,
+      source: { clientGeneration: 1, connectionEpoch: 1 },
+    };
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, connection.client, 1);
+    store.updateSessionServerInfo(serverId, {
+      serverId,
+      hostname: null,
+      version: "test",
+      features: { projectList: true, workspaceMultiplicity: true },
+    });
+    try {
+      directory.connectionChanged({ ...connection, status: "offline" });
+      directory.acceptProject(
+        normalizeProjectDescriptor({
+          projectId: "old-project",
+          projectDisplayName: "backend_gitlab",
+          projectRootPath: "/repo/old",
+          projectKind: "git",
+        }),
+      );
+      directory.setDemand({}, true);
+      expect(client.listProjectsCalls).toBe(0);
+
+      directory.connectionChanged({ ...connection, status: "online" });
+
+      await expect.poll(() => client.listProjectsCalls).toBe(1);
+      await expect
+        .poll(() => [...useSessionStore.getState().sessions[serverId].projects.keys()])
+        .toEqual(["project-1"]);
+      client.emit({
+        type: "project.update",
+        payload: {
+          kind: "upsert",
+          project: {
+            projectId: "project-1",
+            projectDisplayName: "Live project",
+            projectRootPath: "/repo/app",
+            projectKind: "git",
+          },
+        },
+      });
+      expect(
+        useSessionStore.getState().sessions[serverId].projects.get("project-1")?.projectDisplayName,
+      ).toBe("Live project");
+      directory.connectionChanged({ ...connection, status: "online" });
+      expect(client.listProjectsCalls).toBe(1);
+    } finally {
+      directory.dispose();
+    }
+  });
+
   it("coalesces overlapping route and full-directory demand", async () => {
     const serverId = "coalesced-directory-demand";
     const { client, directory } = createDirectory(serverId);
