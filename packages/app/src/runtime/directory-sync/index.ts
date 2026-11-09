@@ -163,6 +163,10 @@ export class DirectorySync {
   private readonly scriptStatusDemand = new Map<object, string>();
   private demandRefresh: Promise<void> | null = null;
   private satisfiedDemandSource: DirectorySourceToken | null = null;
+  private subscriptionGeneration = 0;
+  private demandRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private demandRecoveryAttempts = 0;
+  private disposed = false;
   private cursors: DirectoryCheckpoint = {};
   private readonly retiredGenerations = new Map<keyof DirectoryCheckpoint, Set<string>>();
   private readonly deletedAgentIds = new Set<string>();
@@ -185,6 +189,7 @@ export class DirectorySync {
   }
 
   connectionChanged(connection: DirectoryConnection): boolean {
+    if (this.disposed) return false;
     const changed =
       this.connection.client !== connection.client ||
       this.connection.source.clientGeneration !== connection.source.clientGeneration ||
@@ -192,6 +197,7 @@ export class DirectorySync {
     const statusChanged = this.connection.status !== connection.status;
     if (!changed && !statusChanged) {
       this.connection = connection;
+      this.scheduleDemandRecovery();
       return false;
     }
     this.flushAbortedTransactions();
@@ -201,6 +207,7 @@ export class DirectorySync {
     this.releaseAttentionAcknowledgements = null;
     workspaceLabels.disconnect(this.serverId);
     this.connection = connection;
+    this.demandRecoveryAttempts = 0;
     this.abortPendingSessionWaits();
     if (!connection.client || connection.status !== "online") return true;
     this.observeAttentionAcknowledgements();
@@ -212,6 +219,7 @@ export class DirectorySync {
   }
 
   setDemand(source: object, demanded: boolean): void {
+    if (this.disposed) return;
     const wasDemanded = this.fullDemandSources.size > 0;
     if (demanded) this.fullDemandSources.add(source);
     else this.fullDemandSources.delete(source);
@@ -220,9 +228,11 @@ export class DirectorySync {
       void this.loadCachedDirectory().catch(() => undefined);
       if (this.getOnlineConnection()) void this.requestDemandRefresh().catch(() => undefined);
     }
+    this.scheduleDemandRecovery();
   }
 
   setAgentRouteDemand(agentIds: readonly string[]): void {
+    if (this.disposed) return;
     const next = new Set(agentIds.filter((id) => !this.deletedAgentIds.has(id)));
     if (
       next.size === this.routeDemandIds.size &&
@@ -259,6 +269,7 @@ export class DirectorySync {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.flushAbortedTransactions();
     this.abortPendingSessionWaits();
     this.scriptStatusDemand.clear();
@@ -272,6 +283,8 @@ export class DirectorySync {
   }
 
   private releaseSubscriptions(): void {
+    this.clearDemandRecoveryTimer();
+    this.subscriptionGeneration += 1;
     for (const subscription of [
       this.agentSubscription,
       this.workspaceSubscription,
@@ -352,22 +365,29 @@ export class DirectorySync {
   private observeDirectoryEvents(): void {
     if (this.eventSubscription) return;
     const { client, source } = this.requireOnline();
-    this.eventSubscription = client.observeEvents(["project.update"]);
-    this.eventSubscription.subscribe({
+    const subscription = client.observeEvents(["project.update"]);
+    this.eventSubscription = subscription;
+    subscription.subscribe({
       snapshot: () => {},
+      error: (error) => this.failDemandSubscription(client, source, subscription, error),
       update: (message) => {
         if (!this.isCurrent(client, source)) return;
         if (message.type === "project.update") this.receiveWorkspaceDelta(source, message.payload);
       },
     });
+    void subscription.ready.catch((error) =>
+      this.failDemandSubscription(client, source, subscription, error),
+    );
   }
 
   // Script status has its own subscription so a workspace screen can hold it without the directory.
   private observeScriptStatusEvents(): void {
     if (this.scriptStatusSubscription) return;
     const { client, source } = this.requireOnline();
-    this.scriptStatusSubscription = client.observeEvents(["script_status_update"]);
-    this.scriptStatusSubscription.subscribe({
+    const subscription = client.observeEvents(["script_status_update"]);
+    this.scriptStatusSubscription = subscription;
+    subscription.subscribe({
+      error: (error) => this.failDemandSubscription(client, source, subscription, error),
       snapshot: () => {
         for (const workspaceId of new Set(this.scriptStatusDemand.values()))
           void this.fetchScriptStatus(workspaceId).catch(() => undefined);
@@ -377,6 +397,9 @@ export class DirectorySync {
         this.receiveWorkspaceDelta(source, { kind: "script_status", update: message.payload });
       },
     });
+    void subscription.ready.catch((error) =>
+      this.failDemandSubscription(client, source, subscription, error),
+    );
   }
 
   private async fetchScriptStatus(workspaceId: string): Promise<void> {
@@ -390,11 +413,67 @@ export class DirectorySync {
   }
 
   private hasDemand(): boolean {
-    return this.fullDemandSources.size > 0 || this.routeDemandIds.size > 0;
+    return !this.disposed && (this.fullDemandSources.size > 0 || this.routeDemandIds.size > 0);
   }
 
   private wantsScriptStatus(): boolean {
     return this.hasDemand() || this.scriptStatusDemand.size > 0;
+  }
+
+  private isDemandSatisfied(): boolean {
+    const source = this.connection.source;
+    return (
+      this.satisfiedDemandSource?.clientGeneration === source.clientGeneration &&
+      this.satisfiedDemandSource.connectionEpoch === source.connectionEpoch &&
+      Boolean(
+        this.agentSubscription?.subscriptionId &&
+        this.workspaceSubscription?.subscriptionId &&
+        this.eventSubscription?.subscriptionId,
+      )
+    );
+  }
+
+  private clearDemandRecoveryTimer(): void {
+    if (this.demandRecoveryTimer === null) return;
+    clearTimeout(this.demandRecoveryTimer);
+    this.demandRecoveryTimer = null;
+  }
+
+  private scheduleDemandRecovery(): void {
+    if (
+      this.demandRecoveryTimer !== null ||
+      this.demandRefresh ||
+      !this.hasDemand() ||
+      !this.getOnlineConnection() ||
+      this.isDemandSatisfied()
+    )
+      return;
+    const delay = Math.min(1000 * 2 ** Math.min(this.demandRecoveryAttempts, 5), 30_000);
+    this.demandRecoveryTimer = setTimeout(() => {
+      this.demandRecoveryTimer = null;
+      this.demandRecoveryAttempts += 1;
+      void this.requestDemandRefresh().catch(() => undefined);
+    }, delay);
+  }
+
+  private failDemandSubscription(
+    client: DaemonClient,
+    source: DirectorySourceToken,
+    subscription: { release(): Promise<void> },
+    error: unknown,
+  ): void {
+    if (!this.isCurrent(client, source)) return;
+    if (
+      subscription !== this.agentSubscription &&
+      subscription !== this.workspaceSubscription &&
+      subscription !== this.eventSubscription &&
+      subscription !== this.scriptStatusSubscription
+    )
+      return;
+    if (subscription === this.scriptStatusSubscription) this.releaseScriptStatusEvents();
+    this.releaseSubscriptions();
+    this.callbacks.markAgentError(error instanceof Error ? error.message : String(error));
+    this.scheduleDemandRecovery();
   }
 
   private requestDemandRefresh(force = false): Promise<void> {
@@ -403,27 +482,48 @@ export class DirectorySync {
     if (!this.getOnlineConnection()) {
       return this.fullDemandSources.size > 0 ? this.loadCachedDirectory() : Promise.resolve();
     }
-    this.observeDirectoryEvents();
-    this.observeScriptStatusEvents();
-    const source = this.connection.source;
-    if (
-      !force &&
-      this.satisfiedDemandSource?.clientGeneration === source.clientGeneration &&
-      this.satisfiedDemandSource.connectionEpoch === source.connectionEpoch
-    ) {
-      return Promise.resolve();
-    }
-    const refresh =
-      this.fullDemandSources.size > 0
-        ? this.refreshAll()
-        : Promise.all([
-            this.refreshAgentsInternal({ subscribe: {} }, false),
-            this.refreshWorkspacesInternal({ subscribe: true }, false),
-          ]).then(() => undefined);
-    this.demandRefresh = refresh
-      .then(() => {
+    if (!force && this.isDemandSatisfied()) return Promise.resolve();
+    this.clearDemandRecoveryTimer();
+    const { client, source } = this.requireOnline();
+    const generation = this.subscriptionGeneration;
+    // Publish the in-flight promise before loading callbacks can re-enter demand.
+    this.demandRefresh = Promise.resolve()
+      .then(async () => {
+        if (
+          !this.isCurrent(client, source) ||
+          generation !== this.subscriptionGeneration ||
+          !this.hasDemand()
+        )
+          throw new DirectoryRefreshSupersededError("directory demand no longer current");
+        this.observeDirectoryEvents();
+        this.observeScriptStatusEvents();
+        await Promise.all([
+          this.fullDemandSources.size > 0
+            ? this.refreshAll()
+            : Promise.all([
+                this.refreshAgentsInternal({ subscribe: {} }, false),
+                this.refreshWorkspacesInternal({ subscribe: true }, false),
+              ]),
+          this.eventSubscription?.ready,
+          this.scriptStatusSubscription?.ready,
+        ]);
+        if (
+          !this.isCurrent(client, source) ||
+          generation !== this.subscriptionGeneration ||
+          !this.hasDemand()
+        )
+          throw new DirectoryRefreshSupersededError("directory subscription lifetime changed");
         this.satisfiedDemandSource = source;
+        this.demandRecoveryAttempts = 0;
         return undefined;
+      })
+      .catch((error) => {
+        if (this.isCurrent(client, source) && generation === this.subscriptionGeneration) {
+          this.releaseSubscriptions();
+          if (!(error instanceof DirectoryRefreshSupersededError))
+            this.callbacks.markAgentError(error instanceof Error ? error.message : String(error));
+        }
+        throw error;
       })
       .finally(() => {
         this.demandRefresh = null;
@@ -434,7 +534,7 @@ export class DirectorySync {
             current.connectionEpoch !== source.connectionEpoch)
         ) {
           void this.requestDemandRefresh().catch(() => undefined);
-        }
+        } else this.scheduleDemandRecovery();
       });
     return this.demandRefresh;
   }
@@ -483,13 +583,16 @@ export class DirectorySync {
     this.cacheLoad ??= (async () => {
       const revision = this.revision;
       const cached = await checkpoints.readDirectory(this.serverId);
-      if (this.cacheAccepted) return;
+      if (this.cacheAccepted || this.disposed) return;
       if (!useSessionStore.getState().sessions[this.serverId]) return;
       this.agents.commitCached(cached.agents);
       this.workspaces.commitCached(cached);
       if (this.revision === revision) this.cursors = cached.checkpoint ?? {};
       this.cacheAccepted = true;
-    })();
+    })().catch((error) => {
+      this.cacheLoad = null;
+      throw error;
+    });
     return this.cacheLoad;
   }
 
@@ -669,6 +772,7 @@ export class DirectorySync {
         this.workspaceSubscription = subscription;
         subscription.subscribe({
           snapshot: () => {},
+          error: (error) => this.failDemandSubscription(client, source, subscription, error),
           update: (message) => {
             if (message.type === "workspace_update" && this.isCurrent(client, source))
               this.receiveWorkspaceDelta(source, message.payload);
@@ -781,6 +885,7 @@ export class DirectorySync {
         this.agentSubscription = subscription;
         subscription.subscribe({
           snapshot: () => {},
+          error: (error) => this.failDemandSubscription(client, source, subscription, error),
           update: (message) => {
             if (message.type === "agent_update" && this.isCurrent(client, source))
               this.receiveAgentDelta(source, message.payload);

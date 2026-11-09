@@ -5,7 +5,7 @@ import {
   type ReplicaSqliteConnection,
   type SqliteValue,
 } from "@/runtime/replica-cache/row-store-sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   DaemonClient,
   WorkspaceLabelListPayload,
@@ -293,6 +293,7 @@ function createWorkspaceEntry(id: string): WorkspaceFetchResult["entries"][numbe
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const serverId of serverIds) useSessionStore.getState().clearSession(serverId);
   serverIds.clear();
   useWorkspaceLabels.setState({ hosts: {} });
@@ -1095,6 +1096,301 @@ describe("DirectorySync session readiness", () => {
         useSessionStore.getState().sessions[serverId].projects.get("project-1")?.projectDisplayName,
       ).toBe("Live project");
       directory.connectionChanged({ ...connection, status: "online" });
+      expect(client.listProjectsCalls).toBe(1);
+    } finally {
+      directory.dispose();
+    }
+  });
+
+  it("automatically retries a failed project refresh without refetching a healthy directory", async () => {
+    vi.useFakeTimers();
+    const serverId = "retry-project-directory";
+    const { client, directory } = createDirectory(serverId);
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+    store.updateSessionServerInfo(serverId, {
+      serverId,
+      hostname: null,
+      version: "test",
+      features: { projectList: true, workspaceMultiplicity: true },
+    });
+    vi.spyOn(client, "listProjects").mockRejectedValueOnce(new Error("Temporary project failure"));
+    try {
+      directory.acceptProject(
+        normalizeProjectDescriptor({
+          projectId: "old-project",
+          projectDisplayName: "Old project",
+          projectRootPath: "/repo/old",
+          projectKind: "git",
+        }),
+      );
+      directory.setDemand({}, true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.listProjectsCalls).toBe(0);
+      expect(useSessionStore.getState().sessions[serverId].projects.has("old-project")).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(client.listProjectsCalls).toBe(1);
+      expect([...useSessionStore.getState().sessions[serverId].projects.keys()]).toEqual([
+        "project-1",
+      ]);
+      client.emit({ type: "project.update", payload: { kind: "remove", projectId: "project-1" } });
+      expect(useSessionStore.getState().sessions[serverId].projects.size).toBe(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(client.listProjectsCalls).toBe(1);
+    } finally {
+      directory.dispose();
+    }
+  });
+
+  it("reattaches subscriptions when demand returns before an earlier refresh completes", async () => {
+    vi.useFakeTimers();
+    const serverId = "directory-demand-returns";
+    const { client, directory } = createDirectory(serverId);
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+    store.updateSessionServerInfo(serverId, {
+      serverId,
+      hostname: null,
+      version: "test",
+      features: { projectList: true, workspaceMultiplicity: true },
+    });
+    const releaseWorkspaces = client.holdWorkspaceFetch();
+    const source = {};
+    try {
+      directory.setDemand(source, true);
+      await vi.advanceTimersByTimeAsync(0);
+      directory.setDemand(source, false);
+      directory.setDemand(source, true);
+      releaseWorkspaces({
+        requestId: "held-workspaces",
+        entries: [],
+        emptyProjects: [],
+        pageInfo: { hasMore: false, nextCursor: null, prevCursor: null },
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(client.fetchWorkspacesCalls).toBe(2);
+      expect(client.listenerCount("project.update")).toBe(1);
+      expect(client.listenerCount("workspace_update")).toBe(1);
+      expect(client.listenerCount("agent_update")).toBe(1);
+      client.emit({ type: "project.update", payload: { kind: "remove", projectId: "project-1" } });
+      expect(useSessionStore.getState().sessions[serverId].projects.size).toBe(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(client.fetchWorkspacesCalls).toBe(2);
+    } finally {
+      directory.dispose();
+    }
+  });
+
+  it("retries a rejected project subscription even after the directory snapshot succeeds", async () => {
+    vi.useFakeTimers();
+    const serverId = "directory-event-subscription-fails";
+    const { client, directory } = createDirectory(serverId);
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+    store.updateSessionServerInfo(serverId, {
+      serverId,
+      hostname: null,
+      version: "test",
+      features: { projectList: true, workspaceMultiplicity: true },
+    });
+    const observeEvents = client.observeEvents.bind(client);
+    const stop = () => undefined;
+    const rejectedSubscription = subscriptionFixture(
+      Promise.reject(new Error("Subscription unavailable")),
+      () => stop,
+    );
+    void rejectedSubscription.ready.catch(stop);
+    let failed = false;
+    vi.spyOn(client, "observeEvents").mockImplementation((events) => {
+      if (events.includes("project.update") && !failed) {
+        failed = true;
+        return rejectedSubscription;
+      }
+      return observeEvents(events);
+    });
+    try {
+      directory.setDemand({}, true);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(client.listProjectsCalls).toBe(2);
+      expect(client.listenerCount("project.update")).toBe(1);
+      client.emit({ type: "project.update", payload: { kind: "remove", projectId: "project-1" } });
+      expect(useSessionStore.getState().sessions[serverId].projects.size).toBe(0);
+    } finally {
+      directory.dispose();
+    }
+  });
+
+  it("recovers a failed live subscription and ignores errors from its retired handle", async () => {
+    vi.useFakeTimers();
+    const serverId = "directory-live-subscription-error";
+    const { client, directory } = createDirectory(serverId);
+    useSessionStore.getState().initializeSession(serverId, client as unknown as DaemonClient, 1);
+    useSessionStore.getState().updateSessionServerInfo(serverId, {
+      serverId,
+      hostname: null,
+      version: "test",
+      features: { projectList: true, workspaceMultiplicity: true },
+    });
+    let fail: ((error: unknown) => void) | undefined;
+    const observe = client.observeEvents.bind(client);
+    vi.spyOn(client, "observeEvents").mockImplementation((events) => {
+      const subscription = observe(events);
+      return {
+        ...subscription,
+        subscribe(observer) {
+          if (events.includes("project.update")) fail = observer.error;
+          return subscription.subscribe(observer);
+        },
+      };
+    });
+    try {
+      directory.setDemand({}, true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.listProjectsCalls).toBe(1);
+      const retiredFailure = fail!;
+      expect(typeof retiredFailure).toBe("function");
+      retiredFailure(new Error("Lost subscription"));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(client.listProjectsCalls).toBe(2);
+      expect(client.listenerCount("project.update")).toBe(1);
+      retiredFailure(new Error("Late error from released subscription"));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(client.listProjectsCalls).toBe(2);
+      client.emit({ type: "project.update", payload: { kind: "remove", projectId: "project-1" } });
+      expect(useSessionStore.getState().sessions[serverId].projects.size).toBe(0);
+    } finally {
+      directory.dispose();
+    }
+  });
+
+  it("retries a transient cache read instead of retaining its rejected load promise", async () => {
+    vi.useFakeTimers();
+    const serverId = "directory-cache-read-retry";
+    serverIds.add(serverId);
+    const client = new FakeDirectoryClient();
+    const readDirectory = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Temporary cache failure"))
+      .mockResolvedValue({ agents: new Map(), workspaces: new Map(), projects: new Map() });
+    const directory = new DirectorySync(
+      serverId,
+      {
+        onAgentStoppedRunning: () => undefined,
+        markAgentLoading: () => undefined,
+        markAgentReady: () => undefined,
+        markAgentError: () => undefined,
+      },
+      {
+        readDirectory,
+        readAgent: async () => undefined,
+        readWorkspace: async () => undefined,
+        commitDirectoryMutations: () => undefined,
+      },
+    );
+    useSessionStore.getState().initializeSession(serverId, client as unknown as DaemonClient, 1);
+    useSessionStore.getState().updateSessionServerInfo(serverId, {
+      serverId,
+      hostname: null,
+      version: "test",
+      features: { projectList: true, workspaceMultiplicity: true },
+    });
+    directory.connectionChanged({
+      client: client as unknown as DaemonClient,
+      status: "online",
+      source: { clientGeneration: 1, connectionEpoch: 1 },
+    });
+    try {
+      directory.setDemand({}, true);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(readDirectory).toHaveBeenCalledTimes(2);
+      expect(client.listProjectsCalls).toBe(1);
+      expect([...useSessionStore.getState().sessions[serverId].projects.keys()]).toEqual([
+        "project-1",
+      ]);
+    } finally {
+      directory.dispose();
+    }
+  });
+
+  it.each(["offline", "no-demand", "disposed"])(
+    "stops failed-directory retries while %s",
+    async (state) => {
+      vi.useFakeTimers();
+      const serverId = `directory-retry-${state}`;
+      const { client, directory } = createDirectory(serverId);
+      useSessionStore.getState().initializeSession(serverId, client as unknown as DaemonClient, 1);
+      useSessionStore.getState().updateSessionServerInfo(serverId, {
+        serverId,
+        hostname: null,
+        version: "test",
+        features: { projectList: true, workspaceMultiplicity: true },
+      });
+      const list = vi
+        .spyOn(client, "listProjects")
+        .mockRejectedValue(new Error("Temporarily unavailable"));
+      const source = {};
+      try {
+        directory.setDemand(source, true);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(list).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(list).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(1999);
+        expect(list).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(list).toHaveBeenCalledTimes(3);
+        if (state === "offline")
+          directory.connectionChanged({
+            client: client as unknown as DaemonClient,
+            status: "offline",
+            source: { clientGeneration: 1, connectionEpoch: 1 },
+          });
+        else if (state === "no-demand") directory.setDemand(source, false);
+        else directory.dispose();
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(list).toHaveBeenCalledTimes(3);
+        expect(client.listenerCount("project.update")).toBe(0);
+      } finally {
+        directory.dispose();
+      }
+    },
+  );
+
+  it("coalesces synchronous loading callbacks into one directory refresh", async () => {
+    const serverId = "directory-loading-reentry";
+    serverIds.add(serverId);
+    const client = new FakeDirectoryClient();
+    let reentered = false;
+    const directory = new DirectorySync(serverId, {
+      onAgentStoppedRunning: () => undefined,
+      markAgentLoading: () => {
+        if (reentered) return;
+        reentered = true;
+        directory.setDemand({}, true);
+      },
+      markAgentReady: () => undefined,
+      markAgentError: () => undefined,
+    });
+    useSessionStore.getState().initializeSession(serverId, client as unknown as DaemonClient, 1);
+    useSessionStore.getState().updateSessionServerInfo(serverId, {
+      serverId,
+      hostname: null,
+      version: "test",
+      features: { projectList: true, workspaceMultiplicity: true },
+    });
+    directory.connectionChanged({
+      client: client as unknown as DaemonClient,
+      status: "online",
+      source: { clientGeneration: 1, connectionEpoch: 1 },
+    });
+    try {
+      directory.setAgentRouteDemand(["agent-1"]);
+      await directory.refreshDemand();
+      expect(client.fetchAgentsCalls).toBe(1);
+      expect(client.fetchWorkspacesCalls).toBe(1);
       expect(client.listProjectsCalls).toBe(1);
     } finally {
       directory.dispose();
