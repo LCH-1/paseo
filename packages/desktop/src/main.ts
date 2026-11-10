@@ -16,6 +16,8 @@ import {
   projectWindowArgument,
   projectWindowRoute,
   resolveProjectWindowTitle,
+  readNotificationProject,
+  selectNotificationWindow,
   type ProjectWindowScope,
 } from "./window/project-window.js";
 import { pathToFileURL } from "node:url";
@@ -687,7 +689,7 @@ function getWorkAreasPrimaryFirst(): Electron.Rectangle[] {
   return [primary, ...others].map((display) => display.workArea);
 }
 
-const projectWindowIds = new Set<number>();
+const projectWindowIds = new Map<number, ProjectWindowScope>();
 let windowSessionManager: ReturnType<typeof createWindowSessionManager> | null = null;
 
 interface CreateDesktopWindowOptions {
@@ -772,7 +774,7 @@ async function createWindow(options: CreateDesktopWindowOptions = {}): Promise<B
       }
     });
   }
-  if (options.projectWindow) projectWindowIds.add(webContentsId);
+  if (options.projectWindow) projectWindowIds.set(webContentsId, options.projectWindow);
   options.onCreated?.(webContentsId);
   mainWindow.webContents.on("did-start-navigation", (_event, _url, isSameDocument, isMainFrame) => {
     if (isMainFrame && !isSameDocument) {
@@ -870,6 +872,51 @@ function ownedDesktopWindow(win: BrowserWindow): OwnedDesktopWindow<AgentDeepLin
     focus: () => win.focus(),
     sendAgent: (target) => win.webContents.send("paseo:event:open-agent", target),
   };
+}
+
+const notificationWindowCreations = new Map<string, Promise<BrowserWindow>>();
+
+async function openNotificationTarget(
+  sender: Electron.WebContents,
+  data: Record<string, unknown> | undefined,
+): Promise<void> {
+  const target = readNotificationProject(data);
+  const candidates = BrowserWindow.getAllWindows()
+    .filter((win) => !win.isDestroyed())
+    .map((win) => ({
+      id: win.webContents.id,
+      projectWindow: projectWindowIds.get(win.webContents.id) ?? null,
+      win,
+    }));
+  let win = selectNotificationWindow(candidates, sender.id, target)?.win;
+  const serverId = typeof data?.serverId === "string" ? data.serverId.trim() : "";
+  const agentId = typeof data?.agentId === "string" ? data.agentId.trim() : "";
+  const workspaceId = typeof data?.workspaceId === "string" ? data.workspaceId.trim() : undefined;
+  const agentTarget = serverId && agentId ? { serverId, agentId, workspaceId, pin: true } : null;
+  if (!win) {
+    const key = target ? JSON.stringify([target.serverId, target.projectId]) : "default";
+    let pending = notificationWindowCreations.get(key);
+    if (!pending) {
+      const scope = target ? createProjectWindowScope(target) : undefined;
+      let initialRoute = scope ? projectWindowRoute(scope) : "/";
+      if (agentTarget) initialRoute = buildAgentDeepLinkRoute(agentTarget);
+      pending = createWindow({
+        projectWindow: scope,
+        initialRoute,
+      }).finally(() => notificationWindowCreations.delete(key));
+      notificationWindowCreations.set(key, pending);
+    }
+    win = await pending;
+  }
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+  if (agentTarget) {
+    const deliverable = agentNavigationInbox.deliverOrQueue(win.webContents.id, agentTarget);
+    if (deliverable) win.webContents.send("paseo:event:open-agent", deliverable);
+  } else if (data) {
+    win.webContents.send("paseo:event:notification-click", { data });
+  }
 }
 
 desktopWindowOwner = createDesktopWindowOwner<AgentDeepLinkTarget>({
@@ -1063,7 +1110,7 @@ async function bootstrap(): Promise<void> {
   registerDaemonManager();
   registerWindowManager({ mode: DESKTOP_WINDOW_CHROME_MODE });
   registerDialogHandlers();
-  registerNotificationHandlers();
+  registerNotificationHandlers(openNotificationTarget);
   const openExternalUrl = createExternalUrlOpener({ open: shell.openExternal });
   ipcMain.handle("paseo:opener:openUrl", (_event, value: unknown) => openExternalUrl(value));
   registerEditorTargetHandlers();

@@ -4,6 +4,31 @@ import { buildHostRootRoute, buildHostWorkspaceOpenRoute } from "@/utils/host-ro
 type NotificationData = Record<string, unknown> | null | undefined;
 type NotificationRoute = Extract<Href, string>;
 
+export function withNotificationProject(
+  data: Record<string, unknown>,
+  session:
+    | {
+        workspaces: ReadonlyMap<
+          string,
+          { projectId: string; projectDisplayName: string; projectRootPath: string }
+        >;
+      }
+    | undefined,
+): Record<string, unknown> {
+  const { serverId, workspaceId } = resolveNotificationTarget(data);
+  const workspace = workspaceId ? session?.workspaces.get(workspaceId) : undefined;
+  if (!serverId || !workspace) return data;
+  return {
+    ...data,
+    projectWindow: {
+      serverId,
+      projectId: workspace.projectId,
+      projectName: workspace.projectDisplayName,
+      directory: workspace.projectRootPath,
+    },
+  };
+}
+
 function readNonEmptyString(data: NotificationData, key: string): string | null {
   const value = data?.[key];
   if (typeof value !== "string") {

@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { AgentNavigationInbox, parseAgentDeepLinkFromArgv } from "./agent-navigation.js";
 
 describe("desktop agent navigation", () => {
+  it("preserves the notification workspace and pin intent across renderer startup", () => {
+    const inbox = new AgentNavigationInbox();
+    const target = {
+      serverId: "server-1",
+      agentId: "agent-2",
+      workspaceId: "wks-target",
+      pin: true,
+    };
+    expect(inbox.deliverOrQueue(7, target)).toBeNull();
+    expect(inbox.windowReady(7)).toEqual(target);
+    expect(inbox.windowReady(7)).toBeNull();
+  });
   it("finds an agent deep link among Electron launch arguments", () => {
     expect(
       parseAgentDeepLinkFromArgv([

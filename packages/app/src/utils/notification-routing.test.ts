@@ -1,6 +1,66 @@
 import { describe, expect, it } from "vitest";
 
-import { buildNotificationRoute, resolveNotificationTarget } from "./notification-routing";
+import {
+  buildNotificationRoute,
+  resolveNotificationTarget,
+  withNotificationProject,
+} from "./notification-routing";
+
+describe("notification project identity", () => {
+  it("captures the target workspace project even when sent by a different project window", () => {
+    const data = { serverId: "host-1", workspaceId: "ws-1", agentId: "agent-1" };
+    const session = {
+      workspaces: new Map([
+        [
+          "ws-1",
+          {
+            projectId: "project-1",
+            projectDisplayName: "Backend",
+            projectRootPath: "/work/backend",
+          },
+        ],
+      ]),
+    };
+    expect(withNotificationProject(data, session)).toEqual({
+      ...data,
+      projectWindow: {
+        serverId: "host-1",
+        projectId: "project-1",
+        projectName: "Backend",
+        directory: "/work/backend",
+      },
+    });
+  });
+  it("preserves the original target when the workspace directory is not loaded", () => {
+    const data = { serverId: "host-1", workspaceId: "ws-1", agentId: "agent-1" };
+    expect(withNotificationProject(data, undefined)).toBe(data);
+    expect(withNotificationProject(data, { workspaces: new Map() })).toBe(data);
+  });
+  it("includes project identity for terminal notifications without an agent", () => {
+    const data = { serverId: "host-1", workspaceId: "ws-1", terminalId: "term-1" };
+    const session = {
+      workspaces: new Map([
+        [
+          "ws-1",
+          {
+            projectId: "project-1",
+            projectDisplayName: "Backend",
+            projectRootPath: "/work/backend",
+          },
+        ],
+      ]),
+    };
+    expect(withNotificationProject(data, session)).toEqual({
+      ...data,
+      projectWindow: {
+        serverId: "host-1",
+        projectId: "project-1",
+        projectName: "Backend",
+        directory: "/work/backend",
+      },
+    });
+  });
+});
 
 describe("resolveNotificationTarget", () => {
   it("extracts non-empty server and agent ids", () => {

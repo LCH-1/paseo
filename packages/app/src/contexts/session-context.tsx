@@ -38,6 +38,7 @@ import {
 } from "@/stores/session-store";
 import { useWorkspaceSetupStore } from "@/stores/workspace-setup-store";
 import { sendOsNotification } from "@/utils/os-notifications";
+import { withNotificationProject } from "@/utils/notification-routing";
 import { getIsAppActivelyVisible, getIsAppVisible } from "@/utils/app-visibility";
 import {
   getInitKey,
@@ -313,7 +314,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       void sendOsNotification({
         title: notification.title,
         body: notification.body,
-        data: notification.data,
+        data: withNotificationProject(notification.data, session),
       });
     },
     [serverId],
@@ -694,12 +695,15 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
         body: message.payload.body,
         // serverId + workspaceId + terminalId route a tap to the terminal tab; cwd is
         // carried as a fallback identifier when the daemon resolved no workspace.
-        data: {
-          serverId: message.payload.serverId ?? serverId,
-          terminalId: message.payload.terminalId,
-          cwd: message.payload.cwd,
-          ...(message.payload.workspaceId ? { workspaceId: message.payload.workspaceId } : {}),
-        },
+        data: withNotificationProject(
+          {
+            serverId: message.payload.serverId ?? serverId,
+            terminalId: message.payload.terminalId,
+            cwd: message.payload.cwd,
+            ...(message.payload.workspaceId ? { workspaceId: message.payload.workspaceId } : {}),
+          },
+          useSessionStore.getState().sessions[serverId],
+        ),
       });
     });
 

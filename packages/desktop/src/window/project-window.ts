@@ -11,6 +11,33 @@ export interface ProjectWindowScope extends ProjectWindowTarget {
   windowId: string;
 }
 
+export function readNotificationProject(
+  data: Record<string, unknown> | undefined,
+): ProjectWindowTarget | null {
+  if (!data?.projectWindow) return null;
+  try {
+    const project = parseProjectWindowTarget(data.projectWindow);
+    return project.serverId === data.serverId ? project : null;
+  } catch {
+    return null;
+  }
+}
+
+export function selectNotificationWindow<
+  T extends {
+    id: number;
+    projectWindow: ProjectWindowTarget | null;
+  },
+>(windows: T[], senderId: number | undefined, target: ProjectWindowTarget | null): T | null {
+  const candidates = windows.filter((win) =>
+    target
+      ? win.projectWindow?.serverId === target.serverId &&
+        win.projectWindow.projectId === target.projectId
+      : win.projectWindow === null,
+  );
+  return candidates.find((win) => win.id === senderId) ?? candidates[0] ?? null;
+}
+
 export function resolveProjectWindowTitle(
   scope: ProjectWindowScope,
   pageTitle: string,

@@ -5,6 +5,8 @@ import {
   projectWindowArgument,
   projectWindowRoute,
   resolveProjectWindowTitle,
+  selectNotificationWindow,
+  readNotificationProject,
 } from "./project-window.js";
 
 const target = {
@@ -15,6 +17,43 @@ const target = {
 };
 
 describe("project windows", () => {
+  it("routes a notification to its host and project instead of its sender", () => {
+    const windows = [
+      { id: 1, projectWindow: { ...target, serverId: "other-host" } },
+      { id: 2, projectWindow: { ...target, projectId: "other-project" } },
+      { id: 3, projectWindow: target },
+    ];
+    expect(selectNotificationWindow(windows, 2, target)).toEqual(windows[2]);
+    expect(selectNotificationWindow(windows.slice(0, 2), 2, target)).toBeNull();
+  });
+  it("prefers the sending window only when it belongs to the same project", () => {
+    const windows = [
+      { id: 1, projectWindow: target },
+      { id: 2, projectWindow: target },
+    ];
+    expect(selectNotificationWindow(windows, 2, target)).toEqual(windows[1]);
+  });
+  it("keeps untargeted notifications out of unrelated project windows", () => {
+    const windows = [
+      { id: 1, projectWindow: target },
+      { id: 2, projectWindow: null },
+    ];
+    expect(selectNotificationWindow(windows, 1, null)).toEqual(windows[1]);
+    expect(selectNotificationWindow(windows.slice(0, 1), 1, null)).toBeNull();
+  });
+  it("validates the captured project against the notification host", () => {
+    expect(readNotificationProject({ serverId: target.serverId, projectWindow: target })).toEqual(
+      target,
+    );
+    expect(readNotificationProject({ serverId: "other-host", projectWindow: target })).toBeNull();
+    expect(
+      readNotificationProject({
+        serverId: target.serverId,
+        projectWindow: { ...target, directory: null },
+      }),
+    ).toBeNull();
+    expect(readNotificationProject(undefined)).toBeNull();
+  });
   it.each(["", "  ", "Paseo", "Workspace"])(
     "keeps the project title for an empty page title %j",
     (title) => {

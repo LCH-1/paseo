@@ -7,6 +7,8 @@ import { navigateToAgent } from "@/utils/navigate-to-agent";
 interface OpenAgentEventPayload {
   serverId?: unknown;
   agentId?: unknown;
+  workspaceId?: unknown;
+  pin?: unknown;
 }
 
 export function AgentNavigationListener() {
@@ -16,7 +18,14 @@ export function AgentNavigationListener() {
     if (!serverId || !agentId) {
       return;
     }
-    navigateToAgent({ serverId, agentId });
+    const workspaceId =
+      typeof payload?.workspaceId === "string" ? payload.workspaceId.trim() : undefined;
+    navigateToAgent({
+      serverId,
+      agentId,
+      workspaceId: workspaceId || undefined,
+      pin: payload?.pin === true ? true : undefined,
+    });
   });
 
   useEffect(() => {

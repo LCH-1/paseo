@@ -1,16 +1,12 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
-import { app, BrowserWindow, Notification, ipcMain, nativeImage } from "electron";
+import { app, Notification, ipcMain, nativeImage } from "electron";
 import { getDesktopSettingsStore } from "../settings/desktop-settings-electron.js";
 
 interface NotificationInput {
   title?: unknown;
   body?: unknown;
   data?: unknown;
-}
-
-interface NotificationClickPayload {
-  data?: Record<string, unknown>;
 }
 
 const activeNotifications = new Set<Notification>();
@@ -50,19 +46,6 @@ function getNotificationIcon(): Electron.NativeImage | null {
   return null;
 }
 
-function focusSenderWindow(sender: Electron.WebContents): BrowserWindow | null {
-  const win = BrowserWindow.fromWebContents(sender) ?? BrowserWindow.getAllWindows()[0] ?? null;
-  if (!win || win.isDestroyed()) {
-    return null;
-  }
-  win.show();
-  if (win.isMinimized()) {
-    win.restore();
-  }
-  win.focus();
-  return win;
-}
-
 /**
  * macOS requires a notification to have been shown at least once before
  * the app appears in System Preferences > Notifications. We fire a
@@ -79,7 +62,12 @@ export function ensureNotificationCenterRegistration(): void {
   probe.show();
 }
 
-export function registerNotificationHandlers(): void {
+export function registerNotificationHandlers(
+  openTarget: (
+    sender: Electron.WebContents,
+    data: Record<string, unknown> | undefined,
+  ) => Promise<void>,
+): void {
   ipcMain.handle("paseo:notification:isSupported", () => {
     return Notification.isSupported();
   });
@@ -108,12 +96,10 @@ export function registerNotificationHandlers(): void {
     activeNotifications.add(notification);
 
     notification.on("click", () => {
-      const win = focusSenderWindow(event.sender);
-      if (win && data && Object.keys(data).length > 0) {
-        const payload: NotificationClickPayload = { data };
-        win.webContents.send("paseo:event:notification-click", payload);
-      }
       activeNotifications.delete(notification);
+      void openTarget(event.sender, data).catch((error) => {
+        console.error("Failed to open notification target", error);
+      });
     });
 
     notification.on("close", () => {
