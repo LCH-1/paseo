@@ -9530,6 +9530,218 @@ test("unarchiving an agent does not announce the finished attention its retained
   );
 });
 
+function recordAttentionStates(manager: AgentManager, agentId: string) {
+  const states: Array<Pick<ManagedAgent, "lifecycle" | "attention">> = [];
+  manager.subscribe(
+    (event) => {
+      if (event.type === "agent_state" && event.agent.id === agentId) {
+        states.push({ lifecycle: event.agent.lifecycle, attention: event.agent.attention });
+      }
+    },
+    { replayState: false },
+  );
+  return states;
+}
+
+test("clearAgentAttention keeps the agent unread when the read state cannot be saved", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-attention-save-failure-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    await manager.runAgent(agent.id, "finish a turn");
+    await manager.flush();
+    await storage.flush();
+    const states = recordAttentionStates(manager, agent.id);
+
+    rmSync(storagePath, { recursive: true, force: true });
+    writeFileSync(storagePath, "blocks the storage directory");
+
+    await expect(manager.clearAgentAttention(agent.id)).rejects.toThrow();
+    expect(manager.getAgent(agent.id)?.attention).toMatchObject({
+      requiresAttention: true,
+      attentionReason: "finished",
+    });
+    expect(states).toEqual([]);
+
+    rmSync(storagePath, { force: true });
+    await manager.clearAgentAttention(agent.id);
+
+    expect(states).toEqual([{ lifecycle: "idle", attention: { requiresAttention: false } }]);
+    expect(await storage.get(agent.id)).toMatchObject({
+      requiresAttention: false,
+      attentionReason: null,
+      attentionTimestamp: null,
+    });
+  } finally {
+    await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("clearAgentAttention tells every subscriber and republishes a read agent only on request", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-attention-broadcast-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    await manager.runAgent(agent.id, "finish a turn");
+    await manager.flush();
+    const firstWindow = recordAttentionStates(manager, agent.id);
+    const secondWindow = recordAttentionStates(manager, agent.id);
+    const read = { lifecycle: "idle", attention: { requiresAttention: false } };
+
+    await manager.clearAgentAttention(agent.id);
+    expect(firstWindow).toEqual([read]);
+    expect(secondWindow).toEqual([read]);
+
+    await manager.clearAgentAttention(agent.id);
+    expect(secondWindow).toEqual([read]);
+
+    await manager.clearAgentAttention(agent.id, { republish: true });
+    expect(firstWindow).toEqual([read, read]);
+    expect(secondWindow).toEqual([read, read]);
+  } finally {
+    await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("clearAgentAttention reads an agent that is not loaded and tells every subscriber", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-attention-stored-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: "workspace-1",
+    });
+    await manager.closeAgent(agent.id);
+    await manager.markAgentUnread(agent.id);
+    const unread = await storage.get(agent.id);
+    const firstWindow = recordAttentionStates(manager, agent.id);
+    const secondWindow = recordAttentionStates(manager, agent.id);
+    const read = { lifecycle: "closed", attention: { requiresAttention: false } };
+
+    await manager.clearAgentAttention(agent.id);
+
+    expect(manager.getAgent(agent.id)).toBeNull();
+    expect(firstWindow).toEqual([read]);
+    expect(secondWindow).toEqual([read]);
+    expect(await storage.get(agent.id)).toEqual({
+      ...unread,
+      requiresAttention: false,
+      attentionReason: null,
+      attentionTimestamp: null,
+    });
+    await expect(manager.clearAgentAttention("missing-agent")).rejects.toThrow(
+      "Agent not found: missing-agent",
+    );
+  } finally {
+    await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("reload keeps a read that was acknowledged while the old session was closing", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-attention-reload-closing-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new HeldReloadCloseClient();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    await manager.runAgent(agent.id, "finish a turn");
+    await manager.flush();
+
+    const reload = manager.reloadAgentSession(agent.id);
+    await client.waitForCloseToStart();
+    await manager.clearAgentAttention(agent.id);
+    client.finishClosing();
+    await reload;
+    await manager.flush();
+
+    expect(manager.getAgent(agent.id)?.attention).toEqual({ requiresAttention: false });
+    expect(await storage.get(agent.id)).toMatchObject({ requiresAttention: false });
+  } finally {
+    client.finishClosing();
+    await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("clearAgentAttention waits for a reload instead of reading a record the reload rewrites", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-attention-reload-resuming-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const resumeStarted = deferred<void>();
+  const resumeAllowed = deferred<void>();
+  class HeldResumeClient extends TestAgentClient {
+    override async resumeSession(
+      handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+    ): Promise<AgentSession> {
+      resumeStarted.resolve();
+      await resumeAllowed.promise;
+      return super.resumeSession(handle, config);
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new HeldResumeClient() },
+    registry: storage,
+    logger,
+  });
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    await manager.runAgent(agent.id, "finish a turn");
+    await manager.flush();
+
+    const reload = manager.reloadAgentSession(agent.id);
+    await resumeStarted.promise;
+    expect(manager.getAgent(agent.id)).toBeNull();
+    const clearing = manager.clearAgentAttention(agent.id);
+    resumeAllowed.resolve();
+    await reload;
+    await clearing;
+    await manager.flush();
+
+    expect(manager.getAgent(agent.id)?.attention).toEqual({ requiresAttention: false });
+    expect(await storage.get(agent.id)).toMatchObject({ requiresAttention: false });
+  } finally {
+    resumeAllowed.resolve();
+    await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("streamAgent clears pending run when startTurn fails before a turn id exists", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-start-turn-failure-"));
   const storagePath = join(workdir, "agents");

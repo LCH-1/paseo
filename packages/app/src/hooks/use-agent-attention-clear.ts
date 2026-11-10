@@ -36,6 +36,9 @@ interface AttentionClearRequest {
 }
 
 const COMPLETION_ACK_RETRY_DELAYS_MS = [500, 1500, 4000];
+// Past the quick retries the host is struggling, not blinking: keep the displayed
+// conversation converging, at a pace that cannot pile requests onto it.
+const COMPLETION_ACK_SLOW_RETRY_DELAY_MS = 30_000;
 
 export function useAgentAttentionClear({
   agentId,
@@ -176,13 +179,15 @@ export function useAgentAttentionClear({
     let timer: ReturnType<typeof setTimeout> | null = null;
     async function acknowledgeCompletion() {
       const acknowledged = await clearAttention("viewed-completion");
-      if (cancelled || acknowledged !== false || retry === COMPLETION_ACK_RETRY_DELAYS_MS.length) {
+      if (cancelled || acknowledged !== false) {
         return;
       }
+      const delay = COMPLETION_ACK_RETRY_DELAYS_MS[retry] ?? COMPLETION_ACK_SLOW_RETRY_DELAY_MS;
+      retry += 1;
       timer = setTimeout(() => {
         timer = null;
         void acknowledgeCompletion();
-      }, COMPLETION_ACK_RETRY_DELAYS_MS[retry++]);
+      }, delay);
     }
     void acknowledgeCompletion();
     return () => {

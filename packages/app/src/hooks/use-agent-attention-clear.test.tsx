@@ -55,10 +55,10 @@ describe("read completed conversations", () => {
     });
     expect(clear).toHaveBeenCalledTimes(2);
   });
-  it("stops after three delayed retries while a displayed completion keeps failing", async () => {
+  it("keeps retrying slowly after three quick retries while a displayed completion keeps failing", async () => {
     vi.useFakeTimers();
     clear.mockRejectedValue(new Error("acknowledgement timed out"));
-    renderHook(() => useAgentAttentionClear(initial));
+    const view = renderHook(useAgentAttentionClear, { initialProps: initial });
     await act(async () => {});
     expect(clear).toHaveBeenCalledTimes(1);
     await act(async () => {
@@ -78,9 +78,41 @@ describe("read completed conversations", () => {
     });
     expect(clear).toHaveBeenCalledTimes(4);
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(29_999);
     });
     expect(clear).toHaveBeenCalledTimes(4);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(clear).toHaveBeenCalledTimes(5);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+    });
+    expect(clear).toHaveBeenCalledTimes(15);
+    view.rerender({ ...initial, isScreenFocused: false });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+    });
+    expect(clear).toHaveBeenCalledTimes(15);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("stops the slow retries once the host acknowledges the completion", async () => {
+    vi.useFakeTimers();
+    clear.mockRejectedValue(new Error("acknowledgement timed out"));
+    renderHook(() => useAgentAttentionClear(initial));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    expect(clear).toHaveBeenCalledTimes(4);
+    clear.mockResolvedValue(undefined);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(clear).toHaveBeenCalledTimes(5);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+    });
+    expect(clear).toHaveBeenCalledTimes(5);
     expect(vi.getTimerCount()).toBe(0);
   });
   it.each<[string, Partial<typeof initial>]>([

@@ -503,6 +503,57 @@ describe("DirectorySync attention acknowledgements", () => {
     }
   });
 
+  it("marks a conversation read when another window's read arrives on the directory subscription", async () => {
+    const serverId = "attention-read-from-other-window";
+    const { client, directory } = createDirectory(serverId);
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+    const project = deriveProjectPlacementFromCwd("/repo");
+    const unread = {
+      ...createAgentSnapshot("agent"),
+      requiresAttention: true,
+      attentionReason: "finished" as const,
+      attentionTimestamp: "2026-08-26T00:00:00.000Z",
+    };
+    const finish = client.holdAgentFetch();
+    const refresh = directory.refreshAgents({ subscribe: {} });
+    try {
+      await expect.poll(() => client.fetchAgentsCalls).toBe(1);
+      finish({
+        requestId: "directory",
+        entries: [{ agent: unread, project }],
+        pageInfo: { hasMore: false, nextCursor: null, prevCursor: null },
+      });
+      await refresh;
+      expect(
+        useSessionStore.getState().sessions[serverId].agents.get("agent")?.requiresAttention,
+      ).toBe(true);
+      // The host does not advance updatedAt for a read, so it arrives at the same timestamp.
+      client.emit({
+        type: "agent_update",
+        payload: {
+          kind: "upsert",
+          project,
+          agent: {
+            ...unread,
+            requiresAttention: false,
+            attentionReason: null,
+            attentionTimestamp: null,
+          },
+        },
+      });
+      expect(useSessionStore.getState().sessions[serverId].agents.get("agent")).toMatchObject({
+        requiresAttention: false,
+        attentionReason: null,
+        attentionTimestamp: null,
+        updatedAt: new Date(unread.updatedAt),
+        projectPlacement: project,
+      });
+    } finally {
+      directory.dispose();
+    }
+  });
+
   it("does not shadow a newer archived detail with an older read acknowledgement", () => {
     const serverId = "attention-ack-newer-detail";
     const { client, directory } = createDirectory(serverId);

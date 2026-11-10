@@ -1702,7 +1702,7 @@ test("archive emits an authoritative agent_update upsert for subscribed clients"
   });
 });
 
-test("workspace clear attention clears stored-only agents and responds", async () => {
+test("workspace clear attention reads stored-only agents through the agent manager", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const workspace = createPersistedWorkspaceRecord({
     workspaceId: REPO_CWD,
@@ -1721,36 +1721,60 @@ test("workspace clear attention clears stored-only agents and responds", async (
     createdAt: "2026-03-30T15:00:00.000Z",
     updatedAt: "2026-03-30T15:00:00.000Z",
   });
-  let storedRecord = makeStoredAgent({
-    id: "stored-agent-1",
-    cwd: REPO_CWD,
-    updatedAt: "2026-03-30T15:00:00.000Z",
-    requiresAttention: true,
-    attentionReason: "finished",
+  const storedRecords = new Map(
+    [
+      makeStoredAgent({
+        id: "stored-agent-1",
+        cwd: REPO_CWD,
+        updatedAt: "2026-03-30T15:00:00.000Z",
+        requiresAttention: true,
+        attentionReason: "finished",
+      }),
+      {
+        ...makeStoredAgent({
+          id: "internal-agent-1",
+          cwd: REPO_CWD,
+          updatedAt: "2026-03-30T15:00:00.000Z",
+          requiresAttention: true,
+          attentionReason: "finished",
+        }),
+        internal: true,
+      },
+    ].map((record) => [record.id, record]),
+  );
+  const cleared: string[] = [];
+  const session = createSessionForWorkspaceTests({
+    onMessage: (message) => emitted.push(message),
+    agentManager: {
+      clearAgentAttention: async (agentId: string) => {
+        cleared.push(agentId);
+      },
+    },
+    agentStorage: {
+      get: async (agentId: string) => storedRecords.get(agentId) ?? null,
+      upsert: async () => {
+        throw new Error("Only the agent manager may write the read state");
+      },
+    },
   });
-  const session = createSessionForWorkspaceTests({ onMessage: (message) => emitted.push(message) });
 
   session.workspaceRegistry.list = async () => [workspace];
   session.workspaceRegistry.get = async (id: string) =>
     id === workspace.workspaceId ? workspace : null;
   session.projectRegistry.list = async () => [project];
   session.projectRegistry.get = async (id: string) => (id === project.projectId ? project : null);
-  session.agentStorage.get = async (agentId: string) =>
-    agentId === storedRecord.id ? storedRecord : null;
-  session.agentStorage.upsert = async (record: unknown) => {
-    storedRecord = record as StoredAgentRecord;
-  };
-  session.listAgentPayloads = async () => [
-    makeAgent({
-      id: storedRecord.id,
-      cwd: storedRecord.cwd,
-      workspaceId: workspace.workspaceId,
-      status: "closed",
-      updatedAt: storedRecord.updatedAt,
-      requiresAttention: true,
-      attentionReason: "finished",
-    }),
-  ];
+  session.listAgentPayloads = async () =>
+    Array.from(storedRecords.values()).map((record) =>
+      makeAgent({
+        id: record.id,
+        cwd: record.cwd,
+        workspaceId: workspace.workspaceId,
+        status: "closed",
+        updatedAt: record.updatedAt,
+        requiresAttention: true,
+        attentionReason: "finished",
+      }),
+    );
 
   await session.handleMessage({
     type: "workspace.clear_attention.request",
@@ -1758,21 +1782,16 @@ test("workspace clear attention clears stored-only agents and responds", async (
     requestId: "req-1",
   });
 
-  expect(storedRecord.requiresAttention).toBe(false);
-  expect(storedRecord.attentionReason).toBeNull();
-  expect(storedRecord.attentionTimestamp).toBeNull();
+  // The manager publishes the read to every session; an update emitted here would reach this window only.
+  expect(cleared).toEqual(["stored-agent-1"]);
+  expect(filterByType(emitted, "agent_update")).toEqual([]);
   expect(findByType(emitted, "workspace.clear_attention.response").payload).toMatchObject({
     requestId: "req-1",
     workspaceId: workspace.workspaceId,
-    clearedAgentIds: [storedRecord.id],
+    clearedAgentIds: ["stored-agent-1"],
     success: true,
     error: null,
   });
-  const agentUpdate = findByType(emitted, "agent_update");
-  expect(agentUpdate.payload.kind).toBe("upsert");
-  if (agentUpdate.payload.kind === "upsert") {
-    expect(agentUpdate.payload.agent.requiresAttention).toBe(false);
-  }
 });
 
 test("workspace clear attention responds with an error instead of timing out", async () => {
@@ -1792,6 +1811,107 @@ test("workspace clear attention responds with an error instead of timing out", a
     clearedAgentIds: [],
     success: false,
     error: "Workspace not found: missing-workspace",
+  });
+});
+
+test("clear agent attention answers with an error when the read state cannot be saved", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const liveAgent = makeManagedAgent({
+    id: "live-agent-1",
+    cwd: REPO_CWD,
+    lifecycle: "idle",
+    updatedAt: "2026-03-30T15:00:00.000Z",
+  });
+  const session = createSessionForWorkspaceTests({
+    onMessage: (message) => emitted.push(message),
+    agentManager: {
+      waitForAgentClose: async () => {},
+      getAgent: () => liveAgent,
+      clearAgentAttention: async () => {
+        throw new Error("ENOSPC: no space left on device");
+      },
+    },
+  });
+
+  await session.handleMessage({
+    type: "clear_agent_attention",
+    agentId: liveAgent.id,
+    requestId: "req-1",
+  });
+
+  expect(filterByType(emitted, "clear_agent_attention_response")).toEqual([]);
+  expect(findByType(emitted, "rpc_error").payload).toEqual({
+    requestId: "req-1",
+    requestType: "clear_agent_attention",
+    error: "ENOSPC: no space left on device",
+    code: "clear_agent_attention_failed",
+  });
+});
+
+test("clear agent attention reads a conversation whose agent cannot be resumed", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  let storedRecord = makeStoredAgent({
+    id: "stored-agent-1",
+    cwd: REPO_CWD,
+    updatedAt: "2026-03-30T15:00:00.000Z",
+    requiresAttention: true,
+    attentionReason: "finished",
+  });
+  const cleared: Array<[string, unknown]> = [];
+  const session = createSessionForWorkspaceTests({
+    onMessage: (message) => emitted.push(message),
+    agentManager: {
+      waitForAgentClose: async () => {},
+      // No registered provider can resume the stored record.
+      getRegisteredProviderIds: () => [],
+      clearAgentAttention: async (agentId: string, options: unknown) => {
+        cleared.push([agentId, options]);
+        storedRecord = {
+          ...storedRecord,
+          requiresAttention: false,
+          attentionReason: null,
+          attentionTimestamp: null,
+        };
+      },
+    },
+    agentStorage: {
+      get: async (agentId: string) => (agentId === storedRecord.id ? storedRecord : null),
+    },
+  });
+
+  await session.handleMessage({
+    type: "clear_agent_attention",
+    agentId: storedRecord.id,
+    requestId: "req-1",
+  });
+
+  expect(cleared).toEqual([[storedRecord.id, { republish: true }]]);
+  expect(filterByType(emitted, "rpc_error")).toEqual([]);
+  expect(findByType(emitted, "clear_agent_attention_response").payload).toMatchObject({
+    requestId: "req-1",
+    agentId: storedRecord.id,
+    agents: [{ id: storedRecord.id, requiresAttention: false, attentionReason: null }],
+  });
+});
+
+test("clear agent attention reports a conversation that no longer exists", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = createSessionForWorkspaceTests({
+    onMessage: (message) => emitted.push(message),
+    agentManager: { waitForAgentClose: async () => {} },
+  });
+
+  await session.handleMessage({
+    type: "clear_agent_attention",
+    agentId: "deleted-agent",
+    requestId: "req-1",
+  });
+
+  expect(findByType(emitted, "rpc_error").payload).toEqual({
+    requestId: "req-1",
+    requestType: "clear_agent_attention",
+    error: "Agent not found: deleted-agent",
+    code: "clear_agent_attention_failed",
   });
 });
 
@@ -1956,7 +2076,15 @@ test("workspace clear attention can clear multiple workspaces in one request", a
       }),
     ]),
   );
-  const session = createSessionForWorkspaceTests({ onMessage: (message) => emitted.push(message) });
+  const session = createSessionForWorkspaceTests({
+    onMessage: (message) => emitted.push(message),
+    agentManager: {
+      clearAgentAttention: async (agentId: string) => {
+        const record = storedRecords.get(agentId);
+        if (record) storedRecords.set(agentId, { ...record, requiresAttention: false });
+      },
+    },
+  });
 
   session.workspaceRegistry.list = async () => workspaces;
   session.workspaceRegistry.get = async (id: string) =>
@@ -1965,10 +2093,6 @@ test("workspace clear attention can clear multiple workspaces in one request", a
   session.projectRegistry.get = async (id: string) =>
     projects.find((project) => project.projectId === id) ?? null;
   session.agentStorage.get = async (agentId: string) => storedRecords.get(agentId) ?? null;
-  session.agentStorage.upsert = async (record: unknown) => {
-    const storedRecord = record as StoredAgentRecord;
-    storedRecords.set(storedRecord.id, storedRecord);
-  };
   session.listAgentPayloads = async () =>
     Array.from(storedRecords.values()).map((record) => {
       const owner = workspaces.find((workspace) => workspace.cwd === record.cwd);

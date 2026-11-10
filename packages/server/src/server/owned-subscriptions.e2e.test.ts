@@ -1674,6 +1674,176 @@ test("mark unread replies remain source-owned while directory observers receive 
   }
 });
 
+test("a read in one window reaches directory observers on other sockets and sessions", async () => {
+  const daemon = await createTestPaseoDaemon({ mcpEnabled: false });
+  const admin = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
+  const peers: SubscriptionPeer[] = [];
+  const sawAttention = (peer: SubscriptionPeer, agentId: string, requiresAttention: boolean) =>
+    peer.frames.some(
+      (frame) =>
+        frame.type === "session" &&
+        frame.message.type === "agent_update" &&
+        frame.message.payload.kind === "upsert" &&
+        frame.message.payload.agent.id === agentId &&
+        frame.message.payload.agent.requiresAttention === requiresAttention,
+    );
+  const readReplies = (peer: SubscriptionPeer) =>
+    peer.frames.flatMap((frame) =>
+      frame.type === "session" && frame.message.type === "clear_agent_attention_response"
+        ? [frame.message.payload]
+        : [],
+    );
+  try {
+    await admin.connect();
+    const agent = await admin.createAgent({
+      provider: "codex",
+      cwd: daemon.staticDir,
+      title: "Finished",
+    });
+    const reader = await SubscriptionPeer.connect(daemon.port, "read-window");
+    peers.push(reader);
+    const sameSession = await SubscriptionPeer.connect(daemon.port, "read-window");
+    peers.push(sameSession);
+    const otherSession = await SubscriptionPeer.connect(daemon.port, "other-window");
+    peers.push(otherSession);
+    const observers = [sameSession, otherSession];
+    for (const observer of observers) {
+      await observer.request({
+        type: "fetch_agents_request",
+        requestId: "directory",
+        subscribe: {},
+      });
+    }
+    const workspaceId = sameSession.frames
+      .flatMap((frame) =>
+        frame.type === "session" && frame.message.type === "fetch_agents_response"
+          ? frame.message.payload.entries
+          : [],
+      )
+      .find((entry) => entry.agent.id === agent.id)!.agent.workspaceId!;
+    await reader.request({
+      type: "workspace.clear_attention.request",
+      workspaceId,
+      requestId: "start-read",
+    });
+    await reader.request({ type: "workspace.mark_unread.request", workspaceId, requestId: "mark" });
+    for (const observer of observers) {
+      await expect.poll(() => sawAttention(observer, agent.id, true)).toBe(true);
+    }
+    for (const peer of peers) peer.frames.length = 0;
+
+    await reader.request({ type: "clear_agent_attention", agentId: agent.id, requestId: "read" });
+
+    expect(readReplies(reader)).toMatchObject([
+      { requestId: "read", agents: [{ id: agent.id, requiresAttention: false }] },
+    ]);
+    for (const observer of observers) {
+      await expect.poll(() => sawAttention(observer, agent.id, false)).toBe(true);
+      expect(readReplies(observer)).toEqual([]);
+    }
+    for (const peer of peers) peer.frames.length = 0;
+
+    // A window whose copy went stale asks again: it gets the current state, and so does everyone.
+    await reader.request({
+      type: "clear_agent_attention",
+      agentId: agent.id,
+      requestId: "read-again",
+    });
+
+    expect(readReplies(reader)).toMatchObject([
+      { requestId: "read-again", agents: [{ id: agent.id, requiresAttention: false }] },
+    ]);
+    for (const observer of observers) {
+      await expect.poll(() => sawAttention(observer, agent.id, false)).toBe(true);
+    }
+  } finally {
+    for (const peer of peers) peer.close();
+    await admin.close();
+    await daemon.close();
+  }
+});
+
+test("a workspace read of a closed conversation reaches the directory of every window", async () => {
+  const daemon = await createTestPaseoDaemon({ mcpEnabled: false });
+  const admin = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
+  const peers: SubscriptionPeer[] = [];
+  const directoryIds = new Map<SubscriptionPeer, string>();
+  const sawAttention = (peer: SubscriptionPeer, agentId: string, requiresAttention: boolean) =>
+    peer.frames.some(
+      (frame) =>
+        frame.type === "session" &&
+        frame.message.type === "agent_update" &&
+        frame.message.payload.kind === "upsert" &&
+        frame.message.payload.agent.id === agentId &&
+        frame.message.payload.agent.requiresAttention === requiresAttention &&
+        frame.message.payload.subscriptionId === directoryIds.get(peer),
+    );
+  try {
+    await admin.connect();
+    const agent = await admin.createAgent({
+      provider: "codex",
+      cwd: daemon.staticDir,
+      title: "Finished",
+    });
+    const reader = await SubscriptionPeer.connect(daemon.port, "read-window");
+    peers.push(reader);
+    const otherWindow = await SubscriptionPeer.connect(daemon.port, "other-window");
+    peers.push(otherWindow);
+    let workspaceId = "";
+    for (const peer of peers) {
+      await peer.request({ type: "fetch_agents_request", requestId: "directory", subscribe: {} });
+      const snapshot = peer.frames.flatMap((frame) =>
+        frame.type === "session" && frame.message.type === "fetch_agents_response"
+          ? [frame.message.payload]
+          : [],
+      )[0];
+      directoryIds.set(peer, snapshot.subscriptionId!);
+      workspaceId = snapshot.entries.find((entry) => entry.agent.id === agent.id)!.agent
+        .workspaceId!;
+    }
+    await reader.request({
+      type: "workspace.clear_attention.request",
+      workspaceId,
+      requestId: "start-read",
+    });
+    // After a daemon restart most conversations stay closed until someone opens them.
+    await daemon.daemon.agentManager.closeAgent(agent.id);
+    expect(daemon.daemon.agentManager.getAgent(agent.id)).toBeNull();
+    await reader.request({ type: "workspace.mark_unread.request", workspaceId, requestId: "mark" });
+    for (const peer of peers) {
+      await expect.poll(() => sawAttention(peer, agent.id, true)).toBe(true);
+    }
+    for (const peer of peers) peer.frames.length = 0;
+
+    await reader.request({
+      type: "workspace.clear_attention.request",
+      workspaceId,
+      requestId: "read",
+    });
+
+    expect(reader.frames).toContainEqual(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          type: "workspace.clear_attention.response",
+          payload: expect.objectContaining({
+            requestId: "read",
+            clearedAgentIds: [agent.id],
+            success: true,
+          }),
+        }),
+      }),
+    );
+    for (const peer of peers) {
+      await expect.poll(() => sawAttention(peer, agent.id, false)).toBe(true);
+    }
+    expect(daemon.daemon.agentManager.getAgent(agent.id)).toBeNull();
+  } finally {
+    for (const peer of peers) peer.close();
+    await admin.close();
+    await daemon.close();
+  }
+});
+
 test("legacy event subscribers retain notifications without the new notifications flag", async () => {
   const daemon = await createTestPaseoDaemon({ mcpEnabled: false });
   const admin = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws`, appVersion: "0.8.0" });

@@ -5040,23 +5040,28 @@ export class Session {
 
     try {
       await Promise.all(
-        agentIds.map((id) =>
-          ensureAgentLoaded(id, {
-            agentManager: this.agentManager,
-            agentStorage: this.agentStorage,
-            logger: this.sessionLogger,
-          }),
-        ),
+        agentIds.map(async (id) => {
+          try {
+            await ensureAgentLoaded(id, {
+              agentManager: this.agentManager,
+              agentStorage: this.agentStorage,
+              logger: this.sessionLogger,
+            });
+          } catch (error) {
+            if (error instanceof AgentNotFoundError) throw error;
+            // Reading a conversation must not depend on resuming it. A provider at
+            // its limit or no longer registered leaves the stored record to clear.
+            this.sessionLogger.warn(
+              { err: error, agentId: id },
+              "Clearing agent attention without a loaded agent",
+            );
+          }
+          await this.agentManager.clearAgentAttention(id, { republish: true });
+        }),
       );
-      await Promise.all(agentIds.map((id) => this.agentManager.clearAgentAttention(id)));
       if (requestId) {
         const agents = (
-          await Promise.all(
-            agentIds.map(async (id) => {
-              const agent = this.agentManager.getAgent(id);
-              return agent ? this.buildAgentPayload(agent) : null;
-            }),
-          )
+          await Promise.all(agentIds.map((id) => this.getAgentPayloadById(id)))
         ).filter((payload): payload is NonNullable<typeof payload> => payload !== null);
         this.emit({
           type: "clear_agent_attention_response",
@@ -5069,7 +5074,18 @@ export class Session {
       }
     } catch (error) {
       this.sessionLogger.error({ err: error, agentIds }, "Failed to clear agent attention");
-      // Don't throw - this is not critical
+      // A silent failure leaves the client waiting out its request timeout before it can retry.
+      if (requestId) {
+        this.emit({
+          type: "rpc_error",
+          payload: {
+            requestId,
+            requestType: "clear_agent_attention",
+            error: getErrorMessageOr(error, "Failed to clear agent attention"),
+            code: "clear_agent_attention_failed",
+          },
+        });
+      }
     }
   }
 
@@ -7687,40 +7703,10 @@ export class Session {
           .map((agent) => agent.id);
 
         for (const agentId of clearableAgentIds) {
-          const liveAgent = this.agentManager.getAgent(agentId);
-          if (liveAgent) {
-            await this.agentManager.clearAgentAttention(agentId);
-            clearedAgentIds.push(agentId);
-            continue;
-          }
-
-          const record = await this.agentStorage.get(agentId);
-          if (
-            !record ||
-            record.internal ||
-            record.archivedAt ||
-            record.requiresAttention !== true
-          ) {
-            continue;
-          }
-          const nextRecord: StoredAgentRecord = {
-            ...record,
-            updatedAt: new Date().toISOString(),
-            requiresAttention: false,
-            attentionReason: null,
-            attentionTimestamp: null,
-          };
-          await this.agentStorage.upsert(nextRecord);
-          const agent = this.buildStoredAgentPayload(nextRecord);
-          const project = await this.buildProjectPlacementForWorkspace(workspace);
-          this.emit({
-            type: "agent_update",
-            payload: {
-              kind: "upsert",
-              agent,
-              project,
-            },
-          });
+          if (!(await this.canClearWorkspaceAgentAttention(agentId))) continue;
+          // The manager publishes the read to every session's directory, so the
+          // other windows of a host see it too, not only the one that asked.
+          await this.agentManager.clearAgentAttention(agentId);
           clearedAgentIds.push(agentId);
         }
 
@@ -7765,6 +7751,14 @@ export class Session {
                 .join("; "),
       },
     });
+  }
+
+  private async canClearWorkspaceAgentAttention(agentId: string): Promise<boolean> {
+    if (this.agentManager.getAgent(agentId)) return true;
+    const record = await this.agentStorage.get(agentId);
+    return Boolean(
+      record && !record.internal && !record.archivedAt && record.requiresAttention === true,
+    );
   }
 
   private async handleWorkspaceMarkUnreadRequest(

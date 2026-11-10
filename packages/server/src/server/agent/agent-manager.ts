@@ -1784,7 +1784,6 @@ export class AgentManager {
     const preservedHistoryPrimed = existing.historyPrimed;
     const preservedLastUsage = existing.lastUsage;
     const preservedLastError = existing.lastError;
-    const preservedAttention = existing.attention;
     const handle = existing.persistence;
     const provider = handle?.provider ?? existing.provider;
     const client = this.requireClient(provider);
@@ -1855,7 +1854,9 @@ export class AgentManager {
         historyPrimed: rehydrateFromDisk ? false : preservedHistoryPrimed,
         lastUsage: preservedLastUsage,
         lastError: preservedLastError,
-        attention: preservedAttention,
+        // Read at closure, not at entry: a read acknowledged while the old
+        // session was closing must not come back with the replacement.
+        attention: closedExisting.attention,
         restoring: true,
       });
     } catch (error) {
@@ -2471,17 +2472,67 @@ export class AgentManager {
     this.emitState(agent);
   }
 
-  async clearAgentAttention(agentId: string): Promise<void> {
-    const agent = this.requireAgent(agentId);
-    if (agent.attention.requiresAttention) {
-      this.logger.info(
-        { agentId, provider: agent.provider, reason: agent.attention.attentionReason },
-        "Agent attention cleared",
-      );
-      agent.attention = { requiresAttention: false };
-      await this.persistSnapshot(agent);
-      this.emitState(agent, { persist: false });
+  /**
+   * Marks an agent read. An agent that is not loaded is cleared in its stored
+   * record, so a conversation that cannot be resumed can still be read.
+   * `republish` re-sends an already-read live agent to every subscriber, which
+   * converges a client that asked because its own copy was stale.
+   */
+  async clearAgentAttention(agentId: string, options?: { republish?: boolean }): Promise<void> {
+    let agent = this.agents.get(agentId);
+    if (!agent) {
+      // A reload or close in flight writes the attention it started with.
+      await this.waitForAgentClose(agentId);
+      agent = this.agents.get(agentId);
     }
+    if (!agent) {
+      await this.clearStoredAgentAttention(agentId);
+      return;
+    }
+
+    const previous = agent.attention;
+    if (!previous.requiresAttention) {
+      if (options?.republish) {
+        this.emitState(agent, { persist: false });
+      }
+      return;
+    }
+    this.logger.info(
+      { agentId, provider: agent.provider, reason: previous.attentionReason },
+      "Agent attention cleared",
+    );
+    const cleared: AttentionState = { requiresAttention: false };
+    agent.attention = cleared;
+    try {
+      await this.persistSnapshot(agent);
+    } catch (error) {
+      // Memory must not say read while the record says unread: the next request
+      // would skip the write, and a restart would bring the attention back.
+      if (agent.attention === cleared) {
+        agent.attention = previous;
+      }
+      throw error;
+    }
+    this.emitState(agent, { persist: false });
+  }
+
+  private async clearStoredAgentAttention(agentId: string): Promise<void> {
+    const registry = this.requireRegistry();
+    const record = await registry.get(agentId);
+    if (!record) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    if (!record.requiresAttention) {
+      return;
+    }
+    const nextRecord: StoredAgentRecord = {
+      ...record,
+      requiresAttention: false,
+      attentionReason: null,
+      attentionTimestamp: null,
+    };
+    await registry.upsert(nextRecord);
+    this.dispatchStoredAgentState(nextRecord);
   }
 
   async markAgentUnread(agentId: string): Promise<void> {
