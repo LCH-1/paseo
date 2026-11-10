@@ -907,9 +907,7 @@ const styles = StyleSheet.create((theme) => ({
   sidebarHeaderGroup: {
     paddingTop: theme.spacing[2],
     gap: 2,
-    paddingBottom: theme.spacing[1.5],
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.border,
+    paddingBottom: 2,
   },
   sidebarHeaderGroupBelowChrome: {
     paddingTop: 0,

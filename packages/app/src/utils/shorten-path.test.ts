@@ -14,10 +14,20 @@ describe("shortenPath", () => {
     expect(shortenPath("/var/www/app")).toBe("/var/www/app");
   });
 
-  it("shortens Windows home paths while keeping their separators", () => {
-    expect(shortenPath("C:\\Users\\moboudra\\dev\\paseo")).toBe("~\\dev\\paseo");
+  it("shortens Windows home paths and uses forward slashes", () => {
+    expect(shortenPath("C:\\Users\\moboudra\\dev\\paseo")).toBe("~/dev/paseo");
     expect(shortenPath("D:/Users/moboudra/dev/paseo")).toBe("~/dev/paseo");
     expect(shortenPath("c:\\users\\moboudra")).toBe("~");
+  });
+
+  it("uses Desktop as the Windows desktop prefix without changing other home folders", () => {
+    expect(shortenPath("C:\\Users\\moboudra\\Desktop\\projects\\paseo")).toBe(
+      "Desktop/projects/paseo",
+    );
+    expect(shortenPath("D:/Users/moboudra/Desktop")).toBe("Desktop");
+    expect(shortenPath("c:/users/moboudra/desktop/projects")).toBe("Desktop/projects");
+    expect(shortenPath("C:/Users/moboudra/DesktopBackup/repo")).toBe("~/DesktopBackup/repo");
+    expect(shortenPath("/home/ubuntu/Desktop/repo")).toBe("~/Desktop/repo");
   });
 
   it("shortens exact homes and the Linux root home without matching adjacent paths", () => {
@@ -27,9 +37,9 @@ describe("shortenPath", () => {
   });
 
   it("preserves shared Windows folders and non-home locations", () => {
-    expect(shortenPath("C:\\Users\\Public\\Projects")).toBe("C:\\Users\\Public\\Projects");
+    expect(shortenPath("C:\\Users\\Public\\Projects")).toBe("C:/Users/Public/Projects");
     expect(shortenPath("C:/Users/Default/Desktop")).toBe("C:/Users/Default/Desktop");
-    expect(shortenPath("C:\\work\\repo")).toBe("C:\\work\\repo");
+    expect(shortenPath("C:\\work\\repo")).toBe("C:/work/repo");
   });
 
   it("returns an empty string for null or undefined", () => {
