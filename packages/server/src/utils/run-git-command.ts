@@ -27,9 +27,19 @@ const DEFAULT_STDERR_LIMIT = 2048;
 let gitProcessScheduler = new GitProcessScheduler(resolveGitProcessPolicy({ env: process.env }));
 let gitRuntimeMetrics = createGitCommandRuntimeMetricsWindow(gitProcessScheduler.policy);
 const gitCommandPriority = new AsyncLocalStorage<GitProcessPriority>();
+const gitCommandProvenance = new AsyncLocalStorage<string>();
 
 export function runWithGitCommandPriority<T>(priority: GitProcessPriority, operation: () => T): T {
   return gitCommandPriority.run(priority, operation);
+}
+
+/**
+ * Names the caller in runtime metrics for Git commands that were not given a provenance of their
+ * own. Wrap one read, not a subscription: timers and watchers created inside keep the label for
+ * as long as they live and would misattribute everything they run later.
+ */
+export function runWithGitCommandProvenance<T>(provenance: string, operation: () => T): T {
+  return gitCommandProvenance.run(provenance, operation);
 }
 
 function createGitCommandRuntimeMetricsWindow(policy: GitProcessPolicy) {
@@ -286,7 +296,10 @@ function executeGitCommand<Output>(
     active: gitProcessScheduler.activeCount,
     pending: gitProcessScheduler.pendingCount,
   });
-  const runtimeMetric = gitRuntimeMetrics.submit(getGitOperation(args), provenance);
+  const runtimeMetric = gitRuntimeMetrics.submit(
+    getGitOperation(args),
+    provenance ?? gitCommandProvenance.getStore(),
+  );
   const startCommand = () => {
     let releaseProcessSlot!: () => void;
     const exited = new Promise<void>((resolve) => {

@@ -7,7 +7,7 @@ import type {
   PersistedProjectRecord,
   PersistedWorkspaceRecord,
 } from "./workspace-registry.js";
-import type { WorkspaceGitService } from "./workspace-git-service.js";
+import type { WorkspaceGitCheckoutOptions, WorkspaceGitService } from "./workspace-git-service.js";
 import { areEquivalentPaths } from "../utils/path.js";
 import {
   deriveProjectKind,
@@ -112,6 +112,10 @@ interface CachedCheckoutRead {
 
 type DirectoryState = "directory" | "missing" | "unreadable";
 
+// "watch" answers a change at a project root and "boot" converges a fresh daemon, so both read
+// Git. "rescan" is the timer: it may take what a live repository watcher already knows.
+type ReconciliationTrigger = "watch" | "rescan" | "boot";
+
 export class WorkspaceReconciliationService {
   private readonly serverId: string | undefined;
   private readonly projectRegistry: ProjectRegistry;
@@ -172,7 +176,7 @@ export class WorkspaceReconciliationService {
       }) ?? null;
     await this.syncProjectRootWatches();
     this.rescanTimer = this.clock.setInterval(
-      () => this.reconcileObservedGitMetadata("full"),
+      () => this.reconcileObservedGitMetadata("full", "rescan"),
       this.rescanIntervalMs,
     );
     this.rescanTimer.unref?.();
@@ -189,7 +193,9 @@ export class WorkspaceReconciliationService {
   }
 
   /** Reconciles mutable Git facts only; never archives missing records. */
-  async reconcileGitMetadata(): Promise<ReconciliationResult> {
+  async reconcileGitMetadata(
+    checkoutRead?: WorkspaceGitCheckoutOptions,
+  ): Promise<ReconciliationResult> {
     const start = Date.now();
     const changes: ReconciliationChange[] = [];
     const [projects, workspaces] = await Promise.all([
@@ -209,12 +215,13 @@ export class WorkspaceReconciliationService {
       ),
       workspacesByProject,
       changes,
+      checkoutRead,
     );
     if (changes.length > 0) this.onChanges?.(changes);
     return { changesApplied: changes, durationMs: Date.now() - start };
   }
 
-  async runOnce(): Promise<ReconciliationResult> {
+  async runOnce(checkoutRead?: WorkspaceGitCheckoutOptions): Promise<ReconciliationResult> {
     const start = Date.now();
     const changes: ReconciliationChange[] = [];
 
@@ -283,6 +290,7 @@ export class WorkspaceReconciliationService {
       activeProjects.filter((project) => reachableProjectIds.has(project.projectId)),
       workspacesByProject,
       changes,
+      checkoutRead,
     );
 
     if (changes.length > 0 && this.onChanges) {
@@ -301,19 +309,20 @@ export class WorkspaceReconciliationService {
 
   /** Runs the boot-time convergence path and publishes every affected workspace. */
   async reconcileNow(): Promise<void> {
-    await this.reconcileObservedGitMetadata("full");
+    await this.reconcileObservedGitMetadata("full", "boot");
   }
 
   private async reconcileGitMetadataForProjects(
     projectsToReconcile: PersistedProjectRecord[],
     workspacesByProject: Map<string, PersistedWorkspaceRecord[]>,
     changes: ReconciliationChange[],
+    checkoutRead?: WorkspaceGitCheckoutOptions,
   ): Promise<void> {
     const checkoutReads: CachedCheckoutRead[] = [];
     const readCheckout = (cwd: string): Promise<ProjectCheckoutLitePayload> => {
       const existing = checkoutReads.find((read) => areEquivalentPaths(read.cwd, cwd));
       if (existing) return existing.checkout;
-      const checkout = this.readCheckout(cwd);
+      const checkout = this.readCheckout(cwd, checkoutRead);
       checkoutReads.push({ cwd, checkout });
       return checkout;
     };
@@ -479,6 +488,7 @@ export class WorkspaceReconciliationService {
 
   private async reconcileObservedGitMetadata(
     mode: "metadata" | "full" = "metadata",
+    trigger: ReconciliationTrigger = "watch",
   ): Promise<void> {
     if (this.disposed) return;
     if (this.reconciling) {
@@ -490,7 +500,14 @@ export class WorkspaceReconciliationService {
     this.reconciling = true;
     try {
       await this.syncProjectRootWatches();
-      const result = mode === "full" ? await this.runOnce() : await this.reconcileGitMetadata();
+      const checkoutRead: WorkspaceGitCheckoutOptions = {
+        allowObserved: trigger === "rescan",
+        reason: `reconcile-${trigger}`,
+      };
+      const result =
+        mode === "full"
+          ? await this.runOnce(checkoutRead)
+          : await this.reconcileGitMetadata(checkoutRead);
       const workspaceIds = new Set<string>();
       const projectIds = new Set<string>();
       for (const change of result.changesApplied) {
@@ -522,7 +539,10 @@ export class WorkspaceReconciliationService {
     }
   }
 
-  private async readCheckout(cwd: string): Promise<ProjectCheckoutLitePayload> {
+  private async readCheckout(
+    cwd: string,
+    checkoutRead?: WorkspaceGitCheckoutOptions,
+  ): Promise<ProjectCheckoutLitePayload> {
     if (!this.workspaceGitService) {
       return {
         cwd,
@@ -534,7 +554,7 @@ export class WorkspaceReconciliationService {
         mainRepoRoot: null,
       };
     }
-    return this.workspaceGitService.getCheckout(cwd);
+    return this.workspaceGitService.getCheckout(cwd, checkoutRead);
   }
 
   private inspectDirectory(targetPath: string): DirectoryState {

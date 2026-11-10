@@ -423,6 +423,29 @@ describe("runGitCommand", () => {
     });
   });
 
+  it("names the caller of an unlabelled Git command and keeps a runner's own label", async () => {
+    const {
+      createRunGitCommand,
+      runGitCommand,
+      runWithGitCommandProvenance,
+      snapshotGitCommandRuntimeMetrics,
+    } = await loadRunGitCommand(1);
+    enqueueSpawnBehaviors({ stdoutData: "ok" }, { stdoutData: "ok" }, { stdoutData: "ok" });
+
+    const runRefreshGitCommand = createRunGitCommand("workspace-refresh:watch");
+    await runWithGitCommandProvenance("workspace-checkout:reconcile-rescan", async () => {
+      await runGitCommand(["rev-parse", "HEAD"], { cwd: process.cwd() });
+      await runRefreshGitCommand(["status"], { cwd: process.cwd() });
+    });
+    await runGitCommand(["status"], { cwd: process.cwd() });
+
+    expect(snapshotGitCommandRuntimeMetrics().provenanceTop).toEqual([
+      ["unattributed", 1],
+      ["workspace-checkout:reconcile-rescan", 1],
+      ["workspace-refresh:watch", 1],
+    ]);
+  });
+
   it("resolves truncated stdout, caps output, and kills the child process", async () => {
     const { runGitCommand } = await loadRunGitCommand(1);
 

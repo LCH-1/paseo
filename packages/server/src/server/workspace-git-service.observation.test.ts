@@ -861,6 +861,250 @@ describe("WorkspaceGitService checkout observation", () => {
     service.dispose();
   });
 
+  test("a remote namespace directory update trailing a fetch refreshes nothing", async () => {
+    const watcher = createWatcherHarness();
+    const getCheckoutSnapshotFacts = vi.fn(async (cwd: string) => ({
+      ...createCheckoutFacts(cwd),
+      remoteUrl: REMOTE_URL,
+    }));
+    const getCheckoutStatus = vi.fn(async (cwd: string) => createCheckoutStatus(cwd));
+    const getCheckoutRefDerivedState = vi.fn();
+    const service = createService(watcher, {
+      getCheckoutSnapshotFacts,
+      getCheckoutStatus,
+      getCheckoutRefDerivedState,
+      hasOriginRemote: vi.fn(async () => true),
+      runGitFetch: vi.fn(async (_cwd, observer) => {
+        observer.onRefSnapshot("before");
+        observer.onRefSnapshot("after");
+        return {
+          changes: [],
+          nonRemoteRefsChanged: false,
+          remoteRefs: new Set(["origin/HEAD", "origin/main"]),
+          error: null,
+        };
+      }),
+    });
+    const listener = vi.fn();
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, listener);
+    await vi.waitFor(() => {
+      expect(service.getMetrics().fetchInFlightCount).toBe(0);
+      expect(service.getMetrics().workspaceRefreshInFlightCount).toBe(0);
+      expect(listener).toHaveBeenCalled();
+    });
+    getCheckoutSnapshotFacts.mockClear();
+    getCheckoutStatus.mockClear();
+    listener.mockClear();
+
+    // What Windows reports after Git takes and drops origin/HEAD.lock: the lock itself, then the
+    // directory that held it.
+    const repoWatcher = watcher.records.find((record) => record.directory === GIT_DIR);
+    repoWatcher?.callback(null, [
+      { path: path.join(GIT_DIR, "refs", "remotes", "origin", "HEAD.lock"), type: "delete" },
+    ]);
+    repoWatcher?.callback(null, [
+      { path: path.join(GIT_DIR, "refs", "remotes", "origin"), type: "update" },
+    ]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushPromises();
+
+    expect(getCheckoutSnapshotFacts).not.toHaveBeenCalled();
+    expect(getCheckoutStatus).not.toHaveBeenCalled();
+    expect(getCheckoutRefDerivedState).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
+
+    // The same directory event still refreshes everything once the ref set is no longer known.
+    repoWatcher?.callback(null, [{ path: path.join(GIT_DIR, "packed-refs"), type: "update" }]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => {
+      expect(getCheckoutSnapshotFacts).toHaveBeenCalledTimes(1);
+      expect(service.getMetrics().workspaceRefreshInFlightCount).toBe(0);
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    repoWatcher?.callback(null, [
+      { path: path.join(GIT_DIR, "refs", "remotes", "origin"), type: "update" },
+    ]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => {
+      expect(getCheckoutSnapshotFacts).toHaveBeenCalledTimes(2);
+    });
+
+    subscription.unsubscribe();
+    service.dispose();
+  });
+
+  test("a fetch that keeps failing backs off, warns once, and resumes every tick on success", async () => {
+    const watcher = createWatcherHarness();
+    const logger = createLogger();
+    const fetchIntervalMs = 180_000;
+    const failureMessage = "Background git fetch completed with errors after changing refs";
+    let failing = true;
+    const runGitFetch = vi.fn(async (_cwd, observer) => {
+      observer.onRefSnapshot("before");
+      observer.onRefSnapshot("after");
+      return {
+        changes: [],
+        nonRemoteRefsChanged: false,
+        remoteRefs: new Set(["origin/main"]),
+        error: failing ? new Error("fatal: could not find remote ref refs/heads/gone") : null,
+      };
+    });
+    const service = createService(
+      watcher,
+      {
+        getCheckoutSnapshotFacts: vi.fn(async (cwd: string) => ({
+          ...createCheckoutFacts(cwd),
+          remoteUrl: REMOTE_URL,
+        })),
+        hasOriginRemote: vi.fn(async () => true),
+        runGitFetch,
+      },
+      logger,
+    );
+    const logged = (level: "warn" | "debug" | "info", message: string) =>
+      vi.mocked(logger[level]).mock.calls.filter((call) => call[1] === message).length;
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await vi.waitFor(() => {
+      expect(runGitFetch).toHaveBeenCalledTimes(1);
+      expect(service.getMetrics().fetchInFlightCount).toBe(0);
+    });
+
+    // One failure is not a streak: the next tick still fetches.
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs);
+    expect(runGitFetch).toHaveBeenCalledTimes(2);
+    // After that the gap doubles (2, 4) and stops at 5 ticks.
+    for (const [gapTicks, attempt] of [
+      [2, 3],
+      [4, 4],
+      [5, 5],
+      [5, 6],
+    ] as const) {
+      await vi.advanceTimersByTimeAsync(fetchIntervalMs * (gapTicks - 1));
+      expect(runGitFetch).toHaveBeenCalledTimes(attempt - 1);
+      await vi.advanceTimersByTimeAsync(fetchIntervalMs);
+      expect(runGitFetch).toHaveBeenCalledTimes(attempt);
+    }
+    expect(logged("warn", failureMessage)).toBe(1);
+    expect(logged("debug", failureMessage)).toBe(5);
+
+    failing = false;
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs * 5);
+    expect(runGitFetch).toHaveBeenCalledTimes(7);
+    expect(logged("info", "Background git fetch recovered")).toBe(1);
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs);
+    expect(runGitFetch).toHaveBeenCalledTimes(8);
+
+    // A later failure is a new fact and is reported again.
+    failing = true;
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs);
+    expect(runGitFetch).toHaveBeenCalledTimes(9);
+    expect(logged("warn", failureMessage)).toBe(2);
+
+    subscription.unsubscribe();
+    service.dispose();
+  });
+
+  test("a repository config change ends a fetch backoff at the next tick", async () => {
+    const watcher = createWatcherHarness();
+    const fetchIntervalMs = 180_000;
+    const runGitFetch = vi.fn(async () => {
+      throw new Error("fatal: origin does not appear to be a git repository");
+    });
+    const service = createService(watcher, {
+      getCheckoutSnapshotFacts: vi.fn(async (cwd: string) => ({
+        ...createCheckoutFacts(cwd),
+        remoteUrl: REMOTE_URL,
+      })),
+      hasOriginRemote: vi.fn(async () => true),
+      runGitFetch,
+    });
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await vi.waitFor(() => {
+      expect(runGitFetch).toHaveBeenCalledTimes(1);
+      expect(service.getMetrics().fetchInFlightCount).toBe(0);
+    });
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs);
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs * 2);
+    expect(runGitFetch).toHaveBeenCalledTimes(3);
+    // Three failures in a row: the next attempt is four ticks away.
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs);
+    expect(runGitFetch).toHaveBeenCalledTimes(3);
+
+    watcher.records
+      .find((record) => record.directory === GIT_DIR)
+      ?.callback(null, [{ path: path.join(GIT_DIR, "config"), type: "update" }]);
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs);
+    expect(runGitFetch).toHaveBeenCalledTimes(4);
+
+    subscription.unsubscribe();
+    service.dispose();
+  });
+
+  test("a periodic checkout read takes the watched snapshot and reads Git when it cannot be trusted", async () => {
+    const watcher = createWatcherHarness();
+    const getCheckoutStatus = vi.fn(async (cwd: string) =>
+      createCheckoutStatus(cwd, { currentBranch: "feature", remoteUrl: REMOTE_URL }),
+    );
+    const service = createService(watcher, { getCheckoutStatus });
+    const periodic = { allowObserved: true, reason: "reconcile-rescan" };
+
+    // Nothing watches this directory yet, so there is no snapshot to take.
+    await service.getCheckout(REPO_CWD, periodic);
+    expect(getCheckoutStatus).toHaveBeenCalledTimes(1);
+
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await vi.waitFor(() => {
+      expect(getWatcherRecordsForDirectory(watcher, GIT_DIR)).toHaveLength(1);
+      expect(service.getMetrics()).toMatchObject({
+        workspaceObservationSetupInFlightCount: 0,
+        workspaceRefreshInFlightCount: 0,
+      });
+      expect(service.peekSnapshot(REPO_CWD)?.git.currentBranch).toBe("feature");
+    });
+    const fresh = await service.getCheckout(REPO_CWD);
+    getCheckoutStatus.mockClear();
+
+    expect(await service.getCheckout(REPO_CWD, periodic)).toEqual(fresh);
+    expect(getCheckoutStatus).not.toHaveBeenCalled();
+    // A caller that did not opt in always reads.
+    await service.getCheckout(REPO_CWD, { reason: "reconcile-watch" });
+    expect(getCheckoutStatus).toHaveBeenCalledTimes(1);
+    getCheckoutStatus.mockClear();
+
+    // A change the watcher has reported but the snapshot has not absorbed yet.
+    const [repoWatcher] = getWatcherRecordsForDirectory(watcher, GIT_DIR);
+    repoWatcher?.callback(null, [{ path: path.join(GIT_DIR, "HEAD"), type: "update" }]);
+    await service.getCheckout(REPO_CWD, periodic);
+    expect(getCheckoutStatus).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => {
+      expect(service.getMetrics().workspaceRefreshInFlightCount).toBe(0);
+    });
+    getCheckoutStatus.mockClear();
+    await service.getCheckout(REPO_CWD, periodic);
+    expect(getCheckoutStatus).not.toHaveBeenCalled();
+
+    // A refresh that failed left the snapshot behind the change that asked for it.
+    getCheckoutStatus.mockRejectedValueOnce(new Error("Unable to create index.lock"));
+    repoWatcher?.callback(null, [{ path: path.join(GIT_DIR, "HEAD"), type: "update" }]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => {
+      expect(getCheckoutStatus).toHaveBeenCalledTimes(1);
+      expect(service.getMetrics().workspaceRefreshInFlightCount).toBe(0);
+    });
+    await service.getCheckout(REPO_CWD, periodic);
+    expect(getCheckoutStatus).toHaveBeenCalledTimes(2);
+    getCheckoutStatus.mockClear();
+
+    // A dead watcher keeps nothing current.
+    repoWatcher?.callback(new Error("watcher stopped"), []);
+    await service.getCheckout(REPO_CWD, periodic);
+    expect(getCheckoutStatus).toHaveBeenCalled();
+
+    subscription.unsubscribe();
+    await service.dispose();
+  });
+
   test("a second remote-ref move during a narrow refresh queues a final calculation", async () => {
     const watcher = createWatcherHarness();
     const firstRefRefresh = createDeferred<CheckoutStatusGit>();

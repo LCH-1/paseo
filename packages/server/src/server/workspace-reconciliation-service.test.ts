@@ -20,6 +20,7 @@ import {
   WorkspaceReconciliationService,
 } from "./workspace-reconciliation-service.js";
 import { deriveProjectKey } from "./project-key.js";
+import type { WorkspaceGitCheckoutOptions } from "./workspace-git-service.js";
 
 function canonicalLocalProjectKey(rootPath: string): string {
   return deriveProjectKey({
@@ -1559,6 +1560,67 @@ describe("WorkspaceReconciliationService", () => {
     await service.runOnce();
 
     expect(infoRecords).toEqual([]);
+  });
+
+  test("only the timer-driven rescan may take a watched checkout", async () => {
+    const projectRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-triggers-")));
+    tempDirs.push(projectRoot);
+    const { projects, projectRegistry, workspaceRegistry } = createTestRegistries();
+    projects.set(
+      "p1",
+      createPersistedProjectRecord({
+        projectId: "p1",
+        rootPath: projectRoot,
+        kind: "git",
+        displayName: "triggers",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    const reads: Array<WorkspaceGitCheckoutOptions | undefined> = [];
+    const intervals: Array<() => void | Promise<void>> = [];
+    const timeouts: Array<() => void | Promise<void>> = [];
+    const projectRootWatches: Array<(event: string, filename: string | null) => void> = [];
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: {
+        getCheckout: async (cwd, options) => {
+          reads.push(options);
+          return createCheckout(cwd, { isGit: true, currentBranch: "main", worktreeRoot: cwd });
+        },
+      },
+      clock: {
+        setTimeout: (callback) => {
+          timeouts.push(callback);
+          return {};
+        },
+        clearTimeout: () => undefined,
+        setInterval: (callback) => {
+          intervals.push(callback);
+          return {};
+        },
+        clearInterval: () => undefined,
+      },
+      watchProjectRoot: (_rootPath, _options, onChange) => {
+        projectRootWatches.push(onChange);
+        return { close: () => undefined };
+      },
+    });
+
+    await service.start();
+    await service.reconcileNow();
+    await intervals.at(0)?.();
+    projectRootWatches.at(0)?.("rename", ".git");
+    await timeouts.at(0)?.();
+    service.dispose();
+
+    expect(reads).toEqual([
+      { allowObserved: false, reason: "reconcile-boot" },
+      { allowObserved: true, reason: "reconcile-rescan" },
+      { allowObserved: false, reason: "reconcile-watch" },
+    ]);
   });
 
   test("backfills persisted worktree ownership from the current checkout", async () => {
