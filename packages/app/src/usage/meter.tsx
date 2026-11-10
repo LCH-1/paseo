@@ -67,7 +67,7 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface4,
   },
   used: { backgroundColor: theme.colors.surface3 },
-  remaining: { backgroundColor: "#a7dcb5" },
+  remaining: { backgroundColor: "#ccebd4" },
   fillDefault: {
     backgroundColor: theme.colors.foregroundMuted,
   },

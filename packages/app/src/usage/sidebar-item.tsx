@@ -196,5 +196,5 @@ const styles = StyleSheet.create((theme) => ({
   legend: { flexDirection: "row", alignItems: "center", gap: theme.spacing[1.5] },
   swatch: { width: 8, height: 8, borderRadius: 2 },
   used: { backgroundColor: theme.colors.surface3 },
-  remaining: { backgroundColor: "#a7dcb5" },
+  remaining: { backgroundColor: "#ccebd4" },
 }));
