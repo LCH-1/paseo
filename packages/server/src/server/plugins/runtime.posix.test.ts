@@ -7,8 +7,11 @@ import { fileURLToPath } from "node:url";
 import pino from "pino";
 import type { ProviderEvent, ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { PluginBeforeRequests } from "@getpaseo/plugin/server";
 import type { AgentStreamEvent } from "../agent/agent-sdk-types.js";
 import { PluginAgentClientRegistry } from "../agent/plugin-provider.js";
+import { PluginHookRefusalError } from "./hook-refusal.js";
+import type { PluginProcessMessage, PluginProcessRequest } from "./plugin-process-protocol.js";
 import { PluginRuntime } from "./runtime.js";
 import type { PluginSessionSocket } from "./session-socket.js";
 
@@ -105,6 +108,44 @@ function createReloadChild(
     },
   };
 }
+
+type HookRequest = Extract<PluginProcessRequest, { type: "hook" }>;
+
+function createBeforeHookChild(name: string, answer: (hook: HookRequest) => PluginProcessMessage) {
+  const child = createReloadChild(name, []);
+  const sendLifecycle = child.send.bind(child);
+  child.send = (message: PluginProcessRequest, callback?: (error: Error | null) => void) => {
+    if (message.type !== "hook") return sendLifecycle(message, callback);
+    callback?.(null);
+    queueMicrotask(() => child.emitMessage(answer(message)));
+    return true;
+  };
+  return child;
+}
+
+async function startBeforeHookPlugin(child: ReturnType<typeof createReloadChild>) {
+  const directory = await createPlugin(
+    "gate",
+    `export default function contribute(plugin: unknown) { void plugin; return () => undefined; }`,
+  );
+  const runtime = createTestRuntime({ spawnChild: () => child });
+  await runtime.startPlugin("gate", directory);
+  child.emitMessage({
+    type: "hooks.changed",
+    hooks: { events: [], before: ["agent.session_open"] },
+  });
+  return runtime;
+}
+
+const sessionOpenRequest = {
+  agentId: "agent-1",
+  workspaceId: null,
+  provider: "claude",
+  cwd: "/tmp/project",
+  reason: "resume",
+  purpose: "history",
+  env: {},
+} satisfies PluginBeforeRequests["agent.session_open"];
 
 function createTestRuntime(
   dependencies: NonNullable<ConstructorParameters<typeof PluginRuntime>[2]> = {},
@@ -844,6 +885,51 @@ export default function contribute(server: any) { server.registerProvider(provid
       { stream: "stdout", message: "[paseo] Stopping plugin" },
       { stream: "stdout", message: "[paseo] Plugin stopped" },
     ]);
+  });
+
+  it("reports a before hook that answered with an error as the plugin turning the request down", async () => {
+    const reason = "Aster: 모든 Claude 계정의 사용 한도가 소진되었습니다.";
+    const runtime = await startBeforeHookPlugin(
+      createBeforeHookChild("gate", (hook) => ({
+        type: "error",
+        requestId: hook.requestId,
+        error: reason,
+      })),
+    );
+
+    const failure = await runtime
+      .before("agent.session_open", sessionOpenRequest)
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(PluginHookRefusalError);
+    expect(failure).toMatchObject({
+      pluginId: "gate",
+      hook: "agent.session_open",
+      reason,
+      message: `Plugin gate before agent.session_open failed: ${reason}`,
+    });
+    await runtime.stopAll();
+  });
+
+  it("keeps a before hook whose answer breaks the hook contract as a fault", async () => {
+    const runtime = await startBeforeHookPlugin(
+      createBeforeHookChild("gate", (hook) => ({
+        type: "result",
+        requestId: hook.requestId,
+        output: { ...sessionOpenRequest, cwd: "/tmp/elsewhere" },
+      })),
+    );
+
+    const failure = await runtime
+      .before("agent.session_open", sessionOpenRequest)
+      .catch((error: unknown) => error);
+
+    expect(failure).not.toBeInstanceOf(PluginHookRefusalError);
+    expect(failure).toMatchObject({
+      message:
+        "Plugin gate before agent.session_open failed: agent.session_open hooks can only change env",
+    });
+    await runtime.stopAll();
   });
 
   it("frames stdout and stderr, normalizes CRLF, and flushes final fragments once", async () => {

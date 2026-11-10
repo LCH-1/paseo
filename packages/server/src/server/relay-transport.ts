@@ -68,6 +68,11 @@ function createDefaultRelayWebSocket(url: string): RelayWebSocketLike {
   return new WebSocket(url, RELAY_WEBSOCKET_OPTIONS);
 }
 
+// 1000 and 1001 are a client leaving on purpose, such as an app closing a probe connection.
+function isClientInitiatedClose(code: unknown): boolean {
+  return code === 1000 || code === 1001;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -377,7 +382,8 @@ export function startRelayTransport({
 
     socket.on("open", () => {
       clearTimeout(openTimeout);
-      relayLogger.info({ connectionId }, "relay_data_connected");
+      // The WebSocket server reports the attached client with this relayConnectionId.
+      relayLogger.debug({ connectionId }, "relay_data_connected");
       if (attached) return;
       attached = true;
       const externalMetadata: ExternalSocketMetadata = {
@@ -400,10 +406,12 @@ export function startRelayTransport({
 
     socket.on("close", (code, reason) => {
       clearTimeout(openTimeout);
-      relayLogger.warn(
-        { code, reason: reason?.toString?.(), url, connectionId },
-        "relay_data_disconnected",
-      );
+      const closeFields = { code, reason: reason?.toString?.(), url, connectionId };
+      if (isClientInitiatedClose(code)) {
+        relayLogger.debug(closeFields, "relay_data_disconnected");
+      } else {
+        relayLogger.warn(closeFields, "relay_data_disconnected");
+      }
       if (dataSockets.get(connectionId) === socket) {
         dataSockets.delete(connectionId);
       }

@@ -200,6 +200,46 @@ describe("relay-transport control lifecycle", () => {
     expect(hasLogMessage(logger, "info", "relay_control_connected")).toBe(true);
   });
 
+  test("warns about a data socket only when it did not close on the client's initiative", () => {
+    const logger = createMockLogger();
+    const controller = startRelayTransport({
+      logger: logger as unknown as pino.Logger,
+      attachSocket: async () => {},
+      relayEndpoint: "relay.paseo.sh:443",
+      relayUseTls: true,
+      serverId: "srv_test",
+      createWebSocket: relay.createWebSocket,
+    });
+    controllers.push(controller);
+    const control = relay.sockets[0];
+    control.open();
+    control.message(JSON.stringify({ type: "sync", connectionIds: ["clt_probe", "clt_dropped"] }));
+    const [, probe, dropped] = relay.sockets;
+
+    probe.open();
+    probe.close(1001, "Client disconnected");
+    dropped.open();
+    dropped.close(1006, "");
+
+    const dataSocketLogs = logger.messages
+      .filter((entry) => String(entry.args[1]).startsWith("relay_data_"))
+      .map((entry) => ({ level: entry.level, message: entry.args[1], fields: entry.args[0] }));
+    expect(dataSocketLogs).toEqual([
+      { level: "debug", message: "relay_data_connected", fields: { connectionId: "clt_probe" } },
+      {
+        level: "debug",
+        message: "relay_data_disconnected",
+        fields: expect.objectContaining({ code: 1001, connectionId: "clt_probe" }),
+      },
+      { level: "debug", message: "relay_data_connected", fields: { connectionId: "clt_dropped" } },
+      {
+        level: "warn",
+        message: "relay_data_disconnected",
+        fields: expect.objectContaining({ code: 1006, connectionId: "clt_dropped" }),
+      },
+    ]);
+  });
+
   test("terminates and reconnects when control socket opens but never becomes ready", () => {
     vi.useFakeTimers();
     const logger = createMockLogger();

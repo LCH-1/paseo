@@ -172,6 +172,39 @@ describe("createRootLogger", () => {
     });
   });
 
+  it("writes a key once when nested child loggers bind it again", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-logger-rebind-"));
+
+    const { stdout } = await runLoggerFixture(`
+      const logger = createRootLogger(undefined, { paseoHome: ${JSON.stringify(paseoHome)} });
+      const bootstrap = logger.child({ module: "bootstrap", scope: "daemon" });
+      bootstrap
+        .child({ module: "websocket-server" })
+        .child({ module: "session", clientId: "cid_1" })
+        .info({ requestType: "ping" }, "session line");
+      bootstrap.info("bootstrap line");
+      logger.flush();
+    `);
+
+    const [sessionLine, bootstrapLine] = stdout.trim().split("\n");
+    expect(sessionLine.match(/"module":/g)).toEqual(['"module":']);
+    expect(JSON.parse(sessionLine)).toMatchObject({
+      pid: expect.any(Number),
+      hostname: expect.any(String),
+      daemonVersion: resolveDaemonVersion(),
+      scope: "daemon",
+      module: "session",
+      clientId: "cid_1",
+      requestType: "ping",
+      msg: "session line",
+    });
+    expect(JSON.parse(bootstrapLine)).toMatchObject({
+      module: "bootstrap",
+      scope: "daemon",
+      msg: "bootstrap line",
+    });
+  });
+
   it("writes JSON to stdout by default and does not initialize file logging", async () => {
     const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-logger-default-"));
     const missingLogDir = path.join(paseoHome, "logs");

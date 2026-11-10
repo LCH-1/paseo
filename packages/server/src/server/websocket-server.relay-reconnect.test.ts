@@ -1,7 +1,7 @@
 import { SessionDelivery } from "./session/owned-subscriptions/index.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Server as HTTPServer } from "http";
-import type pino from "pino";
+import pino from "pino";
 import type { AgentManager } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
 import type { DownloadTokenStore } from "./file-download/token-store.js";
@@ -231,6 +231,32 @@ function createLogger() {
   return logger;
 }
 
+interface CapturedLogLine {
+  level: number;
+  msg: string;
+  [field: string]: unknown;
+}
+
+// Socket identity lives in child-logger bindings, so assertions on it need pino's real output.
+function createCapturingLog(): { log: pino.Logger; lines: CapturedLogLine[]; raw: string[] } {
+  const lines: CapturedLogLine[] = [];
+  const raw: string[] = [];
+  const log = pino(
+    { level: "debug" },
+    {
+      write(line: string) {
+        raw.push(line);
+        lines.push(JSON.parse(line));
+      },
+    },
+  );
+  return { log, lines, raw };
+}
+
+function linesWithMessage(lines: CapturedLogLine[], msg: string): CapturedLogLine[] {
+  return lines.filter((line) => line.msg === msg);
+}
+
 function createWorkspaceAutoNameStub(): WorkspaceAutoName {
   return createStub<WorkspaceAutoName>({
     scheduleForWorktree: () => {},
@@ -241,6 +267,7 @@ function createWorkspaceAutoNameStub(): WorkspaceAutoName {
 function createServer(options?: {
   speechReadiness?: SpeechReadinessSnapshot | null;
   logger?: ReturnType<typeof createLogger>;
+  log?: pino.Logger;
   startPaused?: boolean;
   auth?: { password: string; localCredential: () => string | null };
 }) {
@@ -252,7 +279,7 @@ function createServer(options?: {
   const logger = options?.logger ?? createLogger();
   return new VoiceAssistantWebSocketServer(
     createStub<HTTPServer>({}),
-    createStub<pino.Logger>(logger),
+    options?.log ?? createStub<pino.Logger>(logger),
     "srv_test",
     createStub<AgentManager>({
       subscribe: vi.fn(() => () => {}),
@@ -453,6 +480,37 @@ async function attachDirectAndHello(params: {
   expect(envelope.message?.type).toBe("status");
   expect(serverInfo).not.toBeNull();
   return serverInfo!;
+}
+
+function providerDiagnosticRequest() {
+  return {
+    type: "provider_diagnostic_request" as const,
+    provider: "grok",
+    requestId: "provider-diagnostic",
+  };
+}
+
+function pluginRpcRequest(params: { pluginId: string; method: string }) {
+  return {
+    type: "plugin.rpc.invoke.request" as const,
+    requestId: `${params.pluginId}-${params.method}`,
+    pluginId: params.pluginId,
+    method: params.method,
+    input: null,
+  };
+}
+
+// Requests are timed with performance.now(), which the fake timers drive.
+async function sendSlowRequest(params: {
+  socket: MockSocket;
+  request: ReturnType<typeof pluginRpcRequest>;
+  durationMs: number;
+}): Promise<void> {
+  const held = holdNextSessionMessage(sessionMock.instances[0]);
+  params.socket.emit("message", JSON.stringify({ type: "session", message: params.request }));
+  await vi.advanceTimersByTimeAsync(params.durationMs);
+  held.finish();
+  await vi.advanceTimersByTimeAsync(0);
 }
 
 function holdNextSessionMessage(session: (typeof sessionMock.instances)[number]): {
@@ -866,8 +924,8 @@ describe("relay external socket reconnect behavior", () => {
   });
 
   test("logs control RPCs with the socket identity", async () => {
-    const logger = createLogger();
-    const server = createServer({ logger });
+    const { log, lines } = createCapturingLog();
+    const server = createServer({ log });
     const socket = new MockSocket();
 
     await server.attachExternalSocket(socket, {
@@ -888,8 +946,9 @@ describe("relay external socket reconnect behavior", () => {
     );
     await Promise.resolve();
 
-    expect(logger.warn).toHaveBeenCalledWith(
+    expect(linesWithMessage(lines, "ws_control_rpc_received")).toEqual([
       expect.objectContaining({
+        level: 40,
         connectionId: expect.stringMatching(/^conn_/),
         transport: "relay",
         relayConnectionId: "relay-conn-1",
@@ -899,8 +958,262 @@ describe("relay external socket reconnect behavior", () => {
         requestId: "shutdown-1",
         reason: "client_shutdown_rpc",
       }),
-      "ws_control_rpc_received",
+    ]);
+
+    await server.close();
+  });
+
+  test("logs a slow plugin RPC with its plugin, method and the socket that sent it", async () => {
+    const { log, lines, raw } = createCapturingLog();
+    const server = createServer({ log });
+    const clientId = "cid-slow-plugin-rpc";
+    const relaySocket = new MockSocket();
+    await attachRelayAndHello({ server, socket: relaySocket, clientId });
+    const directSocket = new MockSocket();
+    await attachDirectAndHello({ server, socket: directSocket, clientId });
+
+    await sendSlowRequest({
+      socket: directSocket,
+      request: pluginRpcRequest({ pluginId: "aster", method: "usage.snapshot" }),
+      durationMs: 1_350,
+    });
+
+    expect(linesWithMessage(lines, "ws_slow_request")).toEqual([
+      expect.objectContaining({
+        level: 40,
+        requestType: "plugin.rpc.invoke.request",
+        pluginId: "aster",
+        method: "usage.snapshot",
+        durationMs: 1_350,
+        transport: "direct",
+        peer: "loopback",
+        clientId,
+        sessionId: "mock-session-id",
+      }),
+    ]);
+    const slowRequestLine = raw.find((line) => line.includes('"ws_slow_request"')) ?? "";
+    expect(slowRequestLine.match(/"(connectionId|transport|clientId)":/g)).toEqual([
+      '"connectionId":',
+      '"transport":',
+      '"clientId":',
+    ]);
+
+    await server.close();
+  });
+
+  test("folds repeats of a slow request kind into one summary per minute", async () => {
+    const { log, lines } = createCapturingLog();
+    const server = createServer({ log });
+    const clientId = "cid-slow-repeat";
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId });
+    const usagePoll = pluginRpcRequest({ pluginId: "aster", method: "usage.snapshot" });
+
+    for (const durationMs of [1_300, 2_700, 6_700]) {
+      await sendSlowRequest({ socket, request: usagePoll, durationMs });
+    }
+    await sendSlowRequest({
+      socket,
+      request: pluginRpcRequest({ pluginId: "settings-sync", method: "relay.pull" }),
+      durationMs: 900,
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(linesWithMessage(lines, "ws_slow_request")).toEqual([
+      expect.objectContaining({ pluginId: "aster", method: "usage.snapshot", durationMs: 1_300 }),
+      expect.objectContaining({ pluginId: "settings-sync", method: "relay.pull", durationMs: 900 }),
+    ]);
+    expect(linesWithMessage(lines, "ws_slow_request_summary")).toEqual([
+      expect.objectContaining({
+        level: 30,
+        requestType: "plugin.rpc.invoke.request",
+        pluginId: "aster",
+        method: "usage.snapshot",
+        clientId,
+        count: 3,
+        p50Ms: 2_700,
+        maxMs: 6_700,
+        windowMs: 60_000,
+      }),
+    ]);
+
+    await sendSlowRequest({ socket, request: usagePoll, durationMs: 1_400 });
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(linesWithMessage(lines, "ws_slow_request")).toHaveLength(2);
+    expect(linesWithMessage(lines, "ws_slow_request_summary")).toEqual([
+      expect.objectContaining({ method: "usage.snapshot", count: 3 }),
+      expect.objectContaining({ method: "usage.snapshot", count: 1, p50Ms: 1_400, maxMs: 1_400 }),
+    ]);
+
+    await server.close();
+  });
+
+  test("announces a socket that joins a live session with its first request", async () => {
+    const { log, lines } = createCapturingLog();
+    const server = createServer({ log });
+    const clientId = "cid-joining-socket";
+    const firstSocket = new MockSocket();
+    await attachDirectAndHello({ server, socket: firstSocket, clientId });
+    const joiningSocket = new MockSocket();
+    await attachRelayAndHello({ server, socket: joiningSocket, clientId });
+
+    expect(linesWithMessage(lines, "Client connected via hello")).toEqual([
+      expect.objectContaining({ level: 30, transport: "direct", resumed: false }),
+    ]);
+
+    joiningSocket.emit(
+      "message",
+      JSON.stringify({ type: "session", message: providerDiagnosticRequest() }),
     );
+    await Promise.resolve();
+
+    expect(linesWithMessage(lines, "Client connected via hello")).toEqual([
+      expect.objectContaining({ transport: "direct", resumed: false }),
+      expect.objectContaining({ level: 30, transport: "relay", resumed: true, clientId }),
+    ]);
+
+    await server.close();
+  });
+
+  test("reports sockets that close without a request once, then as a summary", async () => {
+    const { log, lines } = createCapturingLog();
+    const server = createServer({ log });
+    const clientId = "cid-connection-probe";
+    const liveSocket = new MockSocket();
+    await attachDirectAndHello({ server, socket: liveSocket, clientId });
+
+    for (const lifetimeMs of [330, 340, 350]) {
+      const probe = new MockSocket();
+      await server.attachExternalSocket(probe, { transport: "relay" });
+      probe.emit("message", JSON.stringify(createHelloMessage(clientId)));
+      await vi.advanceTimersByTimeAsync(lifetimeMs);
+      probe.emit("close", 1001, "Client disconnected");
+    }
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    const disconnects = linesWithMessage(
+      lines,
+      "Client socket disconnected; session remains attached",
+    );
+    expect(disconnects).toEqual([
+      expect.objectContaining({
+        level: 30,
+        transport: "relay",
+        peer: "external",
+        clientId,
+        code: 1001,
+        lifetimeMs: 330,
+        sessionRequests: 0,
+        remainingSockets: 1,
+      }),
+      expect.objectContaining({ level: 20, lifetimeMs: 340 }),
+      expect.objectContaining({ level: 20, lifetimeMs: 350 }),
+    ]);
+    expect(linesWithMessage(lines, "Client connected via hello")).toHaveLength(1);
+    expect(linesWithMessage(lines, "ws_unused_socket_summary")).toEqual([
+      expect.objectContaining({
+        level: 30,
+        clientId,
+        transport: "relay",
+        peer: "external",
+        count: 3,
+        p50LifetimeMs: 340,
+        maxLifetimeMs: 350,
+        windowMs: 60_000,
+      }),
+    ]);
+
+    await server.close();
+  });
+
+  test("keeps the disconnect line of a socket that carried requests", async () => {
+    const { log, lines } = createCapturingLog();
+    const server = createServer({ log });
+    const clientId = "cid-used-socket";
+    const liveSocket = new MockSocket();
+    await attachDirectAndHello({ server, socket: liveSocket, clientId });
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const socket = new MockSocket();
+      await server.attachExternalSocket(socket, { transport: "relay" });
+      socket.emit("message", JSON.stringify(createHelloMessage(clientId)));
+      await vi.advanceTimersByTimeAsync(100);
+      socket.emit(
+        "message",
+        JSON.stringify({ type: "session", message: providerDiagnosticRequest() }),
+      );
+      await vi.advanceTimersByTimeAsync(200);
+      socket.emit("close", 1001, "Client disconnected");
+    }
+
+    expect(linesWithMessage(lines, "Client socket disconnected; session remains attached")).toEqual(
+      [
+        expect.objectContaining({ level: 30, sessionRequests: 1, lifetimeMs: 300 }),
+        expect.objectContaining({ level: 30, sessionRequests: 1, lifetimeMs: 300 }),
+      ],
+    );
+
+    await server.close();
+  });
+
+  test("gives a session logger no socket identity", async () => {
+    const { log } = createCapturingLog();
+    const server = createServer({ log });
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId: "cid-session-logger" });
+
+    const sessionLogger = sessionMock.instances[0].args.logger as pino.Logger;
+    expect(sessionLogger.bindings()).toEqual({ module: "websocket-server" });
+
+    await server.close();
+  });
+
+  test("merges runtime metrics windows while nothing is streaming", async () => {
+    const { log, lines } = createCapturingLog();
+    const server = createServer({ log });
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId: "cid-runtime-metrics" });
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(linesWithMessage(lines, "ws_runtime_metrics")).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(9 * 30_000);
+    expect(linesWithMessage(lines, "ws_runtime_metrics")).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(linesWithMessage(lines, "ws_runtime_metrics")).toEqual([
+      expect.objectContaining({ windowMs: 30_000 }),
+      expect.objectContaining({ windowMs: 300_000 }),
+    ]);
+
+    await server.close();
+  });
+
+  test("keeps 30 second runtime metrics windows while agent output streams", async () => {
+    const { log, lines } = createCapturingLog();
+    const server = createServer({ log });
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId: "cid-runtime-metrics-stream" });
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    sessionMock.instances[0].publish({
+      type: "agent_stream",
+      payload: {
+        agentId: "agent-1",
+        event: { type: "turn_completed", provider: "codex" },
+        timestamp: "2026-11-10T00:00:00.000Z",
+      },
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(linesWithMessage(lines, "ws_runtime_metrics")).toEqual([
+      expect.objectContaining({ windowMs: 30_000 }),
+      expect.objectContaining({
+        windowMs: 30_000,
+        outboundAgentStreamTypesTop: [["turn_completed", 1]],
+      }),
+    ]);
 
     await server.close();
   });

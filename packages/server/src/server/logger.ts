@@ -61,6 +61,36 @@ const REDACT_PATHS = [
   "req.headers.Sec-WebSocket-Protocol",
 ];
 
+function parseSerializedBindings(serialized: string): Record<string, unknown> {
+  return JSON.parse(`{${serialized.slice(1)}}`);
+}
+
+// pino appends a child's bindings to the text it inherited, so a child that re-binds a key (every
+// subsystem binds its own `module`) would write that key twice on each line. Keep the child's.
+function dropShadowedBindings(child: pino.Logger): void {
+  const inherited: unknown = Reflect.get(Object.getPrototypeOf(child), pino.symbols.chindingsSym);
+  const serialized: unknown = Reflect.get(child, pino.symbols.chindingsSym);
+  if (typeof inherited !== "string" || typeof serialized !== "string") {
+    return;
+  }
+  if (!serialized.startsWith(inherited)) {
+    return;
+  }
+
+  const own = serialized.slice(inherited.length);
+  const ownKeys = new Set(Object.keys(parseSerializedBindings(own)));
+  const inheritedEntries = Object.entries(parseSerializedBindings(inherited));
+  const keptEntries = inheritedEntries.filter(([key]) => !ownKeys.has(key));
+  if (keptEntries.length === inheritedEntries.length) {
+    return;
+  }
+
+  const kept = keptEntries.map(
+    ([key, value]) => `,${JSON.stringify(key)}:${JSON.stringify(value)}`,
+  );
+  Reflect.set(child, pino.symbols.chindingsSym, kept.join("") + own);
+}
+
 function resolveFilePath(paseoHome: string, configuredPath: string | undefined): string {
   const fallback = path.join(paseoHome, DEFAULT_DAEMON_LOG_FILENAME);
   if (!configuredPath) {
@@ -185,6 +215,7 @@ export function createRootLogger(
     {
       level: config.file?.level ?? config.console.level,
       redact: { paths: REDACT_PATHS, remove: true },
+      onChild: dropShadowedBindings,
     },
     stream,
   );

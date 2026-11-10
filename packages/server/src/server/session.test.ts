@@ -25,6 +25,7 @@ import {
 import { Session } from "./session.js";
 import { OWNER_PERMISSIONS, type DaemonPermission } from "./authorization/index.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
+import { PluginHookRefusalError } from "./plugins/hook-refusal.js";
 import { StructuredAgentFallbackError } from "./agent/agent-response-loop.js";
 import type { StoredAgentRecord } from "./agent/agent-storage.js";
 import { AgentTurnInProgressError, type AgentManagerEvent } from "./agent/agent-manager.js";
@@ -836,6 +837,7 @@ interface SessionForTestOptions {
   pluginRuntime?: SessionOptions["pluginRuntime"];
   orchestrationSkills?: SessionOptions["orchestrationSkills"];
   workspaceLabelService?: WorkspaceLabelService;
+  logger?: pino.Logger;
 }
 
 function createSessionForTest(options: SessionForTestOptions = {}): Session {
@@ -948,6 +950,84 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
   };
   return new Session(sessionOptions);
 }
+
+interface RequestFailureLogLine {
+  level: number;
+  msg: string;
+  err?: { stack?: string };
+  [field: string]: unknown;
+}
+
+async function listDraftCommandsFailingWith(error: Error): Promise<{
+  failureLines: RequestFailureLogLine[];
+  messages: SessionOutboundMessage[];
+}> {
+  const lines: RequestFailureLogLine[] = [];
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    logger: pino(
+      { level: "info" },
+      {
+        write(line: string) {
+          lines.push(JSON.parse(line));
+        },
+      },
+    ),
+    agentManager: {
+      getAgent: vi.fn(() => null),
+      listDraftCommands: vi.fn().mockRejectedValue(error),
+    },
+  });
+
+  await session.handleMessage({
+    type: "list_commands_request",
+    agentId: "draft-agent",
+    draftConfig: { provider: "claude", cwd: "/tmp/project" },
+    requestId: "list-commands",
+  });
+
+  return {
+    failureLines: lines.filter((line) => line.msg === "Failed to list commands"),
+    messages,
+  };
+}
+
+test("logs a plugin hook refusal as one warning without a stack", async () => {
+  const reason = "Aster: 모든 Claude 계정의 사용 한도가 소진되었습니다.";
+  const refusal = new PluginHookRefusalError("aster", "agent.session_open", reason, {
+    cause: new Error(reason),
+  });
+
+  const { failureLines, messages } = await listDraftCommandsFailingWith(refusal);
+
+  expect(failureLines).toEqual([
+    expect.objectContaining({
+      level: 40,
+      agentId: "draft-agent",
+      pluginId: "aster",
+      hook: "agent.session_open",
+      reason,
+    }),
+  ]);
+  expect(failureLines[0].err).toBeUndefined();
+  expect(messages).toContainEqual({
+    type: "list_commands_response",
+    payload: {
+      agentId: "draft-agent",
+      commands: [],
+      error: `Plugin aster before agent.session_open failed: ${reason}`,
+      requestId: "list-commands",
+    },
+  });
+});
+
+test("keeps an unexpected request failure as an error with its stack", async () => {
+  const { failureLines } = await listDraftCommandsFailingWith(new Error("spawn claude ENOENT"));
+
+  expect(failureLines).toEqual([expect.objectContaining({ level: 50, agentId: "draft-agent" })]);
+  expect(failureLines[0].err?.stack).toContain("spawn claude ENOENT");
+});
 
 test("routes host-scoped agent skills requests through the daemon owner", async () => {
   const messages: SessionOutboundMessage[] = [];

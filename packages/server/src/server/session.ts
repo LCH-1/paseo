@@ -143,6 +143,7 @@ import {
 } from "./agent/timeline-append.js";
 import { assertPluginTimelineDataSize } from "./agent/agent-timeline-content.js";
 import { parsePluginClientId } from "./plugins/plugin-session-identity.js";
+import { PluginHookRefusalError } from "./plugins/hook-refusal.js";
 import { buildAgentForkContextAttachment } from "./agent/activity-curator.js";
 import { buildAgentPrompt } from "./agent/prompt-attachments.js";
 import type { StructuredGenerationDaemonConfig } from "./agent/structured-generation-providers.js";
@@ -693,6 +694,11 @@ interface ClientActivity {
   lastActivityAt: Date;
   appVisible: boolean;
   appVisibilityChangedAt: Date;
+}
+
+interface RequestFailureLogFields {
+  err: unknown;
+  [field: string]: unknown;
 }
 
 export class Session {
@@ -1662,9 +1668,21 @@ export class Session {
     return this.agentManager.hasInFlightRun(agentId);
   }
 
+  // A hook that turns a request down is the plugin doing its job, and the reason already reaches
+  // the user in the response. The daemon-side stack says nothing about it.
+  private logRequestFailure(fields: RequestFailureLogFields, message: string): void {
+    const { err, ...context } = fields;
+    if (err instanceof PluginHookRefusalError) {
+      const { pluginId, hook, reason } = err;
+      this.sessionLogger.warn({ ...context, pluginId, hook, reason }, message);
+      return;
+    }
+    this.sessionLogger.error(fields, message);
+  }
+
   private handleAgentRunError(agentId: string, error: unknown, context: string): void {
     const message = errorToFriendlyMessage(error);
-    this.sessionLogger.error({ err: error, agentId, context }, `${context} for agent ${agentId}`);
+    this.logRequestFailure({ err: error, agentId, context }, `${context} for agent ${agentId}`);
     this.emit({
       type: "activity_log",
       payload: {
@@ -2220,7 +2238,7 @@ export class Session {
         await this.dispatchInboundMessage(msg, source);
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
-        this.sessionLogger.error({ err }, "Error handling message");
+        this.logRequestFailure({ err, requestType: msg.type }, "Error handling message");
 
         const requestId =
           "requestId" in msg && typeof msg.requestId === "string" ? msg.requestId : undefined;
@@ -4331,7 +4349,7 @@ export class Session {
       });
     } catch (error) {
       const wireError = error instanceof SessionRequestError ? error : toWorktreeWireError(error);
-      this.sessionLogger.error({ err: error }, "Failed to create agent");
+      this.logRequestFailure({ err: error }, "Failed to create agent");
       this.emit({
         type: "status",
         payload: {
@@ -4627,7 +4645,7 @@ export class Session {
       }
     } catch (error) {
       const message = getErrorMessage(error);
-      this.sessionLogger.error({ err: error }, "Failed to resume agent");
+      this.logRequestFailure({ err: error }, "Failed to resume agent");
       if (requestId) {
         this.emit({
           type: "rpc_error",
@@ -4796,7 +4814,7 @@ export class Session {
         }
         return;
       }
-      this.sessionLogger.error({ err: error, agentId }, `Failed to refresh agent ${agentId}`);
+      this.logRequestFailure({ err: error, agentId }, `Failed to refresh agent ${agentId}`);
       if (requestId) {
         this.emit({
           type: "rpc_error",
@@ -5200,7 +5218,7 @@ export class Session {
         },
       });
     } catch (error) {
-      this.sessionLogger.error({ err: error, agentId, draftConfig }, "Failed to list commands");
+      this.logRequestFailure({ err: error, agentId, draftConfig }, "Failed to list commands");
       this.emit({
         type: "list_commands_response",
         payload: {
@@ -7956,7 +7974,7 @@ export class Session {
         source,
       );
     } catch (error) {
-      this.sessionLogger.error(
+      this.logRequestFailure(
         { err: error, agentId: msg.agentId },
         "Failed to handle fetch_agent_timeline_request",
       );
@@ -8096,7 +8114,7 @@ export class Session {
         source,
       );
     } catch (error) {
-      this.sessionLogger.error(
+      this.logRequestFailure(
         { err: error, agentId: msg.agentId },
         "Failed to handle agent.timeline.list_prompts.request",
       );

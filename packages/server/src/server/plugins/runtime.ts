@@ -6,6 +6,7 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import type { PluginBeforeRequests, PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { validateBeforeRequest, validateBeforeResult } from "./lifecycle/index.js";
+import { PluginHookRefusalError } from "./hook-refusal.js";
 import { fork } from "node:child_process";
 import { stat } from "node:fs/promises";
 import path from "node:path";
@@ -66,6 +67,9 @@ interface PendingInvocation {
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
+
+/** The plugin answered a request with an error of its own, unlike a request it never answered. */
+class PluginReplyError extends Error {}
 
 interface LoadedPlugin {
   id: string;
@@ -568,6 +572,9 @@ export class PluginRuntime {
         });
         request = validateBeforeResult(name, request, output);
       } catch (error) {
+        if (error instanceof PluginReplyError) {
+          throw new PluginHookRefusalError(loaded.id, name, error.message, { cause: error });
+        }
         throw new Error(`Plugin ${loaded.id} before ${name} failed: ${describeError(error)}`, {
           cause: error,
         });
@@ -869,7 +876,7 @@ export class PluginRuntime {
     loaded.pending.delete(message.requestId);
     clearTimeout(pending.timeout);
     if (message.type === "result") pending.resolve(message.output);
-    else pending.reject(new Error(message.error));
+    else pending.reject(new PluginReplyError(message.error));
   }
 
   private handleProviderMessage(loaded: LoadedPlugin, message: PluginProcessMessage): void {

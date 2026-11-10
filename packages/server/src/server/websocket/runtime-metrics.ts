@@ -135,6 +135,11 @@ export class WebSocketRuntimeMetricsWindow {
     latencies.push(durationMs);
   }
 
+  /** True once agent output or a binary frame went out in the current window. */
+  hasStreamActivity(): boolean {
+    return this.outboundAgentStreamCounts.size > 0 || this.outboundBinaryFrameCounts.size > 0;
+  }
+
   snapshotAndReset(): WebSocketRuntimeMetricsSnapshot {
     const now = this.clock();
     const snapshot: WebSocketRuntimeMetricsSnapshot = {

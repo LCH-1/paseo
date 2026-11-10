@@ -168,6 +168,28 @@ describe("WebSocketRuntimeMetricsWindow", () => {
     expect(snapshot.outboundBinaryFrameTypesTop).toEqual([["binary", 1]]);
   });
 
+  it("reports stream activity only while agent output or binary frames went out", () => {
+    const { metrics } = createMetricsWindow();
+    metrics.recordInboundSessionRequest("usage.list_reports.request");
+    metrics.recordOutboundMessage({ type: "pong" }, 0);
+    expect(metrics.hasStreamActivity()).toBe(false);
+
+    metrics.recordOutboundMessage(
+      agentStreamMessage({
+        agentId: "agent-1",
+        event: { type: "turn_completed", provider: "codex" },
+      }),
+      0,
+    );
+    expect(metrics.hasStreamActivity()).toBe(true);
+
+    metrics.snapshotAndReset();
+    expect(metrics.hasStreamActivity()).toBe(false);
+
+    metrics.recordOutboundBinaryFrame(24);
+    expect(metrics.hasStreamActivity()).toBe(true);
+  });
+
   it("resets the runtime window after producing a snapshot", () => {
     const { metrics, advanceClock } = createMetricsWindow();
     metrics.incrementCounter("helloNew");

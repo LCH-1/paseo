@@ -92,6 +92,7 @@ import {
   type WebSocketRuntimeCounters,
   type WebSocketRuntimeDiagnosticSnapshot,
 } from "./websocket/runtime-metrics.js";
+import { RepeatDigest } from "./websocket/repeat-digest.js";
 import { getProcessMemoryDiagnostics, getProcessUptimeSeconds } from "./process-diagnostics.js";
 import {
   CLIENT_SHUTDOWN_RPC_REASON,
@@ -131,6 +132,7 @@ export interface SessionAdmission {
 
 interface PendingConnection {
   connectionLogger: pino.Logger;
+  logState: SocketLogState;
   helloTimeout: ReturnType<typeof setTimeout> | null;
   identity: WebSocketConnectionIdentity;
   admission: SessionAdmission | null;
@@ -151,6 +153,24 @@ interface WebSocketConnectionIdentity {
   clientId?: string;
   sessionId?: string;
   appVersion?: string;
+}
+
+interface SocketLogState {
+  logger: pino.Logger;
+  connectedAtMs: number;
+  sessionRequests: number;
+  /** A socket that joined a live session is announced with its first request. */
+  attachLogDeferred: boolean;
+}
+
+interface SlowRequestKind extends SessionRequestDescription {
+  clientId: string;
+}
+
+interface UnusedSocketKind {
+  clientId: string;
+  transport: WebSocketConnectionIdentity["transport"];
+  peer: WebSocketConnectionIdentity["peer"];
 }
 
 interface WebSocketServerConfig {
@@ -443,7 +463,6 @@ interface SessionConnectionBase {
   clientId: string;
   appVersion: string | null;
   clientCapabilities: Record<string, unknown> | null;
-  connectionLogger: pino.Logger;
   sockets: Set<WebSocketLike>;
 }
 
@@ -465,7 +484,6 @@ interface SocketSessionOptions {
   appVersion: string | null;
   clientCapabilities: Record<string, unknown> | null;
   permissions: readonly DaemonPermission[];
-  connectionLogger: pino.Logger;
   onMessage: (message: SessionOutboundMessage) => void;
   onMessageToSource?: (source: object, message: SessionOutboundMessage) => void;
   onBinaryMessage?: (frame: Uint8Array) => void;
@@ -491,6 +509,12 @@ const WS_CLOSE_INCOMPATIBLE_PROTOCOL = 4003;
 const WS_CLOSE_SERVER_SHUTDOWN = 1001;
 const WS_PROTOCOL_VERSION = 1;
 const WS_RUNTIME_METRICS_FLUSH_MS = 30_000;
+// A metrics window without agent output or terminal frames looks like the one before it, so up to
+// this many are merged into one line (5 minutes). The merged line still counts the whole span.
+const WS_RUNTIME_METRICS_QUIET_WINDOWS = 10;
+const LOG_DIGEST_FLUSH_MS = 60_000;
+const UNUSED_SOCKET_MAX_LIFETIME_MS = 5_000;
+const SLOW_REQUEST_METHOD_MAX_LENGTH = 120;
 const OWNER_SESSION_ADMISSION: SessionAdmission = {
   principalId: "owner",
   permissions: OWNER_PERMISSIONS,
@@ -582,6 +606,11 @@ export class VoiceAssistantWebSocketServer {
   private readonly runtimeMetrics = new WebSocketRuntimeMetricsWindow();
   private lastRuntimeMetricsSnapshot: WebSocketRuntimeDiagnosticPayload | null = null;
   private runtimeMetricsInterval: ReturnType<typeof setInterval> | null = null;
+  private quietRuntimeMetricsWindows = 0;
+  private logDigestInterval: ReturnType<typeof setInterval> | null = null;
+  private readonly slowRequestDigest = new RepeatDigest<SlowRequestKind>();
+  private readonly unusedSocketDigest = new RepeatDigest<UnusedSocketKind>();
+  private readonly socketLogStates = new WeakMap<WebSocketLike, SocketLogState>();
   private applicationSocketLeaseInterval: ReturnType<typeof setInterval> | null = null;
   private readonly applicationSocketLease = new ApplicationSocketLease<WebSocketLike>();
   private eventLoopDelayMonitor: ReturnType<typeof monitorEventLoopDelay> | null = null;
@@ -854,10 +883,15 @@ export class VoiceAssistantWebSocketServer {
     this.eventLoopDelayMonitor = monitorEventLoopDelay({ resolution: 10 });
     this.eventLoopDelayMonitor.enable();
     const runtimeMetricsInterval = setInterval(() => {
-      this.flushRuntimeMetrics();
+      this.flushDueRuntimeMetrics();
     }, WS_RUNTIME_METRICS_FLUSH_MS);
     this.runtimeMetricsInterval = runtimeMetricsInterval;
     (runtimeMetricsInterval as unknown as { unref?: () => void }).unref?.();
+    const logDigestInterval = setInterval(() => {
+      this.flushLogDigests();
+    }, LOG_DIGEST_FLUSH_MS);
+    this.logDigestInterval = logDigestInterval;
+    (logDigestInterval as unknown as { unref?: () => void }).unref?.();
   }
 
   private startApplicationSocketLeaseInterval(): void {
@@ -1088,7 +1122,12 @@ export class VoiceAssistantWebSocketServer {
       clearInterval(this.applicationSocketLeaseInterval);
       this.applicationSocketLeaseInterval = null;
     }
+    if (this.logDigestInterval) {
+      clearInterval(this.logDigestInterval);
+      this.logDigestInterval = null;
+    }
     this.applicationSocketLease.clear();
+    this.flushLogDigests();
     this.flushRuntimeMetrics({ final: true });
     this.eventLoopDelayMonitor?.disable();
     this.eventLoopDelayMonitor = null;
@@ -1338,9 +1377,17 @@ export class VoiceAssistantWebSocketServer {
     const identity = createWebSocketConnectionIdentity(requestMetadata, metadata);
     this.socketIdentities.set(ws, identity);
     const connectionLogger = this.logger.child(toConnectionLogFields(identity));
+    const logState: SocketLogState = {
+      logger: connectionLogger,
+      connectedAtMs: Date.now(),
+      sessionRequests: 0,
+      attachLogDeferred: false,
+    };
+    this.socketLogStates.set(ws, logState);
 
     const pending: PendingConnection = {
       connectionLogger,
+      logState,
       helloTimeout: null,
       identity,
       admission,
@@ -1353,7 +1400,7 @@ export class VoiceAssistantWebSocketServer {
       pending.helloTimeout = null;
       this.pendingConnections.delete(ws);
       pending.connectionLogger.warn(
-        { ...toConnectionLogFields(identity), timeoutMs: HELLO_TIMEOUT_MS },
+        { timeoutMs: HELLO_TIMEOUT_MS },
         "Closing connection due to missing hello",
       );
       try {
@@ -1367,13 +1414,12 @@ export class VoiceAssistantWebSocketServer {
 
     this.pendingConnections.set(ws, pending);
     this.incrementRuntimeCounter("connectedAwaitingHello");
-    this.bindSocketHandlers(ws);
+    this.bindSocketHandlers(ws, logState);
 
-    pending.connectionLogger.info(
-      {
-        ...toConnectionLogFields(identity),
-        totalPendingConnections: this.pendingConnections.size,
-      },
+    // The hello line that follows carries the same identity; a socket that never says hello
+    // is reported by the timeout or the pending disconnect.
+    pending.connectionLogger.debug(
+      { totalPendingConnections: this.pendingConnections.size },
       "Client connected; awaiting hello",
     );
     if (initialHello) await this.handleHelloSafely({ ws, message: initialHello, pending });
@@ -1385,20 +1431,11 @@ export class VoiceAssistantWebSocketServer {
     clientType: WSHelloMessage["clientType"];
     appVersion: string | null;
     clientCapabilities: Record<string, unknown> | null;
-    connectionLogger: pino.Logger;
     lifecycle: { kind: "reconnectable" } | { kind: "ephemeral-plugin"; pluginId: string };
     admission: SessionAdmission;
   }): SessionConnection {
-    const {
-      ws,
-      clientId,
-      clientType,
-      appVersion,
-      clientCapabilities,
-      connectionLogger,
-      lifecycle,
-      admission,
-    } = params;
+    const { ws, clientId, clientType, appVersion, clientCapabilities, lifecycle, admission } =
+      params;
     let connection: SessionConnection | null = null;
 
     const session = this.createSocketSession({
@@ -1407,7 +1444,6 @@ export class VoiceAssistantWebSocketServer {
       appVersion,
       clientCapabilities,
       permissions: admission.permissions,
-      connectionLogger,
       onMessage: (msg) => {
         if (!connection) {
           return;
@@ -1463,7 +1499,6 @@ export class VoiceAssistantWebSocketServer {
       clientId,
       appVersion,
       clientCapabilities,
-      connectionLogger,
       sockets: new Set([ws]),
     };
     connection =
@@ -1488,7 +1523,8 @@ export class VoiceAssistantWebSocketServer {
       onBinaryMessageToSource: options.onBinaryMessageToSource,
       getTransportBufferedAmount: options.getTransportBufferedAmount,
       onLifecycleIntent: options.onLifecycleIntent,
-      logger: options.connectionLogger.child({ module: "session" }),
+      // A session spans sockets and outlives them, so it must not inherit one socket's identity.
+      logger: this.logger,
       onWorkspaceRecovered: async (workspace) => {
         await Promise.all(
           this.listSessions().map((activeSession) =>
@@ -1643,7 +1679,6 @@ export class VoiceAssistantWebSocketServer {
       return;
     }
 
-    const connectionLogger = pending.connectionLogger.child({ clientId });
     this.incrementRuntimeCounter("helloNew");
     const connection = this.createSessionConnection({
       ws,
@@ -1651,7 +1686,6 @@ export class VoiceAssistantWebSocketServer {
       clientType: message.clientType,
       appVersion: message.appVersion ?? null,
       clientCapabilities: message.capabilities ?? null,
-      connectionLogger,
       lifecycle: pluginId ? { kind: "ephemeral-plugin", pluginId } : { kind: "reconnectable" },
       admission: admitted,
     });
@@ -1661,14 +1695,21 @@ export class VoiceAssistantWebSocketServer {
     }
     pending.identity.sessionId = connection.session.getSessionId();
     this.sendToClient(ws, this.createServerInfoMessage(connection.session));
-    connection.connectionLogger.info(
-      {
-        ...toConnectionLogFields(pending.identity),
-        resumed: false,
-        totalSessions: this.sessions.size,
-      },
+    this.bindSocketLoggerToSession(pending).info(
+      { resumed: false, totalSessions: this.sessions.size },
       "Client connected via hello",
     );
+  }
+
+  private bindSocketLoggerToSession(pending: PendingConnection): pino.Logger {
+    const { clientId, sessionId, appVersion } = pending.identity;
+    const logger = pending.connectionLogger.child({ clientId, sessionId, appVersion });
+    pending.logState.logger = logger;
+    return logger;
+  }
+
+  private socketLogger(ws: WebSocketLike): pino.Logger {
+    return this.socketLogStates.get(ws)?.logger ?? this.logger;
   }
 
   private handleHelloSafely(params: {
@@ -1786,16 +1827,30 @@ export class VoiceAssistantWebSocketServer {
     ) {
       existing.clientCapabilities = newClientCapabilities;
     }
+    const joinsLiveSession = existing.sockets.size > 0;
     existing.sockets.add(ws);
     this.sessions.set(ws, existing);
     pending.identity.sessionId = existing.session.getSessionId();
     this.sendToClient(ws, this.createServerInfoMessage(existing.session));
-    pending.connectionLogger.info(
-      {
-        ...toConnectionLogFields(pending.identity),
-        resumed: true,
-        totalSessions: this.sessions.size,
-      },
+    const logger = this.bindSocketLoggerToSession(pending);
+    if (joinsLiveSession) {
+      pending.logState.attachLogDeferred = true;
+      return;
+    }
+    logger.info({ resumed: true, totalSessions: this.sessions.size }, "Client connected via hello");
+  }
+
+  // The app re-measures the connections it is not using by opening a socket next to its live
+  // ones and closing it again without a request. Announcing a joining socket with its first
+  // request keeps those probes from writing a connect and a disconnect line each.
+  private noteSessionRequest(ws: WebSocketLike): void {
+    const logState = this.socketLogStates.get(ws);
+    if (!logState) return;
+    logState.sessionRequests += 1;
+    if (!logState.attachLogDeferred) return;
+    logState.attachLogDeferred = false;
+    logState.logger.info(
+      { resumed: true, totalSessions: this.sessions.size },
       "Client connected via hello",
     );
   }
@@ -2012,7 +2067,7 @@ export class VoiceAssistantWebSocketServer {
     this.broadcast(this.createDaemonConfigChangedMessage(config));
   }
 
-  private bindSocketHandlers(ws: WebSocketLike): void {
+  private bindSocketHandlers(ws: WebSocketLike, logState: SocketLogState): void {
     ws.on("message", (...args: unknown[]) => {
       const data = args[0] as Buffer | ArrayBuffer | Buffer[] | string;
       this.handleRawMessage(ws, data);
@@ -2021,7 +2076,7 @@ export class VoiceAssistantWebSocketServer {
     ws.on("close", async (...args: unknown[]) => {
       const code = args[0];
       const reason = args[1];
-      await this.detachSocket(ws, {
+      await this.detachSocket(ws, logState, {
         code: typeof code === "number" ? code : undefined,
         reason,
       });
@@ -2030,11 +2085,8 @@ export class VoiceAssistantWebSocketServer {
     ws.on("error", async (...args: unknown[]) => {
       const error = args[0];
       const err = error instanceof Error ? error : new Error(String(error));
-      const active = this.sessions.get(ws);
-      const pending = this.pendingConnections.get(ws);
-      const log = active?.connectionLogger ?? pending?.connectionLogger ?? this.logger;
-      log.error({ err }, "Client error");
-      await this.detachSocket(ws, { error: err });
+      logState.logger.error({ err }, "Client error");
+      await this.detachSocket(ws, logState, { error: err });
     });
   }
 
@@ -2048,6 +2100,7 @@ export class VoiceAssistantWebSocketServer {
 
   private async detachSocket(
     ws: WebSocketLike,
+    logState: SocketLogState,
     details: {
       code?: number;
       reason?: unknown;
@@ -2056,18 +2109,18 @@ export class VoiceAssistantWebSocketServer {
   ): Promise<void> {
     this.applicationSocketLease.release(ws);
     const identity = this.socketIdentities.get(ws);
-    const identityFields = identity ? toConnectionLogFields(identity) : {};
+    const log = logState.logger;
+    const lifetimeMs = Date.now() - logState.connectedAtMs;
+    const closeFields = {
+      code: details.code,
+      reason: stringifyCloseReason(details.reason),
+      lifetimeMs,
+      sessionRequests: logState.sessionRequests,
+    };
     const pending = this.clearPendingConnection(ws);
     if (pending) {
       this.incrementRuntimeCounter("pendingDisconnected");
-      pending.connectionLogger.info(
-        {
-          ...identityFields,
-          code: details.code,
-          reason: stringifyCloseReason(details.reason),
-        },
-        "Pending client disconnected",
-      );
+      log.info(closeFields, "Pending client disconnected");
       this.socketIdentities.delete(ws);
       this.finishPluginSocketCleanup(ws);
       return;
@@ -2076,14 +2129,7 @@ export class VoiceAssistantWebSocketServer {
     const connection = this.sessions.get(ws);
     if (!connection) {
       if (identity) {
-        this.logger.info(
-          {
-            ...identityFields,
-            code: details.code,
-            reason: stringifyCloseReason(details.reason),
-          },
-          "Client socket closed without active session",
-        );
+        log.info(closeFields, "Client socket closed without active session");
         this.socketIdentities.delete(ws);
       }
       this.finishPluginSocketCleanup(ws);
@@ -2115,13 +2161,8 @@ export class VoiceAssistantWebSocketServer {
       }, EXTERNAL_SESSION_DISCONNECT_GRACE_MS);
       connection.externalDisconnectCleanupTimeout = timeout;
 
-      connection.connectionLogger.info(
-        {
-          ...identityFields,
-          code: details.code,
-          reason: stringifyCloseReason(details.reason),
-          reconnectGraceMs: EXTERNAL_SESSION_DISCONNECT_GRACE_MS,
-        },
+      log.info(
+        { ...closeFields, reconnectGraceMs: EXTERNAL_SESSION_DISCONNECT_GRACE_MS },
         "Client disconnected; waiting for reconnect",
       );
       return;
@@ -2129,15 +2170,16 @@ export class VoiceAssistantWebSocketServer {
 
     if (connection.sockets.size > 0) {
       this.incrementRuntimeCounter("sessionSocketDisconnectedAttached");
-      connection.connectionLogger.info(
-        {
-          ...identityFields,
-          remainingSockets: connection.sockets.size,
-          code: details.code,
-          reason: stringifyCloseReason(details.reason),
-        },
-        "Client socket disconnected; session remains attached",
-      );
+      const fields = { ...closeFields, remainingSockets: connection.sockets.size };
+      const repeatsUnusedSocket =
+        logState.attachLogDeferred &&
+        identity !== undefined &&
+        this.repeatsUnusedSocket(connection.clientId, identity, lifetimeMs);
+      if (repeatsUnusedSocket) {
+        log.debug(fields, "Client socket disconnected; session remains attached");
+      } else {
+        log.info(fields, "Client socket disconnected; session remains attached");
+      }
       return;
     }
 
@@ -2174,7 +2216,7 @@ export class VoiceAssistantWebSocketServer {
       }
     }
 
-    connection.connectionLogger.trace(
+    this.logger.trace(
       { clientId: connection.clientId, totalSessions: this.sessions.size },
       logMessage,
     );
@@ -2215,7 +2257,6 @@ export class VoiceAssistantWebSocketServer {
 
     log.warn(
       {
-        clientId: activeConnection?.clientId,
         requestId: requestInfo?.requestId,
         requestType: requestInfo?.requestType,
         error: parsedMessage.error.message,
@@ -2260,12 +2301,7 @@ export class VoiceAssistantWebSocketServer {
     }
     void Promise.resolve(activeConnection.session.handleBinaryFrame(decodedFrame, ws)).catch(
       (error: unknown) => {
-        this.handleRawMessageError({
-          ws,
-          data: buffer,
-          error,
-          log: activeConnection.connectionLogger,
-        });
+        this.handleRawMessageError({ ws, data: buffer, error, log });
       },
     );
     return true;
@@ -2316,8 +2352,7 @@ export class VoiceAssistantWebSocketServer {
 
     const activeConnection = this.sessions.get(ws);
     const pendingConnection = this.pendingConnections.get(ws);
-    const log =
-      activeConnection?.connectionLogger ?? pendingConnection?.connectionLogger ?? this.logger;
+    const log = this.socketLogger(ws);
 
     try {
       const buffer = bufferFromWsData(data);
@@ -2379,7 +2414,7 @@ export class VoiceAssistantWebSocketServer {
 
       if (message.type === "hello") {
         this.incrementRuntimeCounter("unexpectedHelloOnActiveConnection");
-        activeConnection.connectionLogger.warn("Received hello on active connection");
+        log.warn("Received hello on active connection");
         try {
           ws.close(WS_CLOSE_INVALID_HELLO, "Unexpected hello");
         } catch {
@@ -2390,7 +2425,7 @@ export class VoiceAssistantWebSocketServer {
 
       if (message.type === "session") {
         void this.dispatchSessionMessage(ws, activeConnection, message).catch((error: unknown) => {
-          this.handleRawMessageError({ ws, data, error, log: activeConnection.connectionLogger });
+          this.handleRawMessageError({ ws, data, error, log });
         });
       }
     } catch (error) {
@@ -2404,22 +2439,10 @@ export class VoiceAssistantWebSocketServer {
     message: Extract<WSInboundMessage, { type: "session" }>,
   ): Promise<void> {
     this.recordInboundSessionRequestType(message.message.type);
+    this.noteSessionRequest(ws);
     const controlRpc = getControlRpcLogInfo(message.message);
     if (controlRpc) {
-      const identity = this.socketIdentities.get(ws);
-      let connectionFields: Record<string, unknown>;
-      if (identity) {
-        connectionFields = toConnectionLogFields(identity);
-      } else {
-        connectionFields = { clientId: activeConnection.clientId };
-      }
-      activeConnection.connectionLogger.warn(
-        {
-          ...connectionFields,
-          ...controlRpc,
-        },
-        "ws_control_rpc_received",
-      );
+      this.socketLogger(ws).warn(controlRpc, "ws_control_rpc_received");
     }
     const startMs = performance.now();
     await activeConnection.session.handleMessage(message.message, ws);
@@ -2427,13 +2450,64 @@ export class VoiceAssistantWebSocketServer {
     this.recordRequestLatency(message.message.type, durationMs);
 
     if (durationMs >= SLOW_REQUEST_THRESHOLD_MS) {
-      activeConnection.connectionLogger.warn(
+      this.logSlowRequest(ws, activeConnection, message.message, durationMs);
+    }
+  }
+
+  // Polling requests are slow in the same way every minute. After the first report of a kind
+  // they are folded into ws_slow_request_summary, which leaves one-off slow requests visible.
+  private logSlowRequest(
+    ws: WebSocketLike,
+    connection: SessionConnection,
+    request: SessionRequest,
+    durationMs: number,
+  ): void {
+    const description = describeSessionRequest(request);
+    const kind = { ...description, clientId: connection.clientId };
+    const kindKey = JSON.stringify([kind.clientId, kind.requestType, kind.pluginId, kind.method]);
+    if (!this.slowRequestDigest.record(kindKey, kind, durationMs)) return;
+    this.socketLogger(ws).warn(
+      {
+        ...description,
+        durationMs: Math.round(durationMs),
+        inflightRequests: connection.session.getRuntimeMetrics().inflightRequests,
+      },
+      "ws_slow_request",
+    );
+  }
+
+  /**
+   * A socket closed without ever sending a request. True when the same client already did that
+   * recently, so this close belongs in ws_unused_socket_summary instead of a line of its own.
+   */
+  private repeatsUnusedSocket(
+    clientId: string,
+    identity: WebSocketConnectionIdentity,
+    lifetimeMs: number,
+  ): boolean {
+    if (lifetimeMs >= UNUSED_SOCKET_MAX_LIFETIME_MS) return false;
+    const kind = { clientId, transport: identity.transport, peer: identity.peer };
+    const kindKey = JSON.stringify([kind.clientId, kind.transport, kind.peer]);
+    return !this.unusedSocketDigest.record(kindKey, kind, lifetimeMs);
+  }
+
+  private flushLogDigests(): void {
+    for (const { fields, count, p50Ms, maxMs } of this.slowRequestDigest.flush()) {
+      this.logger.info(
+        { ...fields, count, p50Ms, maxMs, windowMs: LOG_DIGEST_FLUSH_MS },
+        "ws_slow_request_summary",
+      );
+    }
+    for (const { fields, count, p50Ms, maxMs } of this.unusedSocketDigest.flush()) {
+      this.logger.info(
         {
-          requestType: message.message.type,
-          durationMs: Math.round(durationMs),
-          inflightRequests: activeConnection.session.getRuntimeMetrics().inflightRequests,
+          ...fields,
+          count,
+          p50LifetimeMs: p50Ms,
+          maxLifetimeMs: maxMs,
+          windowMs: LOG_DIGEST_FLUSH_MS,
         },
-        "ws_slow_request",
+        "ws_unused_socket_summary",
       );
     }
   }
@@ -2527,7 +2601,19 @@ export class VoiceAssistantWebSocketServer {
     };
   }
 
+  private flushDueRuntimeMetrics(): void {
+    const quiet = !this.runtimeMetrics.hasStreamActivity();
+    const hasSnapshot = this.lastRuntimeMetricsSnapshot !== null;
+    const canMerge = this.quietRuntimeMetricsWindows + 1 < WS_RUNTIME_METRICS_QUIET_WINDOWS;
+    if (quiet && hasSnapshot && canMerge) {
+      this.quietRuntimeMetricsWindows += 1;
+      return;
+    }
+    this.flushRuntimeMetrics();
+  }
+
   private flushRuntimeMetrics(options?: { final?: boolean }): void {
+    this.quietRuntimeMetricsWindows = 0;
     const runtimeMetrics = this.runtimeMetrics.snapshotAndReset();
     const activeConnections = new Set<SessionConnection>(this.sessions.values()).size;
     const activeSockets = this.sessions.size;
@@ -3016,8 +3102,28 @@ function stringifyCloseReason(reason: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
+type SessionRequest = Extract<WSInboundMessage, { type: "session" }>["message"];
+
+interface SessionRequestDescription {
+  requestType: string;
+  pluginId?: string;
+  method?: string;
+}
+
+// Every plugin RPC arrives as the same request type; only the plugin and method tell them apart.
+function describeSessionRequest(request: SessionRequest): SessionRequestDescription {
+  if (request.type !== "plugin.rpc.invoke.request") {
+    return { requestType: request.type };
+  }
+  return {
+    requestType: request.type,
+    pluginId: request.pluginId,
+    method: request.method.slice(0, SLOW_REQUEST_METHOD_MAX_LENGTH),
+  };
+}
+
 function getControlRpcLogInfo(
-  message: Extract<WSInboundMessage, { type: "session" }>["message"],
+  message: SessionRequest,
 ): { requestType: string; requestId: string; reason?: string } | null {
   if (message.type === "shutdown_server_request") {
     return {

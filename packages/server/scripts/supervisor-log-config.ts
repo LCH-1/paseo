@@ -4,7 +4,9 @@ import type { loadPersistedConfig } from "../src/server/persisted-config.js";
 
 const DEFAULT_DAEMON_LOG_FILENAME = "daemon.log";
 const DEFAULT_LOG_ROTATE_SIZE = "10m";
-const DEFAULT_LOG_ROTATE_MAX_FILES = 3;
+// Three files held about 15 hours of a busy daemon, which is gone before an incident is looked at.
+// Ten caps daemon logs at roughly 110 MB on disk.
+const DEFAULT_LOG_ROTATE_MAX_FILES = 10;
 
 export function resolveSupervisorLogFile(
   paseoHome: string,
