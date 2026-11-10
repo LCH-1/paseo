@@ -517,6 +517,177 @@ test("closed timeline fetch, search and prompt listing never acquire an interact
   expect(create).not.toHaveBeenCalled();
 });
 
+test("forking a closed conversation reads its recorded history without starting its runtime", async () => {
+  const agentId = "11111111-1111-4111-8111-111111111125";
+  const record: StoredAgentRecord = {
+    id: agentId,
+    provider: "codex",
+    cwd: "/tmp/fork-source",
+    title: "source conversation",
+    createdAt: "2026-11-01T00:00:00.000Z",
+    updatedAt: "2026-11-01T00:00:00.000Z",
+    lastStatus: "closed",
+    labels: {},
+    persistence: { provider: "codex", sessionId: "native-fork-source" },
+  };
+  const timeline = new InMemoryAgentTimelineStore();
+  timeline.initialize(agentId, {
+    items: [
+      { type: "user_message", text: "plan the migration" },
+      { type: "assistant_message", text: "here is the plan" },
+    ],
+  });
+  const resume = vi.fn(async () => {
+    throw new Error("All Codex accounts exhausted");
+  });
+  const create = vi.fn();
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      waitForAgentClose: vi.fn(async () => {}),
+      getAgent: vi.fn(() => null),
+      readStoredTimeline: vi.fn(async (_record, options) => timeline.fetch(agentId, options)),
+      resumeAgentFromPersistence: resume,
+      createAgent: create,
+    },
+    agentStorage: { get: vi.fn(async () => record) },
+  });
+
+  await session.handleMessage({
+    type: "agent.fork_context.request",
+    agentId,
+    requestId: "closed-fork",
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "agent.fork_context.response",
+      payload: expect.objectContaining({
+        requestId: "closed-fork",
+        agentId,
+        itemCount: 2,
+        attachment: expect.objectContaining({
+          contextKind: "chat_history",
+          text: expect.stringContaining(
+            "Source agent: source conversation\nSource directory: /tmp/fork-source\n\n[User] plan the migration\n[Assistant] here is the plan",
+          ),
+        }),
+        error: null,
+      }),
+    },
+  ]);
+  expect(resume).not.toHaveBeenCalled();
+  expect(create).not.toHaveBeenCalled();
+});
+
+test("listing and opening a closed agent's subagents and marking it read leave its runtime down", async () => {
+  const agentId = "11111111-1111-4111-8111-111111111126";
+  const record: StoredAgentRecord = {
+    id: agentId,
+    provider: "codex",
+    cwd: "/tmp/subagent-parent",
+    title: "parent conversation",
+    createdAt: "2026-11-01T00:00:00.000Z",
+    updatedAt: "2026-11-01T00:00:00.000Z",
+    lastStatus: "idle",
+    labels: {},
+    requiresAttention: true,
+    attentionReason: "finished",
+    attentionTimestamp: "2026-11-01T00:00:00.000Z",
+    persistence: { provider: "codex", sessionId: "native-parent" },
+  };
+  const descriptor = {
+    id: "child",
+    parentAgentId: agentId,
+    parentSubagentId: null,
+    provider: "codex",
+    title: "Review child",
+    description: null,
+    status: "completed",
+    createdAt: "2026-11-01T00:00:00.000Z",
+    updatedAt: "2026-11-01T00:00:00.000Z",
+    toolCallId: null,
+    cwd: null,
+    subtitle: null,
+  };
+  const childTimeline = new InMemoryAgentTimelineStore();
+  childTimeline.initialize("child", { items: [{ type: "assistant_message", text: "reviewed" }] });
+  const resume = vi.fn(async () => {
+    throw new Error("All Codex accounts exhausted");
+  });
+  const create = vi.fn();
+  const clearAgentAttention = vi.fn(async () => {});
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      waitForAgentClose: vi.fn(async () => {}),
+      getAgent: vi.fn(() => null),
+      readStoredProviderSubagents: vi.fn(async () => [descriptor]),
+      readStoredProviderSubagentTimeline: vi.fn(async (_record, _subagentId, options) => ({
+        descriptor,
+        timeline: childTimeline.fetch("child", options),
+      })),
+      clearAgentAttention,
+      resumeAgentFromPersistence: resume,
+      createAgent: create,
+    },
+    agentStorage: { get: vi.fn(async () => record) },
+  });
+
+  await session.handleMessage({
+    type: "agent.provider_subagents.list.request",
+    parentAgentId: agentId,
+    requestId: "closed-subagents",
+  });
+  await session.handleMessage({
+    type: "agent.provider_subagents.timeline.get.request",
+    parentAgentId: agentId,
+    subagentId: "child",
+    requestId: "closed-subagent-timeline",
+  });
+  await session.handleMessage({
+    type: "clear_agent_attention",
+    agentId,
+    requestId: "closed-read",
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "agent.provider_subagents.list.response",
+      payload: {
+        requestId: "closed-subagents",
+        parentAgentId: agentId,
+        subagents: [descriptor],
+        error: null,
+      },
+    },
+    {
+      type: "agent.provider_subagents.timeline.get.response",
+      payload: expect.objectContaining({
+        requestId: "closed-subagent-timeline",
+        subagentId: "child",
+        provider: "codex",
+        epoch: childTimeline.fetch("child").epoch,
+        window: { minSeq: 1, maxSeq: 1, nextSeq: 2 },
+        error: null,
+      }),
+    },
+    {
+      type: "clear_agent_attention_response",
+      payload: {
+        requestId: "closed-read",
+        agentId,
+        agents: [expect.objectContaining({ id: agentId, status: "idle" })],
+      },
+    },
+  ]);
+  expect(clearAgentAttention).toHaveBeenCalledWith(agentId, { republish: true });
+  expect(resume).not.toHaveBeenCalled();
+  expect(create).not.toHaveBeenCalled();
+});
+
 const checkoutGitMocks = vi.hoisted(() => ({
   checkoutResolvedBranch: vi.fn(),
   commitChanges: vi.fn(),

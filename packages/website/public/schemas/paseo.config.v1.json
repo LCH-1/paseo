@@ -391,6 +391,9 @@
           "additionalProperties": {
             "type": "object",
             "properties": {
+              "selectable": {
+                "type": "boolean"
+              },
               "extends": {
                 "type": "string"
               },
@@ -551,6 +554,12 @@
         "catalogRefreshTimeoutMs": {
           "type": "integer",
           "exclusiveMinimum": 0,
+          "maximum": 2147483647
+        },
+        "idleRuntimeReleaseMs": {
+          "description": "Stop an idle agent's provider process after this many milliseconds without activity; the next message starts it again. Defaults to 1800000 (30 minutes). 0 keeps idle processes running.",
+          "type": "integer",
+          "minimum": 0,
           "maximum": 2147483647
         },
         "metadataGeneration": {

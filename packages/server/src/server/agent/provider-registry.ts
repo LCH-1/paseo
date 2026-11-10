@@ -470,6 +470,7 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
     getRunningBackgroundWorkIds: inner.getRunningBackgroundWorkIds?.bind(inner),
     interrupt: () => inner.interrupt(),
     close: () => inner.close(),
+    releaseIdleRuntime: inner.releaseIdleRuntime?.bind(inner),
     listCommands: inner.listCommands?.bind(inner),
     setModel: inner.setModel?.bind(inner),
     setThinkingOption: inner.setThinkingOption?.bind(inner),

@@ -40,6 +40,25 @@ describe("server config", () => {
     expect(config.providerCatalogRefreshTimeoutMs).toBe(180_000);
   });
 
+  test("releases idle agent runtimes after 30 minutes unless the config says otherwise", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-idle-runtime-"));
+    roots.push(paseoHome);
+
+    expect(loadConfig(paseoHome, { env: {} }).agentIdleRuntimeReleaseMs).toBe(30 * 60_000);
+
+    await writeFile(
+      path.join(paseoHome, "config.json"),
+      JSON.stringify({ agents: { idleRuntimeReleaseMs: 600_000 } }),
+    );
+    expect(loadConfig(paseoHome, { env: {} }).agentIdleRuntimeReleaseMs).toBe(600_000);
+
+    await writeFile(
+      path.join(paseoHome, "config.json"),
+      JSON.stringify({ agents: { idleRuntimeReleaseMs: 0 } }),
+    );
+    expect(loadConfig(paseoHome, { env: {} }).agentIdleRuntimeReleaseMs).toBe(0);
+  });
+
   test("resolves reload state from the supplied validated snapshot", async () => {
     const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-snapshot-"));
     roots.push(paseoHome);

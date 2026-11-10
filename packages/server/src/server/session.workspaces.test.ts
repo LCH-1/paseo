@@ -1898,7 +1898,13 @@ test("clear agent attention reports a conversation that no longer exists", async
   const emitted: SessionOutboundMessage[] = [];
   const session = createSessionForWorkspaceTests({
     onMessage: (message) => emitted.push(message),
-    agentManager: { waitForAgentClose: async () => {} },
+    agentManager: {
+      waitForAgentClose: async () => {},
+      // The manager owns the existence check now that reading never resumes the agent.
+      clearAgentAttention: async (agentId: string) => {
+        throw new Error(`Agent not found: ${agentId}`);
+      },
+    },
   });
 
   await session.handleMessage({

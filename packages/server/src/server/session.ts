@@ -124,6 +124,7 @@ import type {
   AgentTimelineFetchOptions,
   AgentTimelineFetchResult,
   ManagedAgent,
+  ProviderSubagentTimelineRead,
 } from "./agent/agent-manager.js";
 import { createAgentCommand } from "./agent/create-agent/create.js";
 import { resolveCreateAgentIntent, type CreateAgentIntent } from "./agent/create-agent/intent.js";
@@ -5039,25 +5040,10 @@ export class Session {
     const agentIds = Array.isArray(agentId) ? agentId : [agentId];
 
     try {
+      // Reading a conversation must not resume it: a closed agent is marked read in
+      // storage, and an already-read live agent is re-sent to converge stale clients.
       await Promise.all(
-        agentIds.map(async (id) => {
-          try {
-            await ensureAgentLoaded(id, {
-              agentManager: this.agentManager,
-              agentStorage: this.agentStorage,
-              logger: this.sessionLogger,
-            });
-          } catch (error) {
-            if (error instanceof AgentNotFoundError) throw error;
-            // Reading a conversation must not depend on resuming it. A provider at
-            // its limit or no longer registered leaves the stored record to clear.
-            this.sessionLogger.warn(
-              { err: error, agentId: id },
-              "Clearing agent attention without a loaded agent",
-            );
-          }
-          await this.agentManager.clearAgentAttention(id, { republish: true });
-        }),
+        agentIds.map((id) => this.agentManager.clearAgentAttention(id, { republish: true })),
       );
       if (requestId) {
         const agents = (
@@ -8130,21 +8116,41 @@ export class Session {
     }
   }
 
-  private async handleProviderSubagentListRequest(
-    msg: Extract<SessionInboundMessage, { type: "agent.provider_subagents.list.request" }>,
-  ): Promise<void> {
-    try {
-      await ensureUnarchivedAgentLoaded(msg.parentAgentId, {
+  /**
+   * Null when the parent is live. A closed parent's subagents are read from its
+   * recorded history, because every open pane lists them and resuming each
+   * parent would start a provider process per pane.
+   */
+  private async readClosedSubagentParent(parentAgentId: string): Promise<StoredAgentRecord | null> {
+    await this.agentManager.waitForAgentClose(parentAgentId);
+    if (this.agentManager.getAgent(parentAgentId)) {
+      await ensureUnarchivedAgentLoaded(parentAgentId, {
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         logger: this.sessionLogger,
       });
+      return null;
+    }
+    const record = await this.agentStorage.get(parentAgentId);
+    if (!record || record.internal) throw new AgentNotFoundError(parentAgentId);
+    if (record.archivedAt) throw new Error(`Agent is archived: ${parentAgentId}`);
+    return record;
+  }
+
+  private async handleProviderSubagentListRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.provider_subagents.list.request" }>,
+  ): Promise<void> {
+    try {
+      const closedParent = await this.readClosedSubagentParent(msg.parentAgentId);
+      const subagents = closedParent
+        ? await this.agentManager.readStoredProviderSubagents(closedParent)
+        : this.agentManager.listProviderSubagents(msg.parentAgentId);
       this.emit({
         type: "agent.provider_subagents.list.response",
         payload: {
           requestId: msg.requestId,
           parentAgentId: msg.parentAgentId,
-          subagents: this.agentManager.listProviderSubagents(msg.parentAgentId),
+          subagents,
           error: null,
         },
       });
@@ -8167,30 +8173,40 @@ export class Session {
   ): Promise<void> {
     const direction: AgentTimelineFetchDirection = msg.direction ?? (msg.cursor ? "after" : "tail");
     try {
-      await ensureUnarchivedAgentLoaded(msg.parentAgentId, {
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        logger: this.sessionLogger,
-      });
-      // Before the lookup: a restored pane can ask for a child this daemon has yet to see.
-      this.agentManager.markProviderSubagentTimelineRequested(msg.parentAgentId, msg.subagentId);
-      const descriptor = this.agentManager.getProviderSubagent(msg.parentAgentId, msg.subagentId);
-      if (!descriptor) {
+      const closedParent = await this.readClosedSubagentParent(msg.parentAgentId);
+      const fetchOptions = {
+        direction,
+        cursor: msg.cursor,
+        limit: msg.limit ?? (direction === "after" ? 0 : 200),
+      };
+      let found: ProviderSubagentTimelineRead | null;
+      if (closedParent) {
+        found = await this.agentManager.readStoredProviderSubagentTimeline(
+          closedParent,
+          msg.subagentId,
+          fetchOptions,
+        );
+      } else {
+        // Before the lookup: a restored pane can ask for a child this daemon has yet to see.
+        this.agentManager.markProviderSubagentTimelineRequested(msg.parentAgentId, msg.subagentId);
+        const live = this.agentManager.getProviderSubagent(msg.parentAgentId, msg.subagentId);
+        found = live && {
+          descriptor: live,
+          timeline: this.agentManager.fetchProviderSubagentTimeline(
+            msg.parentAgentId,
+            msg.subagentId,
+            fetchOptions,
+          ),
+        };
+      }
+      if (!found) {
         throw new Error("Provider subagent not found");
       }
+      const { descriptor, timeline } = found;
       // COMPAT(projectedSubagentTimeline): added after v0.8.0, remove after 2027-03-14.
       const supportsProjection = source
         ? this.supportsForSource(CLIENT_CAPS.projectedSubagentTimeline, source)
         : this.supports(CLIENT_CAPS.projectedSubagentTimeline);
-      const timeline = this.agentManager.fetchProviderSubagentTimeline(
-        msg.parentAgentId,
-        msg.subagentId,
-        {
-          direction,
-          cursor: msg.cursor,
-          limit: msg.limit ?? (direction === "after" ? 0 : 200),
-        },
-      );
       const rows = timeline.rows.filter((row) => this.supportsTimelineItem(row.item, source));
       this.emitForSource(
         {
@@ -8267,13 +8283,8 @@ export class Session {
     msg: Extract<SessionInboundMessage, { type: "agent.fork_context.request" }>,
   ): Promise<void> {
     try {
-      const snapshot = await ensureAgentLoaded(msg.agentId, {
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        logger: this.sessionLogger,
-      });
-      const agentPayload = await this.buildAgentPayload(snapshot);
-      const timeline = this.agentManager.fetchTimeline(msg.agentId, {
+      // Fork context is built from recorded history, so the source agent's runtime stays down.
+      const { agent: agentPayload, timeline } = await this.readAgentTimeline(msg.agentId, {
         direction: "tail",
         limit: 0,
       });
@@ -8284,7 +8295,7 @@ export class Session {
           : null,
         boundaryMessageId: msg.boundaryMessageId,
         agentTitle: agentPayload.title,
-        cwd: snapshot.cwd,
+        cwd: agentPayload.cwd,
       });
 
       this.emit({

@@ -704,6 +704,12 @@ export interface AgentSession {
   interrupt(): Promise<void>;
   /** Release live runtime resources without archiving or deleting the durable native session. */
   close(): Promise<void>;
+  /**
+   * Stop the provider process of a session that has had nothing in flight for `idleForMs`.
+   * The session stays open: the next operation that needs the process starts it again.
+   * Resolves true only when a process was stopped.
+   */
+  releaseIdleRuntime?(idleForMs: number): Promise<boolean>;
   listCommands?(): Promise<AgentSlashCommand[]>;
   setModel?(modelId: string | null): Promise<void>;
   setThinkingOption?(thinkingOptionId: string | null): Promise<void | AgentProviderNotice>;

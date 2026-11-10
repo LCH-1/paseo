@@ -228,6 +228,7 @@ export class CodexAppServerClient {
   private stdoutClosed = false;
   private childCleanup: Promise<void> | null = null;
   private stdoutDrainTimer: NodeJS.Timeout | null = null;
+  private lastWrite = Date.now();
   private resolveTermination!: () => void;
   private readonly terminationPromise = new Promise<void>((resolve) => {
     this.resolveTermination = resolve;
@@ -293,6 +294,11 @@ export class CodexAppServerClient {
 
   waitForTermination(): Promise<void> {
     return this.terminationPromise;
+  }
+
+  /** When this side last sent a request, notification, or reply to the app-server. */
+  get lastWriteAt(): number {
+    return this.lastWrite;
   }
 
   setNotificationHandler(handler: NotificationHandler): void {
@@ -475,6 +481,7 @@ export class CodexAppServerClient {
       this.handleUnexpectedTermination(new Error("Codex app-server stdin is closed"));
       return;
     }
+    this.lastWrite = Date.now();
     try {
       this.child.stdin.write(message);
     } catch (error) {

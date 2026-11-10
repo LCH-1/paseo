@@ -334,6 +334,15 @@ export const PersistedConfigSchema = z
       .object({
         providers: z.preprocess(normalizeAgentProviders, ProviderOverridesSchema).optional(),
         catalogRefreshTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
+        idleRuntimeReleaseMs: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(2_147_483_647)
+          .optional()
+          .describe(
+            "Stop an idle agent's provider process after this many milliseconds without activity; the next message starts it again. Defaults to 1800000 (30 minutes). 0 keeps idle processes running.",
+          ),
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })

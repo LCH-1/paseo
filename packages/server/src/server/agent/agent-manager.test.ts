@@ -2008,6 +2008,118 @@ test.each([false, true])(
   },
 );
 
+test("closed agent subagents come from recorded history and stay listed after a resume", async () => {
+  const record = closedHistoryRecord({ id: "00000000-0000-4000-8000-000000000302" });
+  const historySession = new TestAgentSession({ provider: "codex", cwd: record.cwd });
+  historySession.streamHistory = async function* () {
+    yield {
+      type: "provider_subagent",
+      provider: "codex",
+      event: { type: "upsert", id: "child", title: "Review child", status: "completed" },
+    };
+    yield {
+      type: "provider_subagent",
+      provider: "codex",
+      event: {
+        type: "timeline",
+        id: "child",
+        item: { type: "assistant_message", text: "reviewed" },
+      },
+    };
+    yield {
+      type: "timeline",
+      provider: "codex",
+      item: { type: "user_message", text: "review it" },
+    };
+  };
+  const close = vi.spyOn(historySession, "close");
+  const client = new TestAgentClient();
+  const resume = vi.spyOn(client, "resumeSession").mockResolvedValue(historySession);
+  const create = vi.spyOn(client, "createSession");
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  const events = vi.fn();
+  const unsubscribe = manager.subscribe(events, { replayState: false });
+  try {
+    const subagents = await manager.readStoredProviderSubagents(record);
+    expect(subagents).toEqual([
+      expect.objectContaining({
+        id: "child",
+        parentAgentId: record.id,
+        title: "Review child",
+        status: "completed",
+      }),
+    ]);
+    const child = await manager.readStoredProviderSubagentTimeline(record, "child");
+    expect(child?.descriptor).toEqual(subagents[0]);
+    expect(child?.timeline.rows.map((row) => row.item)).toEqual([
+      { type: "assistant_message", text: "reviewed" },
+    ]);
+    expect(await manager.readStoredProviderSubagentTimeline(record, "missing")).toBeNull();
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(resume.mock.calls[0]?.[3]).toEqual({ purpose: "history" });
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(create).not.toHaveBeenCalled();
+    expect(events).not.toHaveBeenCalled();
+    expect(manager.getAgent(record.id)).toBeNull();
+
+    // The seeded timeline counts as primed, so the resumed agent does not replay
+    // the history that carried these subagents.
+    resume.mockResolvedValue(new TestAgentSession({ provider: "codex", cwd: record.cwd }));
+    await manager.resumeAgentFromPersistence(record.persistence!, { cwd: record.cwd }, record.id);
+    await manager.hydrateTimelineFromProvider(record.id);
+    expect(manager.listProviderSubagents(record.id)).toEqual(subagents);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test("marking a closed agent read updates its record without resuming it", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-closed-read-"));
+  const registry = new AgentStorage(join(workdir, "agents"), logger);
+  const record = closedHistoryRecord({
+    id: "00000000-0000-4000-8000-000000000303",
+    lastStatus: "idle",
+    requiresAttention: true,
+    attentionReason: "finished",
+    attentionTimestamp: "2026-11-01T00:00:00.000Z",
+  });
+  await registry.upsert(record);
+  const client = new TestAgentClient();
+  const resume = vi.spyOn(client, "resumeSession");
+  const create = vi.spyOn(client, "createSession");
+  const manager = new AgentManager({ clients: { codex: client }, registry, logger });
+  const events: AgentManagerEvent[] = [];
+  const unsubscribe = manager.subscribe((event) => events.push(event), { replayState: false });
+  try {
+    await manager.clearAgentAttention(record.id);
+
+    expect(await registry.get(record.id)).toEqual({
+      ...record,
+      requiresAttention: false,
+      attentionReason: null,
+      attentionTimestamp: null,
+    });
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "agent_state",
+        agent: expect.objectContaining({
+          id: record.id,
+          session: null,
+          attention: { requiresAttention: false },
+        }),
+      }),
+    ]);
+    await manager.clearAgentAttention(record.id);
+    expect(events).toHaveLength(1);
+    expect(resume).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(manager.getAgent(record.id)).toBeNull();
+  } finally {
+    unsubscribe();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("does not register a session that finishes starting after shutdown begins", async () => {
   const client = new HeldAgentCreationClient();
   const manager = new AgentManager({
@@ -13762,3 +13874,217 @@ test.each([false, true])(
     }
   },
 );
+
+const IDLE_RUNTIME_RELEASE_MS = 30 * 60_000;
+
+class IdleReleasableSession extends CapacityFailureSession {
+  readonly releases: number[] = [];
+  holdTurn = false;
+
+  constructor(config: AgentSessionConfig) {
+    super(config);
+    this.failuresRemaining = 0;
+  }
+
+  override async startTurn(
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+  ): Promise<{ turnId: string }> {
+    if (!this.holdTurn) return super.startTurn(prompt, options);
+    setTimeout(() => {
+      this.pushEvent({ type: "turn_started", provider: this.provider, turnId: "held-turn" });
+    }, 0);
+    return { turnId: "held-turn" };
+  }
+
+  finishHeldTurn(): void {
+    this.pushEvent({ type: "turn_completed", provider: this.provider, turnId: "held-turn" });
+  }
+
+  async releaseIdleRuntime(idleForMs: number): Promise<boolean> {
+    this.releases.push(idleForMs);
+    return true;
+  }
+}
+
+async function withIdleReleasableAgent(
+  options: { idleRuntimeReleaseMs?: number },
+  run: (fixture: {
+    manager: AgentManager;
+    agentId: string;
+    session: IdleReleasableSession;
+    storage: AgentStorage;
+    hooks: string[];
+    sweep(ms?: number): Promise<void>;
+  }) => Promise<void>,
+): Promise<void> {
+  vi.useFakeTimers();
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-idle-"));
+  const config = { provider: "codex", cwd: workdir, model: "gpt-5.4" } as const;
+  const session = new IdleReleasableSession(config);
+  class IdleReleasableClient extends TestAgentClient {
+    override async createSession(): Promise<AgentSession> {
+      return session;
+    }
+  }
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const hooks: string[] = [];
+  const manager = new AgentManager({
+    clients: { codex: new IdleReleasableClient() },
+    logger,
+    registry: storage,
+    pluginLifecycle: {
+      emit: (name) => {
+        hooks.push(name);
+      },
+      before: async (_name, request) => request,
+    },
+    ...options,
+  });
+  try {
+    const agent = await manager.createAgent(config, undefined, { workspaceId: undefined });
+    const agentId = agent.id;
+    await run({
+      manager,
+      agentId,
+      session,
+      storage,
+      hooks,
+      async sweep(ms = 60_000) {
+        await vi.advanceTimersByTimeAsync(ms);
+        await manager.waitForAgentClose(agentId);
+      },
+    });
+  } finally {
+    manager.prepareForShutdown();
+    await vi.advanceTimersByTimeAsync(0);
+    await manager.flush();
+    vi.useRealTimers();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+}
+
+test("releasing an idle agent's provider process leaves the agent open, idle and unread", async () => {
+  await withIdleReleasableAgent(
+    { idleRuntimeReleaseMs: IDLE_RUNTIME_RELEASE_MS },
+    async ({ manager, agentId, session, storage, hooks, sweep }) => {
+      const run = drainAsyncGenerator(manager.streamAgent(agentId, "do the work"));
+      await vi.advanceTimersByTimeAsync(0);
+      await run;
+      await manager.flush();
+      const before = toAgentPayload(manager.getAgent(agentId)!);
+      const recordBefore = await storage.get(agentId);
+      const events: AgentManagerEvent[] = [];
+      const unsubscribe = manager.subscribe((event) => events.push(event), {
+        replayState: false,
+      });
+      hooks.length = 0;
+
+      await sweep();
+
+      // The session decides whether it has been idle long enough; the manager
+      // only says how long that is and stays out of the agent's visible state.
+      expect(session.releases).toEqual([IDLE_RUNTIME_RELEASE_MS]);
+      expect(events).toEqual([]);
+      expect(hooks).toEqual([]);
+      expect(toAgentPayload(manager.getAgent(agentId)!)).toEqual(before);
+      expect(before).toMatchObject({
+        status: "idle",
+        model: "gpt-5.4",
+        requiresAttention: true,
+        attentionReason: "finished",
+      });
+      expect(await storage.get(agentId)).toEqual(recordBefore);
+      expect(recordBefore?.lastStatus).toBe("idle");
+      unsubscribe();
+
+      const followup = drainAsyncGenerator(manager.streamAgent(agentId, "more work"));
+      await vi.advanceTimersByTimeAsync(0);
+      await followup;
+      expect(session.prompts).toEqual(["do the work", "more work"]);
+      expect(manager.getAgent(agentId)?.session).toBe(session);
+      expect(manager.getAgent(agentId)?.lifecycle).toBe("idle");
+    },
+  );
+});
+
+test("an agent with a turn, permission or subagent in flight keeps its provider process", async () => {
+  await withIdleReleasableAgent(
+    { idleRuntimeReleaseMs: IDLE_RUNTIME_RELEASE_MS },
+    async ({ manager, agentId, session, sweep }) => {
+      session.holdTurn = true;
+      const run = drainAsyncGenerator(manager.streamAgent(agentId, "long work"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(manager.getAgent(agentId)?.lifecycle).toBe("running");
+      await sweep(5 * 60_000);
+      expect(session.releases).toEqual([]);
+      session.finishHeldTurn();
+      await run;
+
+      session.pushEvent({
+        type: "permission_requested",
+        provider: "codex",
+        request: { id: "perm-1", provider: "codex", kind: "tool", name: "Read file" },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(manager.getAgent(agentId)?.pendingPermissions.size).toBe(1);
+      await sweep(5 * 60_000);
+      expect(session.releases).toEqual([]);
+      session.pushEvent({
+        type: "permission_resolved",
+        provider: "codex",
+        requestId: "perm-1",
+        resolution: { behavior: "allow" },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(manager.getAgent(agentId)?.pendingPermissions.size).toBe(0);
+
+      session.pushEvent({
+        type: "provider_subagent",
+        provider: "codex",
+        event: { type: "upsert", id: "child", title: "Background child", status: "running" },
+      });
+      await sweep(5 * 60_000);
+      expect(session.releases).toEqual([]);
+      session.pushEvent({
+        type: "provider_subagent",
+        provider: "codex",
+        event: { type: "upsert", id: "child", status: "completed" },
+      });
+
+      await sweep();
+      expect(session.releases).toEqual([IDLE_RUNTIME_RELEASE_MS]);
+    },
+  );
+});
+
+test("an agent waiting on an automatic retry keeps its provider process", async () => {
+  await withIdleReleasableAgent(
+    { idleRuntimeReleaseMs: 10_000 },
+    async ({ manager, agentId, session, sweep }) => {
+      session.failuresRemaining = 1;
+      const run = drainAsyncGenerator(manager.streamAgent(agentId, "original work"));
+      await vi.advanceTimersByTimeAsync(0);
+      await run;
+      expect(manager.getAgent(agentId)?.lifecycle).toBe("error");
+
+      await sweep(25_000);
+      expect(session.releases).toEqual([]);
+
+      await sweep(5_001);
+      await manager.flush();
+      expect(session.prompts).toEqual(["original work", TURN_RETRY_CONTINUATION]);
+      await sweep(10_000);
+      expect(session.releases).toEqual([10_000]);
+    },
+  );
+});
+
+test("idle provider processes stay up when no release window is configured", async () => {
+  for (const options of [{}, { idleRuntimeReleaseMs: 0 }]) {
+    await withIdleReleasableAgent(options, async ({ session, sweep }) => {
+      await sweep(2 * 60 * 60_000);
+      expect(session.releases).toEqual([]);
+    });
+  }
+});

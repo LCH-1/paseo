@@ -2,10 +2,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import { AgentManager, type AgentManagerEvent } from "../agent-manager.js";
+import { toAgentPayload } from "../agent-projections.js";
 import type {
   AgentClient,
   AgentLaunchContext,
@@ -805,4 +806,292 @@ test("session close disposes a provider that arrives from an in-flight reconnect
     await session.close();
     rmSync(workdir, { recursive: true, force: true });
   }
+});
+
+const IDLE_RELEASE_MS = 30 * 60_000;
+
+interface IdleCodexSession {
+  session: CodexAppServerAgentSession;
+  initial: FakeCodexAppServer;
+  replacement: FakeCodexAppServer;
+  events: AgentStreamEvent[];
+  runTurn(server: FakeCodexAppServer, prompt: string, during?: () => void): Promise<void>;
+  passTime(ms: number): void;
+}
+
+async function withIdleCodexSession(
+  runScenario: (fixture: IdleCodexSession) => Promise<void>,
+): Promise<void> {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  const initial = createFakeCodexAppServer();
+  const replacement = createFakeCodexAppServer();
+  const servers = [initial, replacement];
+  const session = new CodexAppServerAgentSession(
+    { provider: "codex", cwd: process.cwd(), modeId: "auto", model: "gpt-5.4" },
+    null,
+    logger,
+    async () => {
+      const server = servers.shift();
+      if (!server) throw new Error("Unexpected extra Codex spawn");
+      return server.child;
+    },
+  );
+  const events: AgentStreamEvent[] = [];
+  session.subscribe((event) => events.push(event));
+  const turnStarts = (server: FakeCodexAppServer) =>
+    server.requests().filter((request) => request.method === "turn/start").length;
+  try {
+    await runScenario({
+      session,
+      initial,
+      replacement,
+      events,
+      async runTurn(server, prompt, during) {
+        const expectedStarts = turnStarts(server) + 1;
+        const run = session.run(prompt);
+        await expect.poll(() => turnStarts(server)).toBe(expectedStarts);
+        server.startsTurn({ threadId: "thread-1", turnId: `turn-${expectedStarts}` });
+        during?.();
+        server.completeTurn();
+        await run;
+      },
+      passTime(ms) {
+        vi.setSystemTime(Date.now() + ms);
+      },
+    });
+    initial.assertNoErrors();
+    replacement.assertNoErrors();
+  } finally {
+    await session.close();
+    vi.useRealTimers();
+    for (const server of [initial, replacement]) {
+      server.child.stdout.end();
+      server.child.stderr.end();
+    }
+  }
+}
+
+test("an idle Codex session gives up its app-server and resumes the thread on the next prompt", async () => {
+  await withIdleCodexSession(
+    async ({ session, initial, replacement, events, runTurn, passTime }) => {
+      await session.setMode("full-access");
+      await session.setThinkingOption("high");
+      await runTurn(initial, "first prompt");
+      const runtimeInfo = await session.getRuntimeInfo();
+      const killed = vi.spyOn(initial.child, "kill");
+
+      expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(false);
+      expect(killed).not.toHaveBeenCalled();
+
+      passTime(IDLE_RELEASE_MS);
+      const eventsBeforeRelease = [...events];
+      expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(true);
+
+      // Nothing tells subscribers the conversation ended, and reading its state
+      // does not bring the process back.
+      expect(killed).toHaveBeenCalled();
+      expect(events).toEqual(eventsBeforeRelease);
+      expect(await session.getCurrentMode()).toBe("full-access");
+      expect(await session.getRuntimeInfo()).toEqual(runtimeInfo);
+      expect(session.describePersistence()).toMatchObject({ sessionId: "thread-1" });
+      expect(session.getPendingPermissions()).toEqual([]);
+      expect(replacement.requests()).toEqual([]);
+      expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(false);
+
+      await runTurn(replacement, "second prompt");
+
+      const methods = replacement.requests().map((request) => request.method);
+      expect(methods).toContain("thread/resume");
+      expect(methods).not.toContain("thread/start");
+      expect(await replacement.waitForRequest("thread/resume")).toMatchObject({
+        threadId: "thread-1",
+      });
+      // The restarted process runs the next turn with the same model, effort and permissions.
+      const firstTurn = await initial.waitForTurnStart();
+      const secondTurn = await replacement.waitForTurnStart();
+      expect(firstTurn).toMatchObject({
+        threadId: "thread-1",
+        model: "gpt-5.4",
+        effort: "high",
+        approvalPolicy: "never",
+      });
+      expect({ ...secondTurn, input: null }).toEqual({ ...firstTurn, input: null });
+      expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(2);
+      expect(events.filter((event) => event.type === "turn_failed")).toHaveLength(0);
+    },
+  );
+});
+
+test("a prompt sent while an idle Codex app-server is being released waits for it to exit", async () => {
+  await withIdleCodexSession(async ({ session, initial, replacement, runTurn, passTime }) => {
+    await runTurn(initial, "first prompt");
+    passTime(IDLE_RELEASE_MS);
+    let exited = false;
+    initial.child.once("exit", () => {
+      exited = true;
+    });
+
+    const release = session.releaseIdleRuntime(IDLE_RELEASE_MS);
+    const followup = session.run("second prompt");
+    await replacement.waitForRequest("initialize");
+    expect(exited).toBe(true);
+    await expect(release).resolves.toBe(true);
+
+    await replacement.waitForTurnStart();
+    replacement.startsTurn({ threadId: "thread-1", turnId: "turn-after-release" });
+    replacement.completeTurn();
+    await expect(followup).resolves.toMatchObject({ sessionId: "thread-1" });
+  });
+});
+
+test("a Codex session with a turn in flight or no finished turn keeps its app-server", async () => {
+  await withIdleCodexSession(async ({ session, initial, events, passTime }) => {
+    // A thread that has not finished a turn may not be on disk for a new process.
+    await session.connect();
+    const killed = vi.spyOn(initial.child, "kill");
+    passTime(IDLE_RELEASE_MS);
+    expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(false);
+
+    const run = session.run("keep working");
+    await initial.waitForTurnStart();
+    initial.startsTurn({ threadId: "thread-1", turnId: "long-turn" });
+    await expect.poll(() => events.at(-1)?.type).toBe("turn_started");
+    passTime(IDLE_RELEASE_MS);
+    expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(false);
+
+    initial.completeTurn();
+    await run;
+    expect(killed).not.toHaveBeenCalled();
+  });
+});
+
+test("a Codex session that left a command running keeps its app-server", async () => {
+  await withIdleCodexSession(async ({ session, initial, runTurn, passTime }) => {
+    await runTurn(initial, "start the dev server", () => {
+      initial.completesCommand({
+        threadId: "thread-1",
+        callId: "dev-server",
+        command: "npm run dev",
+        output: "Process running with session ID 7",
+      });
+    });
+    const killed = vi.spyOn(initial.child, "kill");
+
+    passTime(IDLE_RELEASE_MS);
+
+    expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(false);
+    expect(killed).not.toHaveBeenCalled();
+  });
+});
+
+async function withIdleCodexAgent(
+  runScenario: (fixture: {
+    manager: AgentManager;
+    agentId: string;
+    initial: FakeCodexAppServer;
+    replacement: FakeCodexAppServer;
+    hooks: string[];
+  }) => Promise<void>,
+): Promise<void> {
+  vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+  const workdir = mkdtempSync(join(tmpdir(), "codex-idle-release-"));
+  const initial = createFakeCodexAppServer();
+  const replacement = createFakeCodexAppServer();
+  const hooks: string[] = [];
+  const manager = new AgentManager({
+    clients: { codex: new ProcessExitCodexClient([initial, replacement]) },
+    idleRuntimeReleaseMs: IDLE_RELEASE_MS,
+    pluginLifecycle: {
+      emit: (name) => {
+        hooks.push(name);
+      },
+      before: async (_name, request) => request,
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent(
+      { provider: "codex", cwd: workdir, modeId: "auto", model: "gpt-5.4" },
+      undefined,
+      { workspaceId: undefined },
+    );
+    agentId = agent.id;
+    await runScenario({ manager, agentId, initial, replacement, hooks });
+  } finally {
+    manager.prepareForShutdown();
+    if (agentId && manager.getAgent(agentId)) {
+      await manager.closeAgent(agentId);
+    }
+    vi.useRealTimers();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+}
+
+test("an idle Codex agent stays registered and idle while its app-server is released and restarted", async () => {
+  await withIdleCodexAgent(async ({ manager, agentId, initial, replacement, hooks }) => {
+    const first = manager.runAgent(agentId, "first prompt");
+    await initial.waitForTurnStart();
+    initial.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+    initial.completeTurn();
+    await first;
+    await expect.poll(() => manager.getAgent(agentId)?.lifecycle).toBe("idle");
+    await manager.flush();
+
+    const killed = vi.spyOn(initial.child, "kill");
+    const before = toAgentPayload(manager.getAgent(agentId)!);
+    const events: AgentManagerEvent[] = [];
+    const unsubscribe = manager.subscribe((event) => events.push(event), { replayState: false });
+    hooks.length = 0;
+
+    await vi.advanceTimersByTimeAsync(IDLE_RELEASE_MS - 60_000);
+    expect(killed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    await expect.poll(() => killed.mock.calls.length).toBeGreaterThan(0);
+
+    // The conversation did not end: no state change, no stream event, no
+    // agent.closed hook, and the same mode, model and unread flag as before.
+    expect(events).toEqual([]);
+    expect(hooks).toEqual([]);
+    expect(toAgentPayload(manager.getAgent(agentId)!)).toEqual(before);
+    expect(before).toMatchObject({
+      status: "idle",
+      currentModeId: "auto",
+      model: "gpt-5.4",
+      requiresAttention: true,
+      attentionReason: "finished",
+    });
+    expect(replacement.requests()).toEqual([]);
+
+    const second = manager.runAgent(agentId, "second prompt");
+    await replacement.waitForTurnStart();
+    replacement.startsTurn({ threadId: "thread-1", turnId: "turn-2" });
+    replacement.completeTurn();
+    await expect(second).resolves.toMatchObject({ sessionId: "thread-1" });
+    expect(await replacement.waitForRequest("thread/resume")).toMatchObject({
+      threadId: "thread-1",
+    });
+    await expect.poll(() => manager.getAgent(agentId)?.lifecycle).toBe("idle");
+    expect(hooks).not.toContain("agent.closed");
+    unsubscribe();
+    initial.assertNoErrors();
+    replacement.assertNoErrors();
+  });
+});
+
+test("a Codex agent mid-turn keeps its app-server past the idle window", async () => {
+  await withIdleCodexAgent(async ({ manager, agentId, initial, replacement }) => {
+    const killed = vi.spyOn(initial.child, "kill");
+    const run = manager.runAgent(agentId, "keep working");
+    const turnStart = await initial.waitForTurnStart();
+    initial.startsTurn({ threadId: String(turnStart.threadId), turnId: "long-turn" });
+    await manager.waitForAgentRunStart(agentId);
+
+    await vi.advanceTimersByTimeAsync(IDLE_RELEASE_MS + 2 * 60_000);
+
+    expect(killed).not.toHaveBeenCalled();
+    expect(replacement.requests()).toEqual([]);
+    initial.completeTurn();
+    await run;
+  });
 });

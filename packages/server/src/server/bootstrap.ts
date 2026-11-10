@@ -445,6 +445,8 @@ export interface PaseoDaemonConfig {
   downloadTokenTtlMs?: number;
   agentProviderSettings?: AgentProviderRuntimeSettingsMap;
   providerCatalogRefreshTimeoutMs?: number;
+  /** Unset or 0 keeps idle agent provider processes running. */
+  agentIdleRuntimeReleaseMs?: number;
   metadataGeneration?: {
     providers?: Array<{
       provider: string;
@@ -958,6 +960,7 @@ export async function createPaseoDaemon(
     mcpAuthToken: agentMcpAuthToken,
     resolvePaseoToolPolicy: (provider) =>
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
+    idleRuntimeReleaseMs: config.agentIdleRuntimeReleaseMs,
     logger,
   });
   const syncPluginProviders = () => {

@@ -3523,6 +3523,14 @@ export class CodexAppServerAgentSession implements AgentSession {
   private connectionState: "disconnected" | "history-ready" | "connected" = "disconnected";
   private connectionPromise: Promise<void> | null = null;
   private closed = false;
+  private idleRelease: Promise<void> | null = null;
+  private releasedWhileIdle = false;
+  private lastProviderActivityAt = 0;
+  // A command left running lives inside the app-server and dies with it, so a
+  // process that reported one is never released while idle.
+  private backgroundTerminalSeen = false;
+  // A thread that has not completed a turn may not be on disk for a new process to resume.
+  private threadWithCompletedTurn: string | null = null;
   private collaborationModes: Array<{
     name: string;
     mode?: string | null;
@@ -3609,6 +3617,13 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (this.closed) {
       throw this.createClosedError();
     }
+    if (this.idleRelease) {
+      // The released process must be gone before another one resumes the same thread.
+      await this.idleRelease.catch(() => undefined);
+      if (this.closed) {
+        throw this.createClosedError();
+      }
+    }
     if (this.connectionState !== "disconnected" && !this.client?.isClosed) return;
     if (this.connectionPromise) {
       await this.connectionPromise;
@@ -3656,6 +3671,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       throw this.createClosedError();
     }
     this.client = client;
+    this.backgroundTerminalSeen = false;
     client.setUnexpectedTerminationHandler((error) => {
       this.handleUnexpectedTermination(error);
     });
@@ -3686,6 +3702,13 @@ export class CodexAppServerAgentSession implements AgentSession {
         throw this.createClosedError();
       }
       this.connectionState = "connected";
+      if (this.releasedWhileIdle) {
+        this.releasedWhileIdle = false;
+        this.logger.info(
+          { threadId: this.currentThreadId },
+          "Restarted Codex app-server after idle release",
+        );
+      }
     } catch (error) {
       try {
         if (this.client === client) {
@@ -5211,6 +5234,56 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.currentThreadId = null;
   }
 
+  async releaseIdleRuntime(idleForMs: number): Promise<boolean> {
+    if (!this.hasIdleProcess(idleForMs)) return false;
+    // connect() waits on this, so a prompt that arrives mid-release starts a fresh
+    // process only after this one has exited.
+    const release = this.disposeClient();
+    this.idleRelease = release;
+    try {
+      await release;
+    } finally {
+      if (this.idleRelease === release) this.idleRelease = null;
+    }
+    this.releasedWhileIdle = true;
+    return true;
+  }
+
+  private hasIdleProcess(idleForMs: number): boolean {
+    const client = this.client;
+    if (this.closed || this.idleRelease || this.connectionPromise) return false;
+    if (!client || client.isClosed || this.connectionState !== "connected") return false;
+    if (!this.canResumeThreadInNewProcess() || this.hasWorkInFlight()) return false;
+    const lastActivityAt = Math.max(client.lastWriteAt, this.lastProviderActivityAt);
+    return Date.now() - lastActivityAt >= idleForMs;
+  }
+
+  private canResumeThreadInNewProcess(): boolean {
+    const threadId = this.currentThreadId;
+    if (!threadId || this.ephemeral) return false;
+    return this.resumeHandle?.sessionId === threadId || this.threadWithCompletedTurn === threadId;
+  }
+
+  private hasWorkInFlight(): boolean {
+    if (
+      this.activeForegroundTurnId ||
+      this.currentTurnId ||
+      this.pendingForegroundStart ||
+      this.pendingForegroundTurnIdentification ||
+      this.interruption
+    ) {
+      return true;
+    }
+    if (this.pendingPermissionHandlers.size > 0 || this.asyncQuestions.pending().length > 0) {
+      return true;
+    }
+    if (this.backgroundTerminalSeen) return true;
+    for (const call of this.subAgentCallsByCallId.values()) {
+      if (call.toolCall.status === "running") return true;
+    }
+    return false;
+  }
+
   private clearPendingPermissions(options?: { preservePlanApprovals?: boolean }): void {
     for (const [requestId, pending] of this.pendingPermissionHandlers) {
       if (options?.preservePlanApprovals && pending.kind === "plan") {
@@ -5605,6 +5678,10 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     const parsed = CodexNotificationSchema.parse({ method, params });
     this.traceParsedNotification(method, params, parsed);
+    // Unrecognized notifications are account and status chatter, not work in this thread.
+    if (parsed.kind !== "unknown_method" && parsed.kind !== "invalid_payload") {
+      this.lastProviderActivityAt = Date.now();
+    }
     const route = this.resolveCodexThreadRoute(getCodexNotificationThreadId(parsed));
     if (route.kind === "pending_sub_agent") {
       this.bufferPendingSubAgentNotification(route.threadId, parsed);
@@ -6369,6 +6446,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private rememberCompletedRootTurn(turnId: string | null): void {
+    this.threadWithCompletedTurn = this.currentThreadId;
     if (!turnId) return;
     this.completedRootTurnKeys.add(this.rootTurnKey(turnId));
     if (this.completedRootTurnKeys.size > 128) {
@@ -6604,6 +6682,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     const bufferedOutput = this.consumeOutputDelta(outputDeltas, parsed.callId);
     const resolvedOutput = parsed.output ?? bufferedOutput;
+    this.noteBackgroundTerminal(resolvedOutput);
     if (!subAgentCallId) {
       this.rememberTerminalProcessForCommand(parsed.command, resolvedOutput);
     }
@@ -6628,6 +6707,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   private handleTerminalInteractionNotification(
     parsed: Extract<ParsedCodexNotification, { kind: "terminal_interaction" }>,
   ): void {
+    this.backgroundTerminalSeen = true;
     const interactionKey = [parsed.processId ?? "", parsed.stdin ?? ""].join("\u0000");
     if (!this.shouldEmitTerminalInteractionKey(interactionKey)) {
       return;
@@ -6756,6 +6836,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (shouldIgnoreMirroredLifecycleItem(parsed.source, parsed.item)) {
       return;
     }
+    this.noteBackgroundTerminal(parsed.item.aggregatedOutput);
     this.receiveAsyncQuestion(parsed.threadId, parsed.item);
     if (this.isUserMessageItem(parsed.item)) {
       this.handleUserMessageItem(parsed);
@@ -7079,6 +7160,12 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     store.delete(id);
     return buffered.join("");
+  }
+
+  private noteBackgroundTerminal(output: unknown): void {
+    if (typeof output === "string" && extractCodexTerminalSessionId(output)) {
+      this.backgroundTerminalSeen = true;
+    }
   }
 
   private rememberTerminalProcessForCommand(command: unknown, output: string | null): void {

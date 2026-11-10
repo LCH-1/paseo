@@ -110,6 +110,7 @@ const IMPORTABLE_SESSION_LIST_TIMEOUT_MS = 90_000;
 const BACKGROUND_WORK_WAKE_GRACE_MS = 15_000;
 /** Background work that reports nothing for this long stops holding finished attention back. */
 const BACKGROUND_WORK_QUIET_LIMIT_MS = 30 * 60 * 1000;
+const IDLE_RUNTIME_SWEEP_INTERVAL_MS = 60_000;
 const STORED_AGENT_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: false,
   supportsSessionPersistence: true,
@@ -279,6 +280,18 @@ interface HydrateTimelineOptions {
   broadcastTimeline?: boolean;
 }
 
+type ProviderSubagentHistoryEvent = Extract<AgentStreamEvent, { type: "provider_subagent" }>;
+
+interface ClosedProviderHistory {
+  rows: AgentTimelineRow[];
+  providerSubagentEvents: ProviderSubagentHistoryEvent[];
+}
+
+export interface ProviderSubagentTimelineRead {
+  descriptor: ProviderSubagentDescriptor;
+  timeline: AgentTimelineFetchResult;
+}
+
 export type ImportablePersistedAgentQueryOptions = ListImportableSessionsOptions & {
   /**
    * When set, only providers in this set are scanned, in addition to the
@@ -404,6 +417,11 @@ export interface AgentManagerOptions {
   appendSystemPrompt?: string;
   agentStreamCoalesceWindowMs?: number;
   rescueTimeouts?: AgentManagerRescueTimeouts;
+  /**
+   * Stop the provider process of an agent that has had nothing in flight for this long.
+   * The agent stays registered and idle. Unset or 0 keeps idle processes running.
+   */
+  idleRuntimeReleaseMs?: number;
   beforeSteerUnavailableFallback?: (input: {
     agentId: string;
     expectedTurnId: string;
@@ -848,6 +866,8 @@ export class AgentManager {
   private logger: Logger;
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
   private readonly beforeSteerUnavailableFallback?: AgentManagerOptions["beforeSteerUnavailableFallback"];
+  private idleRuntimeReleaseMs: number | null = null;
+  private idleRuntimeSweepTimer: ReturnType<typeof setInterval> | null = null;
   private acceptingAgentRegistrations = true;
 
   constructor(options: AgentManagerOptions) {
@@ -882,6 +902,17 @@ export class AgentManager {
       providerDefinitions: options.providerDefinitions ?? {},
       clients: options.clients ?? {},
     });
+    this.startIdleRuntimeSweep(options.idleRuntimeReleaseMs);
+  }
+
+  private startIdleRuntimeSweep(idleRuntimeReleaseMs: number | undefined): void {
+    if (!idleRuntimeReleaseMs || idleRuntimeReleaseMs <= 0) return;
+    this.idleRuntimeReleaseMs = idleRuntimeReleaseMs;
+    this.idleRuntimeSweepTimer = setInterval(
+      () => this.releaseIdleRuntimes(),
+      Math.min(IDLE_RUNTIME_SWEEP_INTERVAL_MS, idleRuntimeReleaseMs),
+    );
+    this.idleRuntimeSweepTimer.unref();
   }
 
   private configurePaseoTools(options: AgentManagerOptions): void {
@@ -945,8 +976,53 @@ export class AgentManager {
 
   prepareForShutdown(): void {
     this.acceptingAgentRegistrations = false;
+    if (this.idleRuntimeSweepTimer) {
+      clearInterval(this.idleRuntimeSweepTimer);
+      this.idleRuntimeSweepTimer = null;
+    }
     for (const agentId of this.turnRetries.keys()) {
       this.cancelPendingTurnRetry(agentId);
+    }
+  }
+
+  private releaseIdleRuntimes(): void {
+    const idleForMs = this.idleRuntimeReleaseMs;
+    if (idleForMs === null) return;
+    for (const agent of this.agents.values()) {
+      if (!agent.session.releaseIdleRuntime || !this.hasNothingInFlight(agent)) continue;
+      void this.releaseIdleRuntime(agent.id, idleForMs);
+    }
+  }
+
+  private hasNothingInFlight(agent: ActiveManagedAgent): boolean {
+    return (
+      (agent.lifecycle === "idle" || agent.lifecycle === "error") &&
+      !agent.activeForegroundTurnId &&
+      !agent.activeTurnId &&
+      !agent.pendingReplacement &&
+      agent.pendingPermissions.size === 0 &&
+      !this.runs.hasRun(agent.id) &&
+      !this.turnRetries.has(agent.id) &&
+      !this.providerSubagents.list(agent.id).some((subagent) => subagent.status === "running")
+    );
+  }
+
+  // The agent stays registered and idle, and no state is emitted: clients, attention
+  // and plugins must not see a released process as a closed conversation.
+  private async releaseIdleRuntime(agentId: string, idleForMs: number): Promise<void> {
+    try {
+      await this.runLifecycleMutation(agentId, async () => {
+        const agent = this.agents.get(agentId);
+        if (!agent?.session.releaseIdleRuntime || !this.hasNothingInFlight(agent)) return;
+        if (await agent.session.releaseIdleRuntime(idleForMs)) {
+          this.logger.info(
+            { agentId, provider: agent.provider, idleForMs },
+            "Released idle agent runtime",
+          );
+        }
+      });
+    } catch (error) {
+      this.logger.warn({ err: error, agentId }, "Failed to release idle agent runtime");
     }
   }
 
@@ -1342,7 +1418,10 @@ export class AgentManager {
           if (!this.timelineStore.has(record.id)) this.timelineStore.initialize(record.id);
           return this.timelineStore.fetch(record.id, options);
         }
-        const rows = await this.readClosedProviderHistory(record, handle);
+        const { rows, providerSubagentEvents } = await this.readClosedProviderHistory(
+          record,
+          handle,
+        );
         // Some providers return an empty stream when the transcript is missing or
         // unreadable. A successful reset would erase the client's cached conversation.
         if (rows.length === 0) {
@@ -1351,6 +1430,12 @@ export class AgentManager {
         // Collect first, then seed once. Concurrent readers share the lifecycle lane
         // and this epoch; no registry write, live session, or timeline deletion occurs.
         this.timelineStore.initialize(record.id, { rows });
+        // A later resume treats the seeded timeline as primed and skips the replay,
+        // so the replay's subagents are seeded here too.
+        this.providerSubagents.deleteParent(record.id);
+        for (const event of providerSubagentEvents) {
+          this.providerSubagents.apply(record.id, event.provider, event.event);
+        }
         return this.timelineStore.fetch(record.id, options);
       }),
     );
@@ -1387,7 +1472,7 @@ export class AgentManager {
   private async readClosedProviderHistory(
     record: StoredAgentRecord,
     handle: AgentPersistenceHandle,
-  ): Promise<AgentTimelineRow[]> {
+  ): Promise<ClosedProviderHistory> {
     const client = this.requireClient(handle.provider);
     const config = await this.normalizeConfig(
       { ...handle.metadata, ...buildStoredAgentConfig(record), provider: handle.provider },
@@ -1406,10 +1491,14 @@ export class AgentManager {
     });
     this.temporaryHistoryReaders.set(record.id, session);
     const rows: AgentTimelineRow[] = [];
+    const providerSubagentEvents: ProviderSubagentHistoryEvent[] = [];
     try {
       for await (const rawEvent of session.streamHistory()) {
-        if (rawEvent.type !== "timeline") continue;
         const event = limitAgentStreamEventContent(rawEvent);
+        if (event.type === "provider_subagent") {
+          providerSubagentEvents.push(event);
+          continue;
+        }
         if (event.type !== "timeline") continue;
         const item = projectAgentMessage(event.item);
         if (!item) continue;
@@ -1420,7 +1509,7 @@ export class AgentManager {
           ...(event.turnId ? { turnId: event.turnId } : {}),
         });
       }
-      return rows;
+      return { rows, providerSubagentEvents };
     } finally {
       await this.closeTemporaryHistoryReader(record.id);
     }
@@ -1485,6 +1574,28 @@ export class AgentManager {
 
   isProviderSubagentTimelineRequested(parentAgentId: string, subagentId: string): boolean {
     return this.providerSubagents.isTimelineRequested(parentAgentId, subagentId);
+  }
+
+  /** Read a closed agent's provider subagents from the history its timeline reads. */
+  async readStoredProviderSubagents(
+    record: StoredAgentRecord,
+  ): Promise<ProviderSubagentDescriptor[]> {
+    await this.readStoredTimeline(record, { direction: "tail", limit: 1 });
+    return this.providerSubagents.list(record.id);
+  }
+
+  async readStoredProviderSubagentTimeline(
+    record: StoredAgentRecord,
+    subagentId: string,
+    options?: AgentTimelineFetchOptions,
+  ): Promise<ProviderSubagentTimelineRead | null> {
+    await this.readStoredTimeline(record, { direction: "tail", limit: 1 });
+    const descriptor = this.providerSubagents.get(record.id, subagentId);
+    if (!descriptor) return null;
+    return {
+      descriptor,
+      timeline: this.providerSubagents.fetchTimeline(record.id, subagentId, options),
+    };
   }
 
   createAgent(
@@ -2516,15 +2627,15 @@ export class AgentManager {
     this.emitState(agent, { persist: false });
   }
 
+  // Reading a conversation must not resume its runtime, so a closed agent is
+  // marked read in storage like markAgentUnread marks it unread.
   private async clearStoredAgentAttention(agentId: string): Promise<void> {
     const registry = this.requireRegistry();
     const record = await registry.get(agentId);
-    if (!record) {
+    if (!record || record.internal) {
       throw new Error(`Agent not found: ${agentId}`);
     }
-    if (!record.requiresAttention) {
-      return;
-    }
+    if (!record.requiresAttention) return;
     const nextRecord: StoredAgentRecord = {
       ...record,
       requiresAttention: false,
@@ -2532,6 +2643,11 @@ export class AgentManager {
       attentionTimestamp: null,
     };
     await registry.upsert(nextRecord);
+    if (this.agents.has(agentId)) {
+      // A resume that read the old record during this write is live now.
+      await this.clearAgentAttention(agentId);
+      return;
+    }
     this.dispatchStoredAgentState(nextRecord);
   }
 
