@@ -1,11 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readWindowsCredentials } from "./windows-credentials.js";
-import { discover, fetchUsage, resolveClaudeCredentials } from "./usage.js";
+import { readWindowsCredentials, type ReadCredentials } from "./windows-credentials.js";
+import { discover, fetchUsage, profilesForProviders, resolveClaudeCredentials } from "./usage.js";
 import { hashAccountKey } from "@getpaseo/plugin/server/usage";
 import { inputSchema } from "../shared/input.js";
+
+/** A stand-in for the PowerShell helper: every call is one process answering all its targets. */
+function helperProcess(read: (target: string) => string | null | undefined) {
+  const starts: string[][] = [];
+  const readCredentials: ReadCredentials = async (targets) => {
+    starts.push(targets);
+    return targets.map((target) => read(target) ?? null);
+  };
+  return { starts, readCredentials };
+}
 
 describe("Claude Windows credentials", () => {
   it("does not revive stale file tokens after the CLI cleared the Windows entry", async () => {
@@ -112,42 +122,79 @@ describe("Claude Windows credentials", () => {
     const value = { claudeAiOauth: { accessToken: "isolated-transition" } };
     const encoded = Buffer.from(JSON.stringify(value)).toString("base64");
     let pass = 0;
-    const result = await readWindowsCredentials("fixture", async (name) => {
+    const helper = helperProcess((name) => {
       if (name.endsWith("#m")) {
         pass++;
         return JSON.stringify({ n: 1, l: encoded.length });
       }
       return pass === 1 ? null : encoded;
     });
+    const result = await readWindowsCredentials("fixture", helper.readCredentials);
     expect(result).toEqual(value);
   });
   it("reads legacy and split records without writing", async () => {
     const value = { claudeAiOauth: { accessToken: "fixture-only" } };
-    expect(
-      await readWindowsCredentials("fixture", async (name) =>
-        name.endsWith("#m") ? null : JSON.stringify(value),
-      ),
-    ).toEqual(value);
+    const legacy = helperProcess((name) => (name.endsWith("#m") ? null : JSON.stringify(value)));
+    expect(await readWindowsCredentials("fixture", legacy.readCredentials)).toEqual(value);
     const encoded = Buffer.from(JSON.stringify(value)).toString("base64");
     const chunks = [encoded.slice(0, 20), encoded.slice(20)];
-    expect(
-      await readWindowsCredentials("fixture", async (name) =>
-        name.endsWith("#m")
-          ? JSON.stringify({ n: 2, l: encoded.length })
-          : chunks[Number(name.at(-1))],
-      ),
-    ).toEqual(value);
-    await expect(
-      readWindowsCredentials("fixture", async (name) =>
-        name.endsWith("#m") ? JSON.stringify({ n: 2, l: encoded.length }) : null,
-      ),
-    ).rejects.toThrow("Incomplete");
+    const split = helperProcess((name) =>
+      name.endsWith("#m")
+        ? JSON.stringify({ n: 2, l: encoded.length })
+        : chunks[Number(name.at(-1))],
+    );
+    expect(await readWindowsCredentials("fixture", split.readCredentials)).toEqual(value);
+    const incomplete = helperProcess((name) =>
+      name.endsWith("#m") ? JSON.stringify({ n: 2, l: encoded.length }) : null,
+    );
+    await expect(readWindowsCredentials("fixture", incomplete.readCredentials)).rejects.toThrow(
+      "Incomplete",
+    );
+  });
+  it("starts one helper process for an unsplit or missing login and two for a split one", async () => {
+    const value = { claudeAiOauth: { accessToken: "fixture-only" } };
+    const name = "fixture/claude-code-user";
+    const legacy = helperProcess((target) => (target === name ? JSON.stringify(value) : null));
+    await readWindowsCredentials("fixture", legacy.readCredentials);
+    expect(legacy.starts).toEqual([[name + "#m", name]]);
+    const missing = helperProcess(() => null);
+    expect(await readWindowsCredentials("fixture", missing.readCredentials)).toBeNull();
+    expect(missing.starts).toEqual([[name + "#m", name]]);
+    const encoded = Buffer.from(JSON.stringify(value)).toString("base64");
+    const chunks = [encoded.slice(0, 20), encoded.slice(20)];
+    const split = helperProcess((target) =>
+      target.endsWith("#m")
+        ? JSON.stringify({ n: 2, l: encoded.length })
+        : chunks[Number(target.at(-1))],
+    );
+    await readWindowsCredentials("fixture", split.readCredentials);
+    expect(split.starts).toEqual([
+      [name + "#m", name],
+      [name + "#0", name + "#1", name + "#m"],
+    ]);
+  });
+  it("rejects a split login whose metadata changes while its chunks are read", async () => {
+    const encoded = Buffer.from(JSON.stringify({ claudeAiOauth: {} })).toString("base64");
+    let metadataReads = 0;
+    const helper = helperProcess((name) =>
+      name.endsWith("#m")
+        ? JSON.stringify({ n: 1, l: encoded.length, v: metadataReads++ })
+        : encoded,
+    );
+    await expect(readWindowsCredentials("fixture", helper.readCredentials)).rejects.toThrow(
+      "Changed",
+    );
   });
   it("rejects invalid split metadata and returns null for missing credentials", async () => {
-    expect(await readWindowsCredentials("fixture", async () => null)).toBeNull();
+    expect(
+      await readWindowsCredentials("fixture", helperProcess(() => null).readCredentials),
+    ).toBeNull();
     for (const n of [0, -1, 257, 1.5])
       await expect(
-        readWindowsCredentials("fixture", async () => JSON.stringify({ n, l: 1 })),
+        readWindowsCredentials(
+          "fixture",
+          helperProcess(() => JSON.stringify({ n, l: 1 })).readCredentials,
+        ),
       ).rejects.toThrow("metadata");
   });
   it("re-reads Windows tokens on fetch and preserves quota windows", async () => {
@@ -225,6 +272,117 @@ describe("Claude Windows credentials", () => {
       expect(seen).toContain("Claude Code-credentials");
     } finally {
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+  it("reads each Windows service once when discovering accounts or reading provider profiles", async () => {
+    const home = mkdtempSync(join(tmpdir(), "claude-windows-reads-"));
+    try {
+      mkdirSync(join(home, ".paseo"));
+      const config = join(home, "profile");
+      writeFileSync(
+        join(home, ".paseo", "config.json"),
+        JSON.stringify({
+          agents: {
+            providers: {
+              claude: {},
+              "claude-fixture": {
+                extends: "claude",
+                env: { CLAUDE_CONFIG_DIR: config, CLAUDE_SECURESTORAGE_CONFIG_DIR: config },
+              },
+            },
+          },
+        }),
+      );
+      const seen: string[] = [];
+      const lookup = {
+        home,
+        env: { USERPROFILE: home },
+        platform: "win32" as const,
+        readWindowsCredentials: async (service: string) => {
+          seen.push(service);
+          return {
+            claudeAiOauth: {
+              accessToken: "isolated-once-" + service,
+              expiresAt: Date.now() + 600_000,
+            },
+          };
+        },
+      };
+      const fetchApi = async () =>
+        Response.json({ account: { uuid: "once" }, organization: { uuid: "org" } });
+      const services = [
+        "Claude Code-credentials",
+        "Claude Code-credentials-" + hashAccountKey(config.normalize("NFC")).slice(0, 8),
+      ];
+      expect(await discover({ kind: "global" }, lookup, fetchApi)).toHaveLength(2);
+      expect(seen.toSorted()).toEqual(services);
+      seen.length = 0;
+      const profiles = await profilesForProviders(["claude", "claude-fixture"], fetchApi, lookup);
+      expect(profiles.map((profile) => profile.status)).toEqual(["ready", "ready"]);
+      expect(seen.toSorted()).toEqual(services);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+  it("gives a failed Windows read its second attempt within one discovery", async () => {
+    const env = {
+      CLAUDE_CONFIG_DIR: "C:/fixture/second-attempt",
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: "C:/fixture/second-attempt",
+    };
+    let reads = 0;
+    const accounts = await discover(
+      { kind: "session", provider: "claude", env },
+      {
+        env,
+        platform: "win32",
+        readWindowsCredentials: async () => {
+          reads++;
+          if (reads === 1) throw new Error("Claude Windows credential store could not be read");
+          return {
+            claudeAiOauth: {
+              accessToken: "isolated-second-attempt",
+              expiresAt: Date.now() + 600_000,
+            },
+          };
+        },
+      },
+      async () =>
+        Response.json({
+          account: { uuid: "second-attempt", email: "second-attempt@example.test" },
+          organization: { uuid: "org" },
+        }),
+    );
+    expect(accounts.map((account) => account.label)).toEqual(["second-attempt@example.test"]);
+    expect(reads).toBe(2);
+  });
+  it("reports a cleared login as an error logged once, and recovers when the login returns", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      let token = "";
+      const input = { route: { store: "windows-credman" as const, service: "cleared-fixture" } };
+      const lookup = {
+        platform: "win32" as const,
+        readWindowsCredentials: async () => ({
+          claudeAiOauth: { accessToken: token, expiresAt: token ? Date.now() + 100_000 : 0 },
+        }),
+      };
+      let fetches = 0;
+      const fetchApi = async () => {
+        fetches++;
+        return Response.json({ five_hour: { utilization: 20, resets_at: "2026-10-27T00:00:00Z" } });
+      };
+      const cleared = { status: "error", error: "Claude login store no longer exists" };
+      expect(await fetchUsage(input, fetchApi, lookup)).toEqual(cleared);
+      expect(await fetchUsage(input, fetchApi, lookup)).toEqual(cleared);
+      expect(fetches).toBe(0);
+      expect(warn).toHaveBeenCalledTimes(1);
+      token = "isolated-returned-login";
+      expect((await fetchUsage(input, fetchApi, lookup)).status).toBe("available");
+      token = "";
+      expect(await fetchUsage(input, fetchApi, lookup)).toEqual(cleared);
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
     }
   });
 });

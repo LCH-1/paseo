@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { UsageSourceRegistry } from "./index.js";
 
 test("compatibility sources share one fetch and freshness while retaining their report identities", async () => {
@@ -733,10 +733,12 @@ test("successful history is isolated by login set and pruned when identities ret
   available = true;
   await registry.listReports({ forceRefresh: true });
   present = false;
-  expect(await registry.listReports()).toEqual([]);
+  expect(await registry.listReports({ forceRefresh: true })).toEqual([]);
   present = true;
   available = false;
-  expect((await registry.listReports())[0]?.lastSuccessful).toBeUndefined();
+  const [returned] = await registry.listReports({ forceRefresh: true });
+  expect(returned?.report.status).toBe("error");
+  expect(returned?.lastSuccessful).toBeUndefined();
   available = true;
   await registry.listReports({ forceRefresh: true });
   registry.unregister("source");
@@ -866,7 +868,291 @@ test("failed discovery preserves history until discovery confirms account remova
   expect(afterDiscoveryRecovery?.lastSuccessful).toEqual(duringDiscoveryFailure?.lastSuccessful);
   expect(afterDiscoveryRecovery?.report).toEqual({ status: "error", error: "Rate limited" });
   present = false;
-  expect(await registry.listReports()).toEqual([]);
+  expect(await registry.listReports({ forceRefresh: true })).toEqual([]);
   present = true;
-  expect((await registry.listReports())[0]?.lastSuccessful).toBeUndefined();
+  const [returned] = await registry.listReports({ forceRefresh: true });
+  expect(returned?.report).toEqual({ status: "error", error: "Rate limited" });
+  expect(returned?.lastSuccessful).toBeUndefined();
+});
+
+test("concurrent host queries share one discovery and one fetch per account", async () => {
+  let finishDiscovery!: (accounts: Array<{ key: string; input: unknown }>) => void;
+  const discovery = new Promise<Array<{ key: string; input: unknown }>>((resolve) => {
+    finishDiscovery = resolve;
+  });
+  let discoveries = 0;
+  let fetches = 0;
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    source({
+      id: "source",
+      discover: async () => {
+        discoveries++;
+        return discovery;
+      },
+      fetch: async () => {
+        fetches++;
+        return { status: "available", windows: [] };
+      },
+    }),
+  );
+  const streamed: string[][] = [[], [], [], [], []];
+  const queries = streamed.map((updates) =>
+    registry.listReports({ onReport: (report) => updates.push(report.id) }),
+  );
+  finishDiscovery([{ key: "one", input: {} }]);
+  const listed = (await Promise.all(queries)).map((reports) => reports.map((report) => report.id));
+  const oneReportEach = [
+    ["source:one"],
+    ["source:one"],
+    ["source:one"],
+    ["source:one"],
+    ["source:one"],
+  ];
+  expect(listed).toEqual(oneReportEach);
+  expect(streamed).toEqual(oneReportEach);
+  expect(discoveries).toBe(1);
+  expect(fetches).toBe(1);
+});
+
+test("host discovery is reused while its reports are cached and renewed before they are fetched again", async () => {
+  let now = 0;
+  let login = "first";
+  let discoveries = 0;
+  const fetched: unknown[] = [];
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "source",
+      discover: async () => {
+        discoveries++;
+        return [{ key: "account", input: login }];
+      },
+      fetch: async (input) => {
+        fetched.push(input);
+        return { status: "available", windows: [] };
+      },
+    }),
+  );
+  await registry.listReports();
+  login = "second";
+  now = 66_000;
+  await registry.listReports();
+  now = 299_999;
+  await registry.listReports();
+  expect(discoveries).toBe(1);
+  expect(fetched).toEqual(["first"]);
+  now = 300_000;
+  await registry.listReports();
+  expect(discoveries).toBe(2);
+  expect(fetched).toEqual(["first", "second"]);
+});
+
+test("an account added to the host appears on a forced refresh or once the cache window ends", async () => {
+  let now = 0;
+  const accounts: string[] = [];
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "source",
+      discover: async () => accounts.map((key) => ({ key, input: key })),
+    }),
+  );
+  const ids = async (forceRefresh?: boolean) =>
+    (await registry.listReports({ forceRefresh })).map((report) => report.id);
+  expect(await ids()).toEqual([]);
+  accounts.push("a");
+  now = 299_999;
+  expect(await ids()).toEqual([]);
+  now = 300_000;
+  expect(await ids()).toEqual(["source:a"]);
+  accounts.push("b");
+  now = 366_000;
+  expect(await ids()).toEqual(["source:a"]);
+  expect(await ids(true)).toEqual(["source:a", "source:b"]);
+});
+
+test("a report whose cache expires on its own is rediscovered before it is fetched again", async () => {
+  let now = 0;
+  let discoveries = 0;
+  const fetched: unknown[] = [];
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "source",
+      discover: async () => {
+        discoveries++;
+        return ["a", "b"].map((key) => ({ key, input: key }));
+      },
+      fetch: async (input) => {
+        fetched.push(input);
+        return { status: "available", windows: [] };
+      },
+    }),
+  );
+  await registry.listReports();
+  now = 100_000;
+  await registry.listReports({ reportIds: ["source:a"], forceRefresh: true });
+  expect(discoveries).toBe(1);
+  now = 300_000;
+  await registry.listReports();
+  expect(discoveries).toBe(2);
+  // The discovery is 100 seconds old here, but report "a" has just left the fetch cache.
+  now = 400_000;
+  await registry.listReports();
+  expect(discoveries).toBe(3);
+  expect(fetched).toEqual(["a", "b", "a", "b", "a"]);
+});
+
+test("a failed host discovery keeps the accounts and is asked again by the next query", async () => {
+  let now = 0;
+  let discoveryFails = false;
+  let discoveries = 0;
+  const registry = new UsageSourceRegistry(() => now, 300_000, { warn: () => {} });
+  registry.register(
+    source({
+      id: "source",
+      discover: async () => {
+        discoveries++;
+        if (discoveryFails) throw new Error("Login store temporarily unavailable");
+        return [{ key: "account", input: {} }];
+      },
+    }),
+  );
+  await registry.listReports();
+  now = 300_000;
+  discoveryFails = true;
+  expect((await registry.listReports()).map((report) => report.id)).toEqual(["source:account"]);
+  expect(discoveries).toBe(2);
+  discoveryFails = false;
+  now = 300_001;
+  await registry.listReports();
+  expect(discoveries).toBe(3);
+  await registry.listReports();
+  expect(discoveries).toBe(3);
+  // A forced refresh that fails inside the cache window leaves nothing to reuse either.
+  discoveryFails = true;
+  await registry.listReports({ forceRefresh: true });
+  expect(discoveries).toBe(4);
+  discoveryFails = false;
+  expect((await registry.listReports()).map((report) => report.id)).toEqual(["source:account"]);
+  expect(discoveries).toBe(5);
+  await registry.listReports();
+  expect(discoveries).toBe(5);
+});
+
+test("a forced refresh that meets a running discovery is answered by one started after it", async () => {
+  let now = 0;
+  const store: string[] = [];
+  const answers: Array<() => void> = [];
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "source",
+      discover: () => {
+        // The login store is read when the discovery starts, not when it answers.
+        const accounts = store.map((key) => ({ key, input: key }));
+        return new Promise((resolve) => {
+          answers.push(() => resolve(accounts));
+        });
+      },
+    }),
+  );
+  const ids = async (query: ReturnType<typeof registry.listReports>) =>
+    (await query).map((report) => report.id);
+  const polled = registry.listReports();
+  store.push("a");
+  const forced = [1, 2, 3].map(() => registry.listReports({ forceRefresh: true }));
+  expect(answers).toHaveLength(1);
+  answers[0]!();
+  expect(await ids(polled)).toEqual([]);
+  await vi.waitFor(() => expect(answers).toHaveLength(2));
+  answers[1]!();
+  expect(await Promise.all(forced.map(ids))).toEqual([["source:a"], ["source:a"], ["source:a"]]);
+  now = 66_000;
+  expect(await ids(registry.listReports())).toEqual(["source:a"]);
+  expect(answers).toHaveLength(2);
+});
+
+test("sources in one cache group are discovered together, so a forced refresh cannot join a sibling's earlier read", async () => {
+  let now = 0;
+  let reads = 0;
+  let release = () => {};
+  let held: Promise<void> | undefined;
+  let reading: Promise<string[]> | undefined;
+  const store = ["shared"];
+  const asked: string[] = [];
+  // Like the built-in Claude sources: one store read answers every source that asks while it runs.
+  const read = (id: string) => {
+    asked.push(id);
+    reading ??= (async () => {
+      reads++;
+      const logins = [...store];
+      await held;
+      return logins;
+    })().finally(() => {
+      reading = undefined;
+    });
+    return reading;
+  };
+  const registry = new UsageSourceRegistry(() => now);
+  const account = (key: string) => ({ key, input: key });
+  registry.register({
+    ...source({ id: "all", discover: async () => [...(await read("all")), "own"].map(account) }),
+    cacheGroup: "group",
+  });
+  registry.register({
+    ...source({ id: "some", discover: async () => (await read("some")).map(account) }),
+    cacheGroup: "group",
+  });
+  await registry.listReports();
+  now = 100_000;
+  await registry.listReports({ reportIds: ["all:own"], forceRefresh: true });
+  now = 300_000;
+  await registry.listReports();
+  expect(asked).toEqual(["all", "some", "all", "some"]);
+  // Only "all:own" has left the fetch cache here, and it belongs to one of the two sources.
+  now = 400_000;
+  held = new Promise((resolve) => {
+    release = resolve;
+  });
+  const polled = registry.listReports();
+  expect(asked).toEqual(["all", "some", "all", "some", "all", "some"]);
+  expect(reads).toBe(3);
+  store.push("new");
+  const forced = registry.listReports({ forceRefresh: true });
+  release();
+  await polled;
+  expect((await forced).map((report) => report.id).sort()).toEqual([
+    "all:new",
+    "all:own",
+    "all:shared",
+    "some:new",
+    "some:shared",
+  ]);
+  expect(reads).toBe(4);
+});
+
+test("a forced refresh waiting on a running discovery does not ask a source removed meanwhile", async () => {
+  let finish = () => {};
+  let discoveries = 0;
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    source({
+      id: "source",
+      discover: () => {
+        discoveries++;
+        return new Promise((resolve) => {
+          finish = () => resolve([{ key: "one", input: {} }]);
+        });
+      },
+    }),
+  );
+  const polled = registry.listReports();
+  const forced = registry.listReports({ forceRefresh: true });
+  registry.unregister("source");
+  finish();
+  expect(await polled).toEqual([]);
+  expect(await forced).toEqual([]);
+  expect(discoveries).toBe(1);
 });

@@ -50,11 +50,28 @@ interface AgentReports {
   reports: Map<string, KnownReport>;
 }
 
+interface HostDiscovery {
+  at: number;
+  reports: Map<string, KnownReport>;
+  /** A later discovery failed: the accounts stay listed, but the source is asked again. */
+  stale?: true;
+}
+
+interface RunningHostDiscovery {
+  current: Promise<unknown>;
+  /** Starts once `current` settles, for the forced queries that arrived while it ran. */
+  next?: Promise<unknown>;
+}
+
+/** Sources that share a cache group read the same logins, so the host asks them together. */
+type HostGroup = string | UsageSource;
+
 /** Owns account identity, ordered logins for each account, and the five-minute fetch cache. */
 export class UsageSourceRegistry {
   private readonly sources = new Map<string, UsageSource>();
   private readonly known = new Map<string, KnownReport>();
-  private defaults = new Map<string, KnownReport>();
+  private readonly defaults = new Map<UsageSource, HostDiscovery>();
+  private readonly discovering = new Map<HostGroup, RunningHostDiscovery>();
   private readonly byAgent = new Map<string, AgentReports>();
   private readonly cache = new Map<string, { at: number; entry: UsageReportEntry }>();
   private readonly successful = new Map<string, NonNullable<UsageReportEntry["lastSuccessful"]>>();
@@ -74,8 +91,12 @@ export class UsageSourceRegistry {
   }
 
   unregister(id: string): void {
+    const source = this.sources.get(id);
     this.sources.delete(id);
-    for (const key of this.defaults.keys()) if (key.startsWith(`${id}:`)) this.defaults.delete(key);
+    if (source) {
+      this.defaults.delete(source);
+      this.discovering.delete(hostGroup(source));
+    }
     // Re-discover on the next session query when a source is replaced.
     for (const [agentId, mapping] of this.byAgent) {
       if ([...mapping.reports.values()].some((report) => report.source.id === id))
@@ -104,8 +125,7 @@ export class UsageSourceRegistry {
     } else if (options.reportIds !== undefined) {
       ids = options.reportIds;
     } else {
-      this.defaults = await this.discover({ kind: "global" }, this.defaults);
-      this.mergeKnown();
+      await this.discoverHost(options.forceRefresh);
       ids = [...this.known.keys()];
     }
     return Promise.all(
@@ -161,10 +181,82 @@ export class UsageSourceRegistry {
     return [...reports.keys()];
   }
 
+  /**
+   * Asks each source for the host's accounts. Concurrent queries share one answer, and a source's
+   * answer is reused for as long as the fetch cache still serves every report it produced.
+   */
+  private async discoverHost(forceRefresh = false): Promise<void> {
+    const groups = new Set([...this.sources.values()].map(hostGroup));
+    await Promise.all([...groups].map((group) => this.discoverHostGroup(group, forceRefresh)));
+    this.mergeKnown();
+  }
+
+  private discoverHostGroup(group: HostGroup, forceRefresh: boolean): Promise<unknown> {
+    const running = this.discovering.get(group);
+    if (running) {
+      if (!forceRefresh) return running.current;
+      // The running discovery may have read the login store before this query was made, and its
+      // answer would then be reused for the whole cache window. Forced queries that arrive while
+      // it runs share one discovery that starts after it.
+      running.next ??= running.current.then(() => this.discoverHostGroup(group, true));
+      return running.next;
+    }
+    const sources = [...this.sources.values()].filter((source) => hostGroup(source) === group);
+    if (!forceRefresh && sources.every((source) => this.hasFreshDiscovery(source)))
+      return Promise.resolve();
+    const started: RunningHostDiscovery = {
+      // Settles after the entry is gone, so a discovery chained on it starts a new one.
+      current: Promise.all(sources.map((source) => this.rediscoverHostSource(source))).finally(
+        () => {
+          if (this.discovering.get(group) === started) this.discovering.delete(group);
+        },
+      ),
+    };
+    this.discovering.set(group, started);
+    return started.current;
+  }
+
+  private async rediscoverHostSource(source: UsageSource): Promise<void> {
+    const at = this.now();
+    const reports = await this.discoverSource(source, { kind: "global" });
+    if (this.sources.get(source.id) !== source) return;
+    if (reports) {
+      this.defaults.set(source, { at, reports });
+      return;
+    }
+    // A failed store read does not confirm removal: keep the accounts and ask again.
+    const found = this.defaults.get(source);
+    if (found) found.stale = true;
+  }
+
+  private hasFreshDiscovery(source: UsageSource): boolean {
+    const found = this.defaults.get(source);
+    if (!found || found.stale || this.now() - found.at >= this.ttlMs) return false;
+    // A report about to reach the vendor again must use the login its store holds now.
+    return [...found.reports.keys()].every((id) => this.hasFreshFetch(id));
+  }
+
+  private hasFreshFetch(id: string): boolean {
+    const known = this.known.get(id);
+    if (!known) return false;
+    const cacheKey = cacheIdentity(id, known);
+    if (this.pending.has(cacheKey)) return true;
+    const cached = this.cache.get(cacheKey);
+    return cached !== undefined && this.now() - cached.at < this.ttlMs;
+  }
+
+  /** Each registered source's host accounts, in registration order. */
+  private hostReports(): Map<string, KnownReport>[] {
+    return [...this.sources.values()].flatMap((source) => {
+      const found = this.defaults.get(source);
+      return found ? [found.reports] : [];
+    });
+  }
+
   private mergeKnown(): void {
     this.known.clear();
     for (const reports of [
-      this.defaults,
+      ...this.hostReports(),
       ...[...this.byAgent.values()].map((agent) => agent.reports),
     ]) {
       for (const [id, report] of reports) {
@@ -190,56 +282,57 @@ export class UsageSourceRegistry {
     return new Set(
       [
         this.known,
-        this.defaults,
+        ...this.hostReports(),
         ...[...this.byAgent.values()].map((agent) => agent.reports),
       ].flatMap((reports) => [...reports].map(([id, report]) => cacheIdentity(id, report))),
     );
   }
 
-  private async discover(
-    scope: UsageScope,
-    previous: ReadonlyMap<string, KnownReport> = new Map(),
-  ): Promise<Map<string, KnownReport>> {
+  private async discover(scope: UsageScope): Promise<Map<string, KnownReport>> {
     const discovered = await Promise.all(
-      [...this.sources.values()].map(async (source) => {
-        const reports = new Map<string, KnownReport>();
-        try {
-          const accounts = z
-            .array(
-              z.object({
-                key: z.string().regex(/^[A-Za-z0-9._-]{1,128}$/),
-                label: z.string().optional(),
-                harness: z.string().min(1).optional(),
-                input: z.json(),
-              }),
-            )
-            .parse(await source.discover(scope));
-          for (const account of accounts) {
-            const id = `${source.id}:${account.key}`;
-            const known = reports.get(id);
-            // COMPAT(usageLoginHarness): added in v0.11.0, remove after 2027-04-05 once plugin floor >= v0.11.0.
-            const login = { input: account.input, harness: account.harness ?? source.label };
-            if (known) {
-              if (!known.logins.some((existing) => loginKey(existing) === loginKey(login)))
-                known.logins.push(login);
-            } else reports.set(id, { source, logins: [login], label: account.label });
-          }
-        } catch (error) {
-          this.logger.warn({ sourceId: source.id, err: error }, "Usage source discovery failed");
-          // A failed store read does not confirm removal. Session discovery has no previous
-          // mapping because a resumed agent may use a different launch environment.
-          for (const [id, report] of previous) {
-            if (report.source === source) reports.set(id, report);
-          }
-        }
-        return reports;
-      }),
+      [...this.sources.values()].map((source) => this.discoverSource(source, scope)),
     );
     const merged = new Map<string, KnownReport>();
+    // Session discovery keeps nothing from a failed source because a resumed agent may use a
+    // different launch environment.
     for (const reports of discovered) {
-      for (const [id, report] of reports) merged.set(id, report);
+      for (const [id, report] of reports ?? []) merged.set(id, report);
     }
     return merged;
+  }
+
+  /** The accounts a source reports for a scope, or null when it could not be asked. */
+  private async discoverSource(
+    source: UsageSource,
+    scope: UsageScope,
+  ): Promise<Map<string, KnownReport> | null> {
+    const reports = new Map<string, KnownReport>();
+    try {
+      const accounts = z
+        .array(
+          z.object({
+            key: z.string().regex(/^[A-Za-z0-9._-]{1,128}$/),
+            label: z.string().optional(),
+            harness: z.string().min(1).optional(),
+            input: z.json(),
+          }),
+        )
+        .parse(await source.discover(scope));
+      for (const account of accounts) {
+        const id = `${source.id}:${account.key}`;
+        const known = reports.get(id);
+        // COMPAT(usageLoginHarness): added in v0.11.0, remove after 2027-04-05 once plugin floor >= v0.11.0.
+        const login = { input: account.input, harness: account.harness ?? source.label };
+        if (known) {
+          if (!known.logins.some((existing) => loginKey(existing) === loginKey(login)))
+            known.logins.push(login);
+        } else reports.set(id, { source, logins: [login], label: account.label });
+      }
+    } catch (error) {
+      this.logger.warn({ sourceId: source.id, err: error }, "Usage source discovery failed");
+      return null;
+    }
+    return reports;
   }
 
   // COMPAT(providerUsageList): added in v0.1.98, remove after 2027-03-26.
@@ -410,6 +503,10 @@ function loginKey(login: Login): string {
       ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
       : value,
   );
+}
+
+function hostGroup(source: UsageSource): HostGroup {
+  return source.cacheGroup || source;
 }
 
 function cacheIdentity(id: string, known: KnownReport): string {

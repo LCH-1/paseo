@@ -271,15 +271,15 @@ test("OMP fetch re-reads its row after rotation and skips a newly disabled login
   ).toBe("unavailable");
   db.prepare("UPDATE auth_credentials SET disabled_cause = 'revoked' WHERE id = 1").run();
   db.close();
-  await expect(
-    fetchUsage(
+  expect(
+    await fetchUsage(
       input!,
       async () => {
         throw new Error("must not fetch");
       },
       lookup(),
     ),
-  ).rejects.toThrow("login store no longer exists");
+  ).toEqual({ status: "error", error: "Claude login store no longer exists" });
 });
 
 test("Claude discovery honors CLAUDE_CONFIG_DIR", async () => {

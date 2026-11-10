@@ -366,11 +366,35 @@ async function keychainCredentialRecord(
   return parsed.success ? toCredentialRecord(parsed.data) : null;
 }
 
+/**
+ * Choosing a login's route and then resolving it read the same Windows credential, and each read
+ * starts a PowerShell process. One query reads a service once; a failed read is not kept, and
+ * nothing outlives the query, so a later fetch still sees the token the store holds then.
+ */
+function sharingWindowsReads(lookup: ClaudeCredentialLookup): ClaudeCredentialLookup {
+  const read = lookup.readWindowsCredentials ?? readWindowsCredentials;
+  const reads = new Map<string, Promise<unknown | null>>();
+  return {
+    ...lookup,
+    readWindowsCredentials: (service) => {
+      const shared = reads.get(service);
+      if (shared) return shared;
+      const request = read(service);
+      reads.set(service, request);
+      request.catch(() => {
+        if (reads.get(service) === request) reads.delete(service);
+      });
+      return request;
+    },
+  };
+}
+
 export async function discover(
   scope: UsageScope,
   lookup: ClaudeCredentialLookup = {},
   fetchApi: typeof fetch = fetch,
 ): Promise<UsageAccount[]> {
+  lookup = sharingWindowsReads(lookup);
   if (scope.kind === "session")
     lookup = {
       ...lookup,
@@ -618,7 +642,8 @@ export async function fetchUsage(
   }
 
   const credentials = await resolveClaudeCredentials(input, credentialLookup);
-  if (!credentials) throw new Error("Claude login store no longer exists");
+  if (!credentials) return missingLogin(input);
+  missingLogins.delete(JSON.stringify(input.route));
   const refreshedBy =
     input.route.store === "claude" ||
     input.route.store === "keychain" ||
@@ -682,6 +707,19 @@ export async function fetchUsage(
 // A 429 from the usage endpoint carries Retry-After, observed in the tens of minutes. Until it
 // passes, a fetch (including a forced Refresh) answers from here instead of calling again.
 const rateLimitedUntil = new Map<string, number>();
+
+// A login cleared from its store stays cleared until the user signs in again, so it is reported
+// as the account's state and logged once, not thrown for the daemon to log on every poll.
+const missingLogins = new Set<string>();
+
+function missingLogin(input: UsageInput): UsageReport {
+  const store = JSON.stringify(input.route);
+  if (!missingLogins.has(store)) {
+    missingLogins.add(store);
+    console.warn({ route: input.route }, "Claude login store is empty; usage needs a new login");
+  }
+  return { status: "error", error: "Claude login store no longer exists" };
+}
 
 function retryAfterMs(header: string | null, now: number): number | null {
   if (!header) return null;
@@ -801,13 +839,14 @@ export async function profilesForProviders(
   lookup: ClaudeCredentialLookup = {},
 ) {
   const configured = await configuredClaudeProviders(lookup);
+  const shared = sharingWindowsReads(lookup);
   return Promise.all(
     [...new Set(ids)].map(async (providerId) => {
       try {
         const provider = configured.find((entry) => entry.id === providerId);
         if (!provider) return { providerId, status: "missing" as const };
         const scoped = {
-          ...lookup,
+          ...shared,
           env: { ...(lookup.env ?? process.env), ...provider.env },
           claudeHome: provider.env.CLAUDE_CONFIG_DIR ?? lookup.claudeHome,
         };

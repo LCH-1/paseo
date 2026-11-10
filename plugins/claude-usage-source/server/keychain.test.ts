@@ -153,15 +153,17 @@ describe("Claude credential routes", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
-  it("throws without fetching when the routed file has no credentials", async () => {
+  it("reports a missing login without fetching when the routed file has no credentials", async () => {
     const dir = mkdtempSync(join(tmpdir(), "claude-empty-config-"));
     try {
       const fetchApi = vi.fn() as unknown as typeof fetch;
-      await expect(
-        fetchUsage({ route: { store: "claude", path: join(dir, ".credentials.json") } }, fetchApi, {
-          platform: "linux",
-        }),
-      ).rejects.toThrow("Claude login store no longer exists");
+      expect(
+        await fetchUsage(
+          { route: { store: "claude", path: join(dir, ".credentials.json") } },
+          fetchApi,
+          { platform: "linux" },
+        ),
+      ).toEqual({ status: "error", error: "Claude login store no longer exists" });
       expect(fetchApi).not.toHaveBeenCalled();
     } finally {
       rmSync(dir, { recursive: true, force: true });
