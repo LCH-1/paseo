@@ -6,6 +6,7 @@ import type {
   SessionEventSubscription,
   UsageReportEntry,
   ProviderUsage,
+  WSHelloMessage,
 } from "@getpaseo/protocol/messages";
 import { relative } from "node:path";
 import { isAbsolute } from "node:path";
@@ -108,7 +109,11 @@ import {
   type WorkspaceLabelService,
 } from "./workspace-labels/index.js";
 
-import { AgentManager, AgentRunCancellationError } from "./agent/agent-manager.js";
+import {
+  AgentManager,
+  AgentRunCancellationError,
+  AgentTurnInProgressError,
+} from "./agent/agent-manager.js";
 import { ProviderSubagentUpsertCoalescer } from "./agent/provider-subagents/upsert-coalescer.js";
 import { buildTimelinePromptIndex } from "./agent/timeline-prompt-index.js";
 import { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
@@ -330,6 +335,12 @@ function clientUsesLegacyWorkspaceRestore(appVersion: string | null): boolean {
   );
 }
 
+// The app's reload is a person acting on a session they can see. Every other
+// client type is a script (CLI, plugin, MCP, hub) and must not cut a turn short.
+function refreshMayCancelActiveTurn(clientType: SessionOptions["clientType"]): boolean {
+  return clientType === "mobile" || clientType === "browser";
+}
+
 type DeleteFencedAgentStorage = AgentStorage & {
   beginDelete(agentId: string): void;
 };
@@ -453,6 +464,7 @@ type AgentMcpTransportFactory = () => Promise<unknown>;
 export interface SessionOptions {
   browserToolsBroker?: BrowserToolsBroker | null;
   clientId: string;
+  clientType?: WSHelloMessage["clientType"];
   permissions: readonly DaemonPermission[];
   appVersion?: string | null;
   clientCapabilities?: Record<string, unknown> | null;
@@ -709,6 +721,7 @@ export class Session {
   );
   private readonly browserToolsBroker: SessionOptions["browserToolsBroker"];
   private readonly clientId: string;
+  private readonly clientType: SessionOptions["clientType"];
   private readonly authorization: SessionAuthorization;
   private appVersion: string | null;
   private clientCapabilities: ReadonlySet<ClientCapability>;
@@ -878,6 +891,7 @@ export class Session {
     } = options;
     this.browserToolsBroker = options.browserToolsBroker;
     this.clientId = clientId;
+    this.clientType = options.clientType;
     this.authorization = new SessionAuthorization(permissions);
     this.appVersion = appVersion ?? null;
     this.clientCapabilities = parseClientCapabilities(clientCapabilities);
@@ -4709,17 +4723,27 @@ export class Session {
     msg: Extract<SessionInboundMessage, { type: "refresh_agent_request" }>,
   ): Promise<void> {
     const { agentId, requestId } = msg;
-    this.sessionLogger.info({ agentId }, `Refreshing agent ${agentId} from persistence`);
+    const activeTurn = refreshMayCancelActiveTurn(this.clientType) ? "cancel" : "refuse";
+    const turnInProgress = this.agentManager.isTurnInProgress(agentId);
+    const requester = { agentId, clientType: this.clientType, activeTurn, turnInProgress };
+    this.sessionLogger.info(requester, `Refreshing agent ${agentId} from persistence`);
 
     try {
+      // Refuse before restoring or unarchiving on behalf of a request that will not run.
+      if (turnInProgress && activeTurn === "refuse") {
+        throw new AgentTurnInProgressError(agentId);
+      }
       await this.restoreOwningWorkspaceForLegacyAgentRefresh(agentId);
       await unarchiveAgentState(this.agentStorage, this.agentManager, agentId);
       let snapshot: ManagedAgent;
       const existing = this.agentManager.getAgent(agentId);
       if (existing) {
-        await this.interruptAgentIfRunning(agentId);
+        if (activeTurn === "cancel") {
+          await this.interruptAgentIfRunning(agentId);
+        }
         snapshot = await this.agentManager.reloadAgentSession(agentId, undefined, {
           rehydrateFromDisk: true,
+          activeTurn,
         });
       } else {
         const record = await this.agentStorage.get(agentId);
@@ -4746,6 +4770,7 @@ export class Session {
       await this.agentManager.hydrateTimelineFromProvider(agentId, { broadcast: true });
       await this.agentUpdates.forwardLiveAgent(snapshot);
       const timelineSize = this.agentManager.getTimeline(agentId).length;
+      this.sessionLogger.info({ ...requester, timelineSize }, `Refreshed agent ${agentId}`);
       if (requestId) {
         this.emit({
           type: "status",
@@ -4759,6 +4784,17 @@ export class Session {
       }
     } catch (error) {
       const message = getErrorMessage(error);
+      if (error instanceof AgentTurnInProgressError) {
+        // The turn keeps running, so this refusal is the expected outcome, not a failure.
+        this.sessionLogger.info(requester, `Refused to refresh agent ${agentId}: turn in progress`);
+        if (requestId) {
+          this.emit({
+            type: "rpc_error",
+            payload: { requestId, requestType: msg.type, error: message, code: error.code },
+          });
+        }
+        return;
+      }
       this.sessionLogger.error({ err: error, agentId }, `Failed to refresh agent ${agentId}`);
       if (requestId) {
         this.emit({

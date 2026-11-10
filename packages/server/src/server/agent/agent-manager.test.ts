@@ -14,6 +14,7 @@ import { createTestLogger } from "../../test-utils/test-logger.js";
 import {
   AgentManager,
   AgentManagerShuttingDownError,
+  AgentTurnInProgressError,
   commandMayHaveChangedExternalState,
   type AgentManagerEvent,
   type ManagedAgent,
@@ -3142,6 +3143,162 @@ test("cancelAgentRun succeeds when the provider queues completion before rejecti
     });
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test("a reload that refuses active turns leaves the running turn alone, then reloads once idle", async () => {
+  const fixture = await createControlledInterruptFixture({
+    name: "guarded-reload-running",
+    agentId: "00000000-0000-4000-8000-000000000307",
+    turnId: "guarded-reload-turn",
+    interrupt: async () => undefined,
+  });
+  const turnEndings: string[] = [];
+  const unsubscribe = fixture.manager.subscribe(
+    (event) => {
+      if (event.type !== "agent_stream") return;
+      if (event.event.type === "turn_completed" || event.event.type === "turn_canceled") {
+        turnEndings.push(event.event.type);
+      }
+    },
+    { agentId: fixture.agentId, replayState: false },
+  );
+
+  try {
+    await fixture.startForegroundRun();
+
+    await expect(
+      fixture.manager.reloadAgentSession(fixture.agentId, undefined, {
+        rehydrateFromDisk: true,
+        activeTurn: "refuse",
+      }),
+    ).rejects.toBeInstanceOf(AgentTurnInProgressError);
+
+    expect(fixture.session.interruptCalled).toBe(false);
+    expect(fixture.manager.getAgent(fixture.agentId)?.session).toBe(fixture.session);
+    expect(fixture.manager.getAgent(fixture.agentId)).toMatchObject({
+      lifecycle: "running",
+      activeForegroundTurnId: "guarded-reload-turn",
+    });
+
+    const idle = waitForAgentLifecycle(fixture.manager, fixture.agentId, "idle");
+    fixture.session.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "guarded-reload-turn",
+    });
+    await idle;
+    expect(turnEndings).toEqual(["turn_completed"]);
+
+    const reloaded = await fixture.manager.reloadAgentSession(fixture.agentId, undefined, {
+      rehydrateFromDisk: true,
+      activeTurn: "refuse",
+    });
+    expect(reloaded.lifecycle).toBe("idle");
+    expect(reloaded.session).not.toBe(fixture.session);
+  } finally {
+    unsubscribe();
+    await fixture.cleanup();
+  }
+});
+
+test("a reload that refuses active turns leaves a waiting permission prompt alone", async () => {
+  const fixture = await createControlledInterruptFixture({
+    name: "guarded-reload-permission",
+    agentId: "00000000-0000-4000-8000-000000000308",
+    turnId: "guarded-reload-permission-turn",
+    interrupt: async () => undefined,
+  });
+
+  try {
+    fixture.session.pushEvent({
+      type: "permission_requested",
+      provider: "codex",
+      request: { id: "guarded-reload-permission", provider: "codex", kind: "tool", name: "Read" },
+    });
+    await vi.waitFor(() =>
+      expect(fixture.manager.getAgent(fixture.agentId)?.pendingPermissions.size).toBe(1),
+    );
+    expect(fixture.manager.hasInFlightRun(fixture.agentId)).toBe(false);
+
+    await expect(
+      fixture.manager.reloadAgentSession(fixture.agentId, undefined, { activeTurn: "refuse" }),
+    ).rejects.toBeInstanceOf(AgentTurnInProgressError);
+
+    expect(fixture.manager.getAgent(fixture.agentId)?.session).toBe(fixture.session);
+    expect(fixture.manager.getPendingPermissions(fixture.agentId)).toEqual([
+      { id: "guarded-reload-permission", provider: "codex", kind: "tool", name: "Read" },
+    ]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a reload that refuses active turns yields to a turn that started while it was queued", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-guarded-reload-queued-"));
+  const holdEntered = deferred<void>();
+  const holdReleased = deferred<void>();
+  // Holding one snapshot write keeps the lifecycle lane busy, so the reload queues behind it.
+  class HeldSnapshotStorage extends AgentStorage {
+    holdNextSnapshot = false;
+
+    override async applySnapshot(
+      ...args: Parameters<AgentStorage["applySnapshot"]>
+    ): Promise<void> {
+      if (this.holdNextSnapshot) {
+        this.holdNextSnapshot = false;
+        holdEntered.resolve();
+        await holdReleased.promise;
+      }
+      await super.applySnapshot(...args);
+    }
+  }
+  const storage = new HeldSnapshotStorage(join(workdir, "agents"), logger);
+  const session = new ControlledInterruptSession(
+    { provider: "codex", cwd: workdir },
+    "queued-reload-turn",
+    async () => undefined,
+  );
+  const client = new (class extends TestAgentClient {
+    override async createSession(): Promise<AgentSession> {
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    storage.holdNextSnapshot = true;
+    const labeling = manager.setLabels(agent.id, { purpose: "hold-lifecycle-lane" });
+    await holdEntered.promise;
+
+    const refused = expect(
+      manager.reloadAgentSession(agent.id, undefined, { activeTurn: "refuse" }),
+    ).rejects.toBeInstanceOf(AgentTurnInProgressError);
+    const run = drainAsyncGenerator(manager.streamAgent(agent.id, "work that must survive"));
+    await manager.waitForAgentRunStart(agent.id);
+    holdReleased.resolve();
+    await labeling;
+    await refused;
+
+    expect(session.interruptCalled).toBe(false);
+    expect(client.resumeOverrides).toEqual([]);
+    expect(manager.getAgent(agent.id)?.session).toBe(session);
+    expect(manager.getAgent(agent.id)).toMatchObject({
+      lifecycle: "running",
+      activeForegroundTurnId: "queued-reload-turn",
+    });
+
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "queued-reload-turn" });
+    await run;
+    await manager.closeAgent(agent.id);
+  } finally {
+    holdReleased.resolve();
+    await manager.flush();
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
   }
 });
 
@@ -10389,6 +10546,20 @@ test("backs off and stops after three automatic capacity retries", async () => {
     });
     await vi.advanceTimersByTimeAsync(300_000);
     expect(session.prompts).toHaveLength(4);
+  });
+});
+
+test("a refused reload keeps the automatic retry of the turn it left running", async () => {
+  await withCapacityFailureAgent(async ({ manager, agentId, session }) => {
+    const run = drainAsyncGenerator(manager.streamAgent(agentId, "original work"));
+    await expect(
+      manager.reloadAgentSession(agentId, undefined, { activeTurn: "refuse" }),
+    ).rejects.toBeInstanceOf(AgentTurnInProgressError);
+    await vi.advanceTimersByTimeAsync(0);
+    await run;
+    await vi.advanceTimersByTimeAsync(30_001);
+    await manager.flush();
+    expect(session.prompts).toEqual(["original work", TURN_RETRY_CONTINUATION]);
   });
 });
 

@@ -2933,8 +2933,9 @@ class ClaudeAgentSession implements AgentSession {
     this.settledSubagentToolCalls.clear();
     this.taskProtocolSource.reset();
     this.input?.end();
+    // close() tears down the SDK transport, so an interrupt written after it can
+    // only fail. The turn was already settled above and the process is killed below.
     this.query?.close?.();
-    await this.awaitWithTimeout(this.query?.interrupt?.(), "close query interrupt");
     await this.awaitWithTimeout(this.query?.return?.(), "close query return");
     this.query = null;
     this.input = null;

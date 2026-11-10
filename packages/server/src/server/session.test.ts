@@ -27,7 +27,7 @@ import { OWNER_PERMISSIONS, type DaemonPermission } from "./authorization/index.
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import { StructuredAgentFallbackError } from "./agent/agent-response-loop.js";
 import type { StoredAgentRecord } from "./agent/agent-storage.js";
-import type { AgentManagerEvent } from "./agent/agent-manager.js";
+import { AgentTurnInProgressError, type AgentManagerEvent } from "./agent/agent-manager.js";
 import { InMemoryAgentTimelineStore } from "./agent/agent-timeline-store.js";
 import type { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
 import { WorkspaceLabelError, type WorkspaceLabelService } from "./workspace-labels/index.js";
@@ -61,6 +61,7 @@ import type { CheckDetails, ForgeService } from "../services/forge-service.js";
 import type { GitHubPullRequestStatusFacts } from "../services/github-facts.js";
 
 interface SessionHandlerInternals {
+  agentUpdates: { forwardLiveAgent(agent: unknown): Promise<void> };
   interruptAgentIfRunning(agentId: string): Promise<void>;
   handleSendAgentMessage(
     agentId: string,
@@ -185,6 +186,153 @@ test("legacy cancel_agent_request reports refusal through the activity log", asy
       },
     },
   ]);
+});
+
+describe("refresh_agent_request while a turn is in progress", () => {
+  const agentId = "11111111-1111-4111-8111-111111111131";
+  const refusal = {
+    type: "rpc_error",
+    payload: {
+      requestId: "refresh-1",
+      requestType: "refresh_agent_request",
+      error: `Cannot reload agent ${agentId} while a turn is in progress. Wait for the turn to finish or stop it first.`,
+      code: "agent_turn_in_progress",
+    },
+  };
+  const refreshed = {
+    type: "status",
+    payload: { status: "agent_refreshed", agentId, requestId: "refresh-1", timelineSize: 0 },
+  };
+
+  function createRefreshFixture(options: {
+    clientType: SessionOptions["clientType"];
+    turnInProgress: boolean;
+    reloadAgentSession?: () => Promise<unknown>;
+  }) {
+    const messages: SessionOutboundMessage[] = [];
+    const logs: Array<Record<string, unknown>> = [];
+    const agent = {
+      id: agentId,
+      provider: "codex",
+      lifecycle: options.turnInProgress ? "running" : "idle",
+    };
+    const agentManager = {
+      getAgent: vi.fn(() => agent),
+      isTurnInProgress: vi.fn(() => options.turnInProgress),
+      hasInFlightRun: vi.fn(() => options.turnInProgress),
+      cancelAgentRun: vi.fn(async () => ({ status: "settled" as const })),
+      unarchiveSnapshot: vi.fn(async () => false),
+      reloadAgentSession: vi.fn(options.reloadAgentSession ?? (async () => agent)),
+      hydrateTimelineFromProvider: vi.fn(async () => undefined),
+      getTimeline: vi.fn(() => []),
+    };
+    const session = createSessionForTest({
+      messages,
+      clientType: options.clientType,
+      logger: pino({ level: "info" }, { write: (line: string) => logs.push(JSON.parse(line)) }),
+      agentManager,
+    });
+    asSessionInternals(session).agentUpdates.forwardLiveAgent = async () => undefined;
+    const refreshLogs = () =>
+      logs
+        .filter((entry) => entry.agentId === agentId)
+        .map((entry) => ({
+          level: entry.level,
+          msg: entry.msg,
+          clientId: entry.clientId,
+          clientType: entry.clientType,
+          activeTurn: entry.activeTurn,
+        }));
+    return { session, messages, agentManager, refreshLogs };
+  }
+
+  test("a CLI client is refused and the running turn is left alone", async () => {
+    const { session, messages, agentManager, refreshLogs } = createRefreshFixture({
+      clientType: "cli",
+      turnInProgress: true,
+    });
+
+    await session.handleMessage({
+      type: "refresh_agent_request",
+      agentId,
+      requestId: "refresh-1",
+    });
+
+    expect(messages).toEqual([refusal]);
+    expect(agentManager.cancelAgentRun).not.toHaveBeenCalled();
+    expect(agentManager.unarchiveSnapshot).not.toHaveBeenCalled();
+    expect(agentManager.reloadAgentSession).not.toHaveBeenCalled();
+    const caller = { clientId: "test-client", clientType: "cli", activeTurn: "refuse" };
+    expect(refreshLogs()).toEqual([
+      { level: 30, msg: `Refreshing agent ${agentId} from persistence`, ...caller },
+      { level: 30, msg: `Refused to refresh agent ${agentId}: turn in progress`, ...caller },
+    ]);
+  });
+
+  test("a CLI client still reloads an idle agent", async () => {
+    const { session, messages, agentManager, refreshLogs } = createRefreshFixture({
+      clientType: "cli",
+      turnInProgress: false,
+    });
+
+    await session.handleMessage({
+      type: "refresh_agent_request",
+      agentId,
+      requestId: "refresh-1",
+    });
+
+    expect(messages).toEqual([refreshed]);
+    expect(agentManager.cancelAgentRun).not.toHaveBeenCalled();
+    expect(agentManager.reloadAgentSession).toHaveBeenCalledWith(agentId, undefined, {
+      rehydrateFromDisk: true,
+      activeTurn: "refuse",
+    });
+    expect(refreshLogs().at(-1)).toEqual({
+      level: 30,
+      msg: `Refreshed agent ${agentId}`,
+      clientId: "test-client",
+      clientType: "cli",
+      activeTurn: "refuse",
+    });
+  });
+
+  test("a turn that starts while the reload is queued is refused the same way", async () => {
+    const { session, messages } = createRefreshFixture({
+      clientType: "cli",
+      turnInProgress: false,
+      reloadAgentSession: async () => {
+        throw new AgentTurnInProgressError(agentId);
+      },
+    });
+
+    await session.handleMessage({
+      type: "refresh_agent_request",
+      agentId,
+      requestId: "refresh-1",
+    });
+
+    expect(messages).toEqual([refusal]);
+  });
+
+  test("the app's explicit reload still stops the running turn first", async () => {
+    const { session, messages, agentManager } = createRefreshFixture({
+      clientType: "mobile",
+      turnInProgress: true,
+    });
+
+    await session.handleMessage({
+      type: "refresh_agent_request",
+      agentId,
+      requestId: "refresh-1",
+    });
+
+    expect(messages).toEqual([refreshed]);
+    expect(agentManager.cancelAgentRun).toHaveBeenCalledWith(agentId);
+    expect(agentManager.reloadAgentSession).toHaveBeenCalledWith(agentId, undefined, {
+      rehydrateFromDisk: true,
+      activeTurn: "cancel",
+    });
+  });
 });
 
 test("timeline fetch returns agent_not_found only for a missing durable agent", async () => {
@@ -472,6 +620,8 @@ vi.mock("./worktree-bootstrap.js", async (importOriginal) => {
 
 interface SessionForTestOptions {
   clientId?: string;
+  clientType?: SessionOptions["clientType"];
+  logger?: pino.Logger;
   permissions?: readonly DaemonPermission[];
   agentManager?: { [K in keyof SessionOptions["agentManager"]]?: unknown };
   agentStorage?: { [K in keyof SessionOptions["agentStorage"]]?: unknown };
@@ -518,7 +668,7 @@ interface SessionForTestOptions {
 }
 
 function createSessionForTest(options: SessionForTestOptions = {}): Session {
-  const logger = pino({ level: "silent" });
+  const logger = options.logger ?? pino({ level: "silent" });
   const github = options.github ?? {
     invalidate: vi.fn(),
     searchIssuesAndPrs: vi.fn(),
@@ -553,6 +703,7 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
     messageReceipts: createMessageReceiptsStub(),
     creationService: createTestCreationService(),
     clientId: options.clientId ?? "test-client",
+    clientType: options.clientType,
     onMessage: (message) => messages.push(message),
     ...(options.targetedMessages
       ? {

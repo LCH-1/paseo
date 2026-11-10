@@ -663,6 +663,75 @@ class FailingResumeClient extends NonPersistentReloadClient {
   }
 }
 
+/** A turn stays open until the test finishes it or the daemon interrupts it. */
+class HeldTurnSession extends NonPersistentReloadSession {
+  private readonly subscribers = new Set<(event: AgentStreamEvent) => void>();
+  private activeTurnId: string | null = null;
+  private startedTurns = 0;
+
+  constructor(
+    onClose: () => void,
+    private readonly onInterrupt: () => void,
+  ) {
+    super(onClose);
+  }
+
+  subscribe(callback: (event: AgentStreamEvent) => void): () => void {
+    this.subscribers.add(callback);
+    return () => this.subscribers.delete(callback);
+  }
+
+  async startTurn(): Promise<{ turnId: string }> {
+    const turnId = `held-turn-${++this.startedTurns}`;
+    this.activeTurnId = turnId;
+    setTimeout(() => this.emit({ type: "turn_started", provider: "claude", turnId }), 0);
+    return { turnId };
+  }
+
+  finishTurn(): void {
+    this.endTurn((turnId) => ({ type: "turn_completed", provider: "claude", turnId }));
+  }
+
+  async interrupt(): Promise<void> {
+    this.onInterrupt();
+    this.endTurn((turnId) => ({
+      type: "turn_canceled",
+      provider: "claude",
+      reason: "interrupted",
+      turnId,
+    }));
+  }
+
+  private endTurn(terminal: (turnId: string) => AgentStreamEvent): void {
+    const turnId = this.activeTurnId;
+    if (!turnId) return;
+    this.activeTurnId = null;
+    this.emit(terminal(turnId));
+  }
+
+  private emit(event: AgentStreamEvent): void {
+    for (const subscriber of this.subscribers) subscriber(event);
+  }
+}
+
+class HeldTurnClient extends NonPersistentReloadClient {
+  interruptCalls = 0;
+  current: HeldTurnSession | null = null;
+
+  async createSession(_config: AgentSessionConfig): Promise<AgentSession> {
+    this.createSessionCalls += 1;
+    this.current = new HeldTurnSession(
+      () => {
+        this.closeCalls += 1;
+      },
+      () => {
+        this.interruptCalls += 1;
+      },
+    );
+    return this.current;
+  }
+}
+
 function resolveSpeechConfig() {
   if (hasLocalSpeech) {
     return {
@@ -935,6 +1004,90 @@ test("refresh_agent rejects when persisted session resume fails", async () => {
     });
     expect(client.resumeSessionCalls).toBe(1);
   } finally {
+    await localCtx.cleanup();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("refresh_agent from a scripted client leaves a running turn alone", async () => {
+  const cwd = tmpCwd();
+  const client = new HeldTurnClient();
+  const localCtx = await createDaemonTestContext({
+    agentClients: {
+      claude: client,
+    },
+  });
+  const isRunning = (snapshot: { status: string }) => snapshot.status === "running";
+  const isIdle = (snapshot: { status: string }) => snapshot.status === "idle";
+
+  try {
+    const created = await localCtx.client.createAgent({
+      config: {
+        provider: "claude",
+        cwd,
+      },
+    });
+    await localCtx.client.sendMessage(created.id, "work that must not be cut short");
+    await localCtx.client.waitForAgentUpsert(created.id, isRunning);
+
+    await expect(localCtx.client.refreshAgent(created.id)).rejects.toMatchObject({
+      name: "DaemonRpcError",
+      code: "agent_turn_in_progress",
+      requestType: "refresh_agent_request",
+    });
+    expect(client.interruptCalls).toBe(0);
+    expect(client.closeCalls).toBe(0);
+    expect(client.createSessionCalls).toBe(1);
+
+    client.current?.finishTurn();
+    await localCtx.client.waitForAgentUpsert(created.id, isIdle);
+
+    await localCtx.client.refreshAgent(created.id);
+    expect(client.interruptCalls).toBe(0);
+    expect(client.closeCalls).toBe(1);
+    expect(client.createSessionCalls).toBe(2);
+  } finally {
+    await localCtx.cleanup();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("refresh_agent from the app still stops a running turn and reloads", async () => {
+  const cwd = tmpCwd();
+  const client = new HeldTurnClient();
+  const localCtx = await createDaemonTestContext({
+    agentClients: {
+      claude: client,
+    },
+  });
+  const appClient = new DaemonClient({
+    url: `ws://127.0.0.1:${localCtx.daemon.port}/ws`,
+    clientType: "mobile",
+  });
+
+  try {
+    await appClient.connect();
+    const created = await localCtx.client.createAgent({
+      config: {
+        provider: "claude",
+        cwd,
+      },
+    });
+    await localCtx.client.sendMessage(created.id, "work the user chooses to interrupt");
+    await localCtx.client.waitForAgentUpsert(
+      created.id,
+      (snapshot) => snapshot.status === "running",
+    );
+
+    await appClient.refreshAgent(created.id);
+
+    expect(client.interruptCalls).toBe(1);
+    expect(client.closeCalls).toBe(1);
+    expect(client.createSessionCalls).toBe(2);
+    const reloaded = await localCtx.client.fetchAgent({ agentId: created.id });
+    expect(reloaded?.agent.status).toBe("idle");
+  } finally {
+    await appClient.close();
     await localCtx.cleanup();
     rmSync(cwd, { recursive: true, force: true });
   }

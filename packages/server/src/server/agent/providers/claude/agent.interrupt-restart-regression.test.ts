@@ -1,3 +1,4 @@
+import pino from "pino";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
@@ -471,10 +472,87 @@ test("closing a session settles its active foreground stream", async () => {
     const events = await collectUntilTerminal(turn);
     expect(events.filter((event) => event.type === "turn_canceled")).toHaveLength(1);
     expect(observed.filter((event) => event.type === "turn_canceled")).toHaveLength(1);
-    expect(query.interrupt).toHaveBeenCalledTimes(1);
+    expect(query.close).toHaveBeenCalledTimes(1);
+    expect(query.interrupt).not.toHaveBeenCalled();
   } finally {
     unsubscribe();
   }
+});
+
+/**
+ * The SDK tears its transport down inside close(), after which every control write rejects.
+ * Warnings are captured from a real logger so a failed write shows up the way it does in daemon.log.
+ */
+async function startTurnOnClosableTransport(sessionId: string) {
+  const warnings: Array<Record<string, unknown>> = [];
+  const logger = pino(
+    { level: "warn" },
+    { write: (line: string) => warnings.push(JSON.parse(line)) },
+  );
+  const queries: ScriptedQuery[] = [];
+  queryFactory.mockImplementation(({ prompt }: { prompt: AsyncIterable<unknown> }) => {
+    const query = createScriptedQuery({ prompt, sessionId });
+    let transportClosed = false;
+    query.close.mockImplementation(() => {
+      transportClosed = true;
+    });
+    query.interrupt.mockImplementation(async () => {
+      if (transportClosed) throw new Error("ProcessTransport is not ready for writing");
+    });
+    queries.push(query);
+    return query;
+  });
+  const session = await new ClaudeAgentClient({
+    logger,
+    queryFactory,
+    resolveBinary: async () => "/test/claude/bin",
+  }).createSession({ provider: "claude", cwd: process.cwd() });
+  const turn = streamSession(session, "original prompt");
+  await turn.next();
+  await waitFor(() => queries[0]?.prompts.length === 1);
+  await waitForInitRouted(() => queries[0]);
+  return { session, query: queries[0]!, turn, warnings };
+}
+
+test("closing a running session leaves the transport it just closed alone", async () => {
+  const { session, query, warnings } = await startTurnOnClosableTransport("close-running-quiet");
+
+  await session.close();
+
+  expect(query.close).toHaveBeenCalledTimes(1);
+  expect(query.interrupt).not.toHaveBeenCalled();
+  expect(query.return).toHaveBeenCalledTimes(1);
+  expect(warnings).toEqual([]);
+});
+
+test("closing an idle session leaves the transport it just closed alone", async () => {
+  const { session, query, turn, warnings } = await startTurnOnClosableTransport("close-idle-quiet");
+  query.emit(buildSuccessResult("close-idle-quiet"));
+  const events = await collectUntilTerminal(turn);
+  expect(events.at(-1)?.type).toBe("turn_completed");
+
+  await session.close();
+
+  expect(query.close).toHaveBeenCalledTimes(1);
+  expect(query.interrupt).not.toHaveBeenCalled();
+  expect(warnings).toEqual([]);
+});
+
+test("a query that fails to wind down on close is still reported", async () => {
+  const { session, query, warnings } = await startTurnOnClosableTransport("close-return-fails");
+  query.return.mockImplementationOnce(async () => {
+    query.end();
+    throw new Error("query iterator already destroyed");
+  });
+
+  await session.close();
+
+  expect(warnings).toEqual([
+    expect.objectContaining({
+      msg: "Claude query operation did not settle cleanly",
+      label: "close query return",
+    }),
+  ]);
 });
 
 test("an abort result without a requested interrupt fails its foreground turn", async () => {

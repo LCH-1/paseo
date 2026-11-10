@@ -150,6 +150,17 @@ export class AgentRunCancellationError extends Error {
   }
 }
 
+export class AgentTurnInProgressError extends Error {
+  readonly code = "agent_turn_in_progress";
+
+  constructor(readonly agentId: string) {
+    super(
+      `Cannot reload agent ${agentId} while a turn is in progress. Wait for the turn to finish or stop it first.`,
+    );
+    this.name = "AgentTurnInProgressError";
+  }
+}
+
 export type AgentRunCancellationResult =
   | { status: "not_running" }
   | { status: "settled" }
@@ -307,6 +318,12 @@ export interface ProviderAvailability {
 interface AgentManagerRescueTimeouts {
   reloadSessionCloseMs?: number;
   interruptSessionMs?: number;
+}
+
+export interface ReloadAgentSessionOptions {
+  rehydrateFromDisk?: boolean;
+  /** What to do with a turn that is still in progress. Defaults to "cancel". */
+  activeTurn?: "cancel" | "refuse";
 }
 
 interface PendingTurnRetry {
@@ -1024,6 +1041,12 @@ export class AgentManager {
     );
   }
 
+  /** A run is in flight or a permission prompt is still waiting for its answer. */
+  isTurnInProgress(agentId: string): boolean {
+    const pendingPermissionCount = this.agents.get(agentId)?.pendingPermissions.size ?? 0;
+    return this.hasInFlightRun(agentId) || pendingPermissionCount > 0;
+  }
+
   subscribe(callback: AgentSubscriber, options?: SubscribeOptions): () => void {
     const targetAgentId =
       options?.agentId == null ? null : validateAgentId(options.agentId, "subscribe");
@@ -1734,8 +1757,12 @@ export class AgentManager {
   reloadAgentSession(
     agentId: string,
     overrides?: Partial<AgentSessionConfig>,
-    options?: { rehydrateFromDisk?: boolean },
+    options?: ReloadAgentSessionOptions,
   ): Promise<ManagedAgent> {
+    // Refuse before dropping the retry entry: it belongs to the turn that keeps running.
+    if (options?.activeTurn === "refuse" && this.isTurnInProgress(agentId)) {
+      return Promise.reject(new AgentTurnInProgressError(agentId));
+    }
     this.cancelPendingTurnRetry(agentId);
     return this.trackAgentRegistrationOperation(
       this.runLifecycleMutation(agentId, () =>
@@ -1747,14 +1774,11 @@ export class AgentManager {
   private async reloadAgentSessionInternal(
     agentId: string,
     overrides?: Partial<AgentSessionConfig>,
-    options?: { rehydrateFromDisk?: boolean },
+    options?: ReloadAgentSessionOptions,
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
-    let existing = this.requireSessionAgent(agentId);
-    if (this.hasInFlightRun(agentId)) {
-      await this.cancelAgentRunBefore(agentId, "reload");
-      existing = this.requireSessionAgent(agentId);
-    }
+    await this.clearActiveTurnForReload(agentId, options);
+    const existing = this.requireSessionAgent(agentId);
     this.raiseDeferredFinishedAttention(agentId, { cause: "runtime_released", notify: false });
     const rehydrateFromDisk = options?.rehydrateFromDisk ?? false;
     const preservedHistoryPrimed = existing.historyPrimed;
@@ -1854,6 +1878,19 @@ export class AgentManager {
           await this.closeUnregisteredSession(session);
         }
       }
+    }
+  }
+
+  private async clearActiveTurnForReload(
+    agentId: string,
+    options: ReloadAgentSessionOptions | undefined,
+  ): Promise<void> {
+    // A turn can start while this reload is queued in the lifecycle lane.
+    if (options?.activeTurn === "refuse" && this.isTurnInProgress(agentId)) {
+      throw new AgentTurnInProgressError(agentId);
+    }
+    if (this.hasInFlightRun(agentId)) {
+      await this.cancelAgentRunBefore(agentId, "reload");
     }
   }
 
