@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { View, type StyleProp, type ViewStyle } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { clampPct } from "./format";
+import type { UsageDisplayAs } from "./preferences";
 import type { UsageTone } from "./types";
 
 function fillToneStyle(tone: UsageTone) {
@@ -25,20 +26,28 @@ export function UsageMeter({
   percent,
   tone,
   quiet = false,
+  displayAs,
   style,
 }: {
   percent: number;
   tone: UsageTone;
   quiet?: boolean;
+  /** A split bar uses fixed colors for used and remaining amounts. */
+  displayAs?: UsageDisplayAs;
   style?: StyleProp<ViewStyle>;
 }) {
   const fillWidth = clampPct(percent);
-  const fillStyle = useMemo<StyleProp<ViewStyle>>(
-    () => [styles.fill, quiet ? styles.fillQuiet : fillToneStyle(tone), { width: `${fillWidth}%` }],
-    [fillWidth, quiet, tone],
-  );
+  const fillStyle = useMemo<StyleProp<ViewStyle>>(() => {
+    let color = quiet ? styles.fillQuiet : fillToneStyle(tone);
+    if (displayAs === "used") color = styles.used;
+    else if (displayAs === "remaining") color = styles.remaining;
+    return [styles.fill, color, { width: `${fillWidth}%` }];
+  }, [displayAs, fillWidth, quiet, tone]);
+  let trackColor;
+  if (displayAs === "used") trackColor = styles.remaining;
+  else if (displayAs === "remaining") trackColor = styles.used;
   return (
-    <View style={[styles.track, style]}>
+    <View style={[styles.track, trackColor, style]}>
       <View style={fillStyle} />
     </View>
   );
@@ -59,6 +68,8 @@ const styles = StyleSheet.create((theme) => ({
   fillQuiet: {
     backgroundColor: theme.colors.surface4,
   },
+  used: { backgroundColor: theme.colors.statusWarning },
+  remaining: { backgroundColor: theme.colors.statusSuccess },
   fillDefault: {
     backgroundColor: theme.colors.foregroundMuted,
   },

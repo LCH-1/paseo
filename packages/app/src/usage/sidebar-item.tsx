@@ -89,6 +89,7 @@ function PinnedUsageTrigger({
   sources: readonly PinnedUsageSource[];
   onPress: () => void;
 }) {
+  const { preferences } = useUsagePreferences();
   return (
     <Tooltip delayDuration={250}>
       <TooltipTrigger asChild>
@@ -115,7 +116,7 @@ function PinnedUsageTrigger({
                     <UsageMeter
                       percent={window.percent}
                       tone={window.tone}
-                      quiet
+                      displayAs={preferences.displayAs}
                       style={styles.meter}
                     />
                   </View>
@@ -127,6 +128,12 @@ function PinnedUsageTrigger({
       </TooltipTrigger>
       <TooltipContent side="top" align="end" offset={8} testID="sidebar-usage-details">
         <View style={styles.details}>
+          <View style={styles.legend}>
+            <View style={[styles.swatch, styles.used]} />
+            <Text style={styles.detail}>사용량</Text>
+            <View style={[styles.swatch, styles.remaining]} />
+            <Text style={styles.detail}>남은 양</Text>
+          </View>
           {sources.flatMap((source) =>
             source.windows.map((window) => (
               <Text key={window.key} style={styles.detail}>
@@ -186,4 +193,8 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.popoverForeground,
     fontSize: theme.fontSize.sm,
   },
+  legend: { flexDirection: "row", alignItems: "center", gap: theme.spacing[1.5] },
+  swatch: { width: 8, height: 8, borderRadius: 2 },
+  used: { backgroundColor: theme.colors.statusWarning },
+  remaining: { backgroundColor: theme.colors.statusSuccess },
 }));
