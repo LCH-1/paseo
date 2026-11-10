@@ -771,7 +771,7 @@ export class AgentManager {
   private readonly backgroundTasks = new Set<Promise<void>>();
   private readonly agentRegistrationTasks = new Set<Promise<void>>();
   private readonly inFlightAgentCloses = new Map<string, Promise<void>>();
-  private readonly reloadedSessionCloses = new WeakMap<AgentSession, Promise<void>>();
+  private readonly sessionCloses = new WeakMap<AgentSession, Promise<void>>();
   private readonly lifecycleMutationTails = new Map<string, Promise<void>>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
@@ -1675,14 +1675,19 @@ export class AgentManager {
     }
   }
 
-  private async closeReloadedSession(session: AgentSession, agentId: string): Promise<void> {
-    let operation = this.reloadedSessionCloses.get(session);
+  private closeSession(session: AgentSession): Promise<void> {
+    let operation = this.sessionCloses.get(session);
     if (!operation) {
       operation = session.close();
-      this.reloadedSessionCloses.set(session, operation);
+      this.sessionCloses.set(session, operation);
       // Keep pending closes across request timeouts; a retry must await the same release.
-      void operation.catch(() => this.reloadedSessionCloses.delete(session));
+      void operation.catch(() => this.sessionCloses.delete(session));
     }
+    return operation;
+  }
+
+  private async closeReloadedSession(session: AgentSession, agentId: string): Promise<void> {
+    const operation = this.closeSession(session);
     const result = await this.waitWithTimeout({
       operation,
       timeoutMs: this.rescueTimeouts.reloadSessionCloseMs,
@@ -1800,9 +1805,11 @@ export class AgentManager {
       "agent.manager.close.start",
     );
     await this.drainSessionEvents(agentId);
+    if (this.agents.get(agentId) !== agent) return;
     // Retain ownership until shutdown succeeds. A failed close may still own a
     // native writer, so publishing a resumable closed snapshot would orphan it.
-    await agent.session.close();
+    await this.closeSession(agent.session);
+    if (this.agents.get(agentId) !== agent) return;
     this.cancelRunningProviderSubagents(agentId);
     const closedAgent = this.prepareAgentForClosure(agent, "agent closed");
 
@@ -3643,7 +3650,7 @@ export class AgentManager {
       owner?: AgentOwner;
     },
   ): Promise<ManagedAgent> {
-    let registered = false;
+    let registeredAgent: ActiveManagedAgent | undefined;
     try {
       this.assertAcceptingAgentRegistrations();
       const resolvedAgentId = validateAgentId(agentId, "registerSession");
@@ -3683,7 +3690,7 @@ export class AgentManager {
 
       this.assertAcceptingAgentRegistrations();
       this.agents.set(resolvedAgentId, managed);
-      registered = true;
+      registeredAgent = managed;
       // Initialize previousStatus to track transitions
       this.previousStatuses.set(resolvedAgentId, managed.lifecycle);
       if (session.initialTimeline?.length) {
@@ -3724,11 +3731,45 @@ export class AgentManager {
       this.assertAgentRegistrationActive(managed);
       return { ...managed };
     } catch (error) {
-      if (!registered) {
+      if (!registeredAgent) {
         await this.closeUnregisteredSession(session);
+      } else {
+        await this.closeFailedRegistration(registeredAgent, error);
       }
       throw error;
     }
+  }
+
+  private async closeFailedRegistration(agent: ActiveManagedAgent, error: unknown): Promise<void> {
+    if (this.agents.get(agent.id) !== agent) return;
+    try {
+      await this.closeReloadedSession(agent.session, agent.id);
+    } catch (closeError) {
+      if (this.agents.get(agent.id) === agent) {
+        agent.lifecycle = "error";
+        agent.lastError = error instanceof Error ? error.message : String(error);
+        this.emitState(agent, { persist: false });
+      }
+      this.logger.warn(
+        { err: closeError, registrationError: error, agentId: agent.id },
+        "Failed to close partially registered agent session",
+      );
+      return;
+    }
+    await this.drainSessionEvents(agent.id);
+    if (this.agents.get(agent.id) !== agent) return;
+    const closed = this.prepareAgentForClosure(agent, "agent registration failed");
+    try {
+      // Keep existing conversations retryable, without creating a record for a
+      // new session whose first snapshot never committed.
+      if (await this.registry?.get(agent.id)) await this.persistSnapshot(closed);
+    } catch (persistError) {
+      this.logger.warn(
+        { err: persistError, registrationError: error, agentId: agent.id },
+        "Failed to persist closed agent after registration failure",
+      );
+    }
+    this.emitClosedAgent(closed, { persist: false });
   }
 
   private assertAcceptingAgentRegistrations(): void {

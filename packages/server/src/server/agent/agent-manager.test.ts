@@ -12009,6 +12009,193 @@ test("commits startup notices once on create and after restored history", async 
   }
 });
 
+test("failed registration snapshot closes its session and removes initializing residency", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-register-failure-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const session = new CloseRecordingTestAgentSession({ provider: "codex", cwd: workdir });
+  const client = new (class extends TestAgentClient {
+    override async createSession() {
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  const failure = new Error("Registration snapshot unavailable");
+  vi.spyOn(storage, "applySnapshot").mockRejectedValueOnce(failure);
+  try {
+    await expect(
+      manager.createAgent({ provider: "codex", cwd: workdir }, session.id, {
+        workspaceId: undefined,
+      }),
+    ).rejects.toBe(failure);
+    expect({ closed: session.closed, agent: manager.getAgent(session.id) }).toEqual({
+      closed: true,
+      agent: null,
+    });
+    expect(await storage.get(session.id)).toBeNull();
+  } finally {
+    for (const agent of manager.listAgents()) await manager.closeAgent(agent.id);
+    await manager.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("failed registration resume preserves the durable conversation for another load", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-register-resume-failure-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new TestAgentClient();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  try {
+    const original = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: "owned-register-workspace",
+      labels: { purpose: "owned-register-fixture" },
+    });
+    await manager.appendTimelineItem(original.id, { type: "assistant_message", text: "Retain me" });
+    await manager.closeAgent(original.id);
+    const before = await storage.get(original.id);
+    const failure = new Error("Resume snapshot unavailable");
+    vi.spyOn(storage, "applySnapshot").mockRejectedValueOnce(failure);
+    await expect(
+      ensureAgentLoaded(original.id, { agentManager: manager, agentStorage: storage, logger }),
+    ).rejects.toBe(failure);
+    expect(manager.getAgent(original.id)).toBeNull();
+    expect(await storage.get(original.id)).toMatchObject({
+      id: original.id,
+      lastStatus: "closed",
+      title: before?.title,
+      labels: before?.labels,
+      workspaceId: before?.workspaceId,
+      createdAt: before?.createdAt,
+    });
+    const restored = await ensureAgentLoaded(original.id, {
+      agentManager: manager,
+      agentStorage: storage,
+      logger,
+    });
+    expect(restored?.lifecycle).toBe("idle");
+    expect(manager.getTimeline(original.id)).toContainEqual({
+      type: "assistant_message",
+      text: "Retain me",
+    });
+  } finally {
+    for (const agent of manager.listAgents()) await manager.closeAgent(agent.id);
+    await manager.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("failed registration after persistence closes the session when subscription fails", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-register-subscribe-failure-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const session = new CloseRecordingTestAgentSession({ provider: "codex", cwd: workdir });
+  const client = new (class extends TestAgentClient {
+    override async createSession() {
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  const failure = new Error("Subscription unavailable");
+  vi.spyOn(session, "subscribe").mockImplementationOnce(() => {
+    throw failure;
+  });
+  try {
+    await expect(
+      manager.createAgent({ provider: "codex", cwd: workdir }, session.id, {
+        workspaceId: undefined,
+      }),
+    ).rejects.toBe(failure);
+    expect({ closed: session.closed, agent: manager.getAgent(session.id) }).toEqual({
+      closed: true,
+      agent: null,
+    });
+    expect(await storage.get(session.id)).toMatchObject({ lastStatus: "closed" });
+  } finally {
+    for (const agent of manager.listAgents()) await manager.closeAgent(agent.id);
+    await manager.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("failed registration retains error ownership when session cleanup fails", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-register-close-failure-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const session = new TestAgentSession({ provider: "codex", cwd: workdir });
+  const client = new (class extends TestAgentClient {
+    override async createSession() {
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  const failure = new Error("Registration snapshot unavailable");
+  const closeFailure = new Error("Session still owns its writer");
+  vi.spyOn(storage, "applySnapshot").mockRejectedValueOnce(failure);
+  const close = vi
+    .spyOn(session, "close")
+    .mockRejectedValueOnce(closeFailure)
+    .mockRejectedValueOnce(closeFailure)
+    .mockResolvedValue(undefined);
+  const resume = vi.spyOn(client, "resumeSession");
+  try {
+    await expect(
+      manager.createAgent({ provider: "codex", cwd: workdir }, session.id, {
+        workspaceId: undefined,
+      }),
+    ).rejects.toBe(failure);
+    expect(manager.getAgent(session.id)).toMatchObject({
+      lifecycle: "error",
+      lastError: failure.message,
+    });
+    expect(close).toHaveBeenCalledTimes(1);
+    await expect(manager.reloadAgentSession(session.id)).rejects.toBe(closeFailure);
+    expect(resume).not.toHaveBeenCalled();
+    const restored = await manager.reloadAgentSession(session.id);
+    expect(restored.lifecycle).toBe("idle");
+    expect(resume).toHaveBeenCalledTimes(1);
+  } finally {
+    close.mockResolvedValue(undefined);
+    for (const agent of manager.listAgents()) await manager.closeAgent(agent.id);
+    await manager.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("failed registration and a concurrent explicit close share session retirement", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-register-concurrent-close-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const session = new TestAgentSession({ provider: "codex", cwd: workdir });
+  const closeStarted = deferred<void>();
+  const closeAllowed = deferred<void>();
+  const close = vi.spyOn(session, "close").mockImplementation(async () => {
+    closeStarted.resolve();
+    await closeAllowed.promise;
+  });
+  const client = new (class extends TestAgentClient {
+    override async createSession() {
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  const failure = new Error("Registration snapshot unavailable");
+  vi.spyOn(storage, "applySnapshot").mockRejectedValueOnce(failure);
+  const creation = manager
+    .createAgent({ provider: "codex", cwd: workdir }, session.id, { workspaceId: undefined })
+    .catch((error: unknown) => error);
+  try {
+    await closeStarted.promise;
+    const closing = manager.closeAgent(session.id);
+    await Promise.resolve();
+    closeAllowed.resolve();
+    expect(await creation).toBe(failure);
+    await closing;
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(manager.getAgent(session.id)).toBeNull();
+  } finally {
+    closeAllowed.resolve();
+    for (const agent of manager.listAgents()) await manager.closeAgent(agent.id);
+    await manager.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("failed startup history closes the session without registering an agent", async () => {
   let closed = false;
   class FailingHistorySession extends TestAgentSession {
