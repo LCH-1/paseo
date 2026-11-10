@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "@/stores/session-store";
-import { buildWorkspaceAgentActivityIndex } from "./workspace-agent-activity";
+import {
+  buildWorkspaceAgentActivityIndex,
+  resolveWorkspaceProvider,
+} from "./workspace-agent-activity";
 
 function agent(input: {
   id: string;
@@ -318,5 +321,94 @@ describe("workspace agent activity index", () => {
       status: "needs_input",
       enteredAt: new Date("2026-06-01T10:05:00.000Z"),
     });
+  });
+});
+
+describe("workspace provider presentation", () => {
+  const latest = agent({
+    id: "codex-root",
+    workspaceId: "workspace-a",
+    updatedAt: "2026-06-01T10:05:00.000Z",
+  });
+  const selected = {
+    ...agent({
+      id: "claude-root",
+      workspaceId: "workspace-a",
+      updatedAt: "2026-06-01T10:00:00.000Z",
+    }),
+    provider: "claude",
+  };
+  const agents = new Map([
+    [latest.id, latest],
+    [selected.id, selected],
+  ]);
+  const activity = buildWorkspaceAgentActivityIndex(agents).get("workspace-a");
+
+  it("shows the selected conversation's provider even when another provider was active later", () => {
+    expect(activity?.agentId).toBe(latest.id);
+    expect(
+      resolveWorkspaceProvider({
+        serverId: "host-a",
+        workspaceId: "workspace-a",
+        selectedAgentId: selected.id,
+        agents,
+        activity,
+      }),
+    ).toBe("claude");
+    expect(agents.get(latest.id)?.provider).toBe("codex");
+  });
+
+  it("keeps window selections independent and does not change the shared activity representative", () => {
+    const input = { serverId: "host-a", workspaceId: "workspace-a", agents, activity };
+    expect(resolveWorkspaceProvider({ ...input, selectedAgentId: latest.id })).toBe("codex");
+    expect(resolveWorkspaceProvider({ ...input, selectedAgentId: selected.id })).toBe("claude");
+    expect(activity?.agentId).toBe(latest.id);
+  });
+
+  it.each([
+    { serverId: "host-b" },
+    { workspaceId: "workspace-b" },
+    { archivedAt: new Date("2026-06-01T11:00:00.000Z") },
+  ])("ignores a selected conversation outside this active host/workspace: %j", (override) => {
+    const invalid = { ...selected, ...override };
+    expect(
+      resolveWorkspaceProvider({
+        serverId: "host-a",
+        workspaceId: "workspace-a",
+        selectedAgentId: invalid.id,
+        agents: new Map([
+          [latest.id, latest],
+          [invalid.id, invalid],
+        ]),
+        activity,
+      }),
+    ).toBe("codex");
+  });
+
+  it.each([null, "missing-agent"])(
+    "uses the representative when a terminal/file or missing conversation is selected: %s",
+    (selectedAgentId) => {
+      expect(
+        resolveWorkspaceProvider({
+          serverId: "host-a",
+          workspaceId: "workspace-a",
+          selectedAgentId,
+          agents,
+          activity,
+        }),
+      ).toBe("codex");
+    },
+  );
+
+  it("shows no provider when neither selection nor representative belongs to this workspace", () => {
+    expect(
+      resolveWorkspaceProvider({
+        serverId: "host-b",
+        workspaceId: "workspace-a",
+        selectedAgentId: selected.id,
+        agents,
+        activity,
+      }),
+    ).toBeUndefined();
   });
 });

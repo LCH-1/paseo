@@ -3,6 +3,12 @@ import { View, type ViewStyle } from "react-native";
 import { useProviderIcon } from "@/components/provider-icons";
 import { DensityIcon } from "@/components/ui/density-icon";
 import { useSessionStore } from "@/stores/session-store";
+import {
+  collectAllTabs,
+  findPaneById,
+  useWorkspaceLayoutStore,
+} from "@/stores/workspace-layout-store";
+import { resolveWorkspaceProvider } from "@/utils/workspace-agent-activity";
 
 export function WorkspaceProviderIcon({
   serverId,
@@ -11,16 +17,42 @@ export function WorkspaceProviderIcon({
   serverId: string;
   workspaceId: string;
 }) {
-  // Use the same representative root conversation as the workspace status, without
-  // scanning every conversation or subscribing to message content for each row.
+  const workspaceKey = `${serverId}:${workspaceId}`;
+  const selectedAgentId = useWorkspaceLayoutStore(
+    useCallback(
+      (state) => {
+        const sheet = state.sheetsByWorkspace[workspaceKey]?.at(-1)?.tab;
+        if (sheet?.target.kind === "agent") return sheet.target.agentId;
+        const layout = state.layoutByWorkspace[workspaceKey];
+        if (!layout) return null;
+        const pane = findPaneById(
+          layout.root,
+          layout.focusedPaneId ?? state.focusRestorationByWorkspace[workspaceKey]?.restorePaneId,
+        );
+        if (!pane?.focusedTabId || pane.hidden) return null;
+        const tab = collectAllTabs({ kind: "pane", pane }).find(
+          (candidate) => candidate.tabId === pane.focusedTabId,
+        );
+        return tab?.target.kind === "agent" ? tab.target.agentId : null;
+      },
+      [workspaceKey],
+    ),
+  );
+  // The workspace's latest conversation can use another provider than the one
+  // selected in this window. Display that selection without changing its model.
   const provider = useSessionStore(
     useCallback(
       (state) => {
         const session = state.sessions[serverId];
-        const activity = session?.workspaceAgentActivity.get(workspaceId);
-        return activity ? session?.agents.get(activity.agentId)?.provider : undefined;
+        return resolveWorkspaceProvider({
+          serverId,
+          workspaceId,
+          selectedAgentId,
+          agents: session?.agents,
+          activity: session?.workspaceAgentActivity.get(workspaceId),
+        });
       },
-      [serverId, workspaceId],
+      [serverId, workspaceId, selectedAgentId],
     ),
   );
   return provider ? <SidebarProviderIcon provider={provider} serverId={serverId} /> : null;

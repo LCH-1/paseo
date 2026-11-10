@@ -8,6 +8,25 @@ export interface WorkspaceAgentActivity {
   enteredAt: Date | null;
 }
 
+export function resolveWorkspaceProvider(input: {
+  serverId: string;
+  workspaceId: string;
+  selectedAgentId: string | null;
+  agents: ReadonlyMap<string, Agent> | undefined;
+  activity: WorkspaceAgentActivity | undefined;
+}): string | undefined {
+  const providerFor = (agentId: string | null | undefined) => {
+    const agent = agentId ? input.agents?.get(agentId) : undefined;
+    return agent &&
+      agent.serverId === input.serverId &&
+      agent.workspaceId === input.workspaceId &&
+      !agent.archivedAt
+      ? agent.provider
+      : undefined;
+  };
+  return providerFor(input.selectedAgentId) ?? providerFor(input.activity?.agentId);
+}
+
 function workspaceAgentStatus(agent: Agent): Agent["status"] {
   if (agent.turn.phase === "open") return "running";
   return agent.status === "running" ? "idle" : agent.status;
