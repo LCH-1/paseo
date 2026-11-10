@@ -146,7 +146,13 @@ it("groups projects by host and opens the selected host's own project", async ()
       <span>Workspaces</span>
     </SidebarActivityPanel>,
   );
-  fireEvent.click(screen.getByRole("tab", { name: "settings.projects" }));
+  const projectAction = screen.getByRole("button", { name: "settings.projects" });
+  expect(
+    within(screen.getByTestId("sidebar-activity-tabs")).queryByRole("tab", {
+      name: "settings.projects",
+    }),
+  ).toBeNull();
+  fireEvent.click(projectAction);
   const list = within(screen.getByTestId("sidebar-project-list"));
   expect(list.getByRole("heading", { name: "Company" })).toBeTruthy();
   expect(list.getByRole("heading", { name: "Gaming" })).toBeTruthy();
@@ -174,7 +180,7 @@ it("blocks duplicate opens and allows retry after a rejected native open", async
         <span>Workspaces</span>
       </SidebarActivityPanel>,
     );
-    fireEvent.click(screen.getByRole("tab", { name: "settings.projects" }));
+    fireEvent.click(screen.getByRole("button", { name: "settings.projects" }));
     const row = screen.getByTestId("sidebar-project-host:host-project");
     fireEvent.click(row);
     fireEvent.click(row);
@@ -196,7 +202,7 @@ it("keeps available projects visible when another host fails and offers retry", 
       <span>Workspaces</span>
     </SidebarActivityPanel>,
   );
-  fireEvent.click(screen.getByRole("tab", { name: "settings.projects" }));
+  fireEvent.click(screen.getByRole("button", { name: "settings.projects" }));
   expect(screen.getByRole("alert").textContent).toBe("settings.projectList.hostLoadFailed");
   expect(screen.getByTestId("sidebar-project-host:host-project")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "common.actions.retry" }));
@@ -210,5 +216,5 @@ it("hides the native project window action when no desktop bridge is available",
       <span>Workspaces</span>
     </SidebarActivityPanel>,
   );
-  expect(screen.queryByRole("tab", { name: "settings.projects" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "settings.projects" })).toBeNull();
 });

@@ -12,6 +12,8 @@ import { useTranslation } from "react-i18next";
 import { FlatList, Text, View, type LayoutChangeEvent } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { create } from "zustand";
+import { FolderOpen } from "lucide-react-native";
+import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
 import { RetainedPanel, useRetainedPanelActive } from "@/components/retained-panel";
 import { PressHighlight } from "@/components/ui/press-highlight";
 import { Button } from "@/components/ui/button";
@@ -28,6 +30,7 @@ import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { density } from "@/styles/density";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { subscribeToRelativeTimeTick } from "@/utils/relative-time-ticker";
+import { shortenPath } from "@/utils/shorten-path";
 import type { RelativeTimeResolution } from "@/utils/time";
 import { useHistoryConversations } from "@/screens/session-history/use-history-conversations";
 import {
@@ -49,7 +52,7 @@ const useSidebarActivityStore = create<SidebarActivityState>((set) => ({
   view: "all",
   setView: (view) => set({ view }),
 }));
-const activityViews = ["all", "running", "unreviewed", "projects"] as const;
+const activityViews = ["all", "running", "unreviewed"] as const;
 
 function sessionKey(row: ActivityRow) {
   return `${row.agent.serverId}:${row.agent.id}`;
@@ -66,6 +69,8 @@ export function SidebarActivityPanel({
 }) {
   const { t } = useTranslation();
   const view = useSidebarActivityStore((state) => state.view);
+  const setView = useSidebarActivityStore((state) => state.setView);
+  const showProjects = useCallback(() => setView("projects"), [setView]);
   const hostFilters = useSidebarViewStore((state) => state.hostFilters);
   const hosts = useHosts();
   const serverIds = useMemo(() => hosts.map((host) => host.serverId), [hosts]);
@@ -85,12 +90,21 @@ export function SidebarActivityPanel({
 
   return (
     <View style={styles.container}>
+      {canOpenProjects ? (
+        <SidebarHeaderRow
+          icon={FolderOpen}
+          label={t("settings.projects")}
+          onPress={showProjects}
+          isActive={view === "projects"}
+          testID="sidebar-activity-projects"
+          variant="compact"
+        />
+      ) : null}
       <View style={styles.tabsSection} testID="sidebar-activity-filter-section">
         <View style={styles.tabs} accessibilityRole="tablist" testID="sidebar-activity-tabs">
           {activityViews.map((tab) => {
-            if (tab === "projects" && !canOpenProjects) return null;
             const selected = view === tab;
-            const label = t(tab === "projects" ? "settings.projects" : `sidebar.activity.${tab}`);
+            const label = t(`sidebar.activity.${tab}`);
             const count = tab === "running" || tab === "unreviewed" ? groups[tab].length : null;
             return (
               <ActivityTab key={tab} tab={tab} selected={selected} label={label} count={count} />
@@ -238,7 +252,7 @@ const ProjectWindowRow = memo(function ProjectWindowRow({
             {item.name}
           </Text>
           <Text numberOfLines={1} style={styles.preview}>
-            {item.host.repoRoot}
+            {shortenPath(item.host.repoRoot)}
           </Text>
         </View>
       ) : null,
