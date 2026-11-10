@@ -50,6 +50,31 @@ describe("tokenizeToLines", () => {
     const second = tokenizeToLines("const cached = true;", "ts");
     expect(first).toBe(second);
   });
+
+  it("evicts older token-heavy results while retaining recently used small results", () => {
+    const denseCode = (index: number) =>
+      `// dense cache fixture ${index}\n` +
+      "const value = 123; function f(x) { return x + 1; }\n".repeat(1900);
+    const firstCode = denseCode(0);
+    const first = tokenizeToLines(firstCode, "ts");
+    const smallCode = "const recentlyUsedSmallCacheEntry = true;";
+    const small = tokenizeToLines(smallCode, "ts");
+
+    for (let index = 1; index <= 4; index += 1) {
+      expect(tokenizeToLines(smallCode, "ts")).toBe(small);
+      expect(tokenizeToLines(denseCode(index), "ts")).not.toBeNull();
+    }
+
+    expect(tokenizeToLines(smallCode, "ts")).toBe(small);
+    const rebuilt = tokenizeToLines(firstCode, "ts");
+    expect(rebuilt).not.toBe(first);
+    const rebuiltText: string[] = [];
+    for (const line of rebuilt ?? []) {
+      rebuiltText.push(line.map((token) => token.text).join(""));
+    }
+    expect(rebuiltText.join("\n")).toBe(firstCode);
+    expect(rebuilt?.[1].some((token) => token.style === "keyword")).toBe(true);
+  });
 });
 
 describe("highlightToKeyedLines", () => {

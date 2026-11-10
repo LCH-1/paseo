@@ -21,28 +21,58 @@ export interface KeyedLine {
 export const MAX_HIGHLIGHT_CHARS = 100_000;
 
 class LRUCache<K, V> {
-  private readonly map = new Map<K, V>();
-  constructor(private readonly max: number) {}
+  private readonly map = new Map<K, { value: V; weight: number }>();
+  private weight = 0;
+  constructor(
+    private readonly max: number,
+    private readonly maxWeight: number,
+  ) {}
 
   get(key: K): V | undefined {
-    const value = this.map.get(key);
-    if (value === undefined) return undefined;
+    const entry = this.map.get(key);
+    if (entry === undefined) return undefined;
     this.map.delete(key);
-    this.map.set(key, value);
-    return value;
+    this.map.set(key, entry);
+    return entry.value;
   }
 
-  set(key: K, value: V): void {
-    if (this.map.has(key)) this.map.delete(key);
-    else if (this.map.size >= this.max) {
-      const oldest = this.map.keys().next().value;
-      if (oldest !== undefined) this.map.delete(oldest);
+  set(key: K, value: V, weight: number): void {
+    const previous = this.map.get(key);
+    if (previous !== undefined) {
+      this.map.delete(key);
+      this.weight -= previous.weight;
     }
-    this.map.set(key, value);
+    if (weight > this.maxWeight) return;
+
+    this.map.set(key, { value, weight });
+    this.weight += weight;
+    while (this.map.size > this.max || this.weight > this.maxWeight) {
+      const oldest = this.map.entries().next();
+      if (oldest.done) break;
+      this.map.delete(oldest.value[0]);
+      this.weight -= oldest.value[1].weight;
+    }
   }
 }
 
-const tokenizationCache = new LRUCache<string, HighlightToken[][]>(200);
+const MAX_TOKENIZATION_CACHE_BYTES = 8 * 1024 * 1024;
+const tokenizationCache = new LRUCache<string, HighlightToken[][]>(
+  200,
+  MAX_TOKENIZATION_CACHE_BYTES,
+);
+
+function estimateTokenizationBytes(cacheKey: string, lines: HighlightToken[][]): number {
+  // Account for the retained source key, token text, arrays and token objects.
+  // Use estimated bytes rather than engine-specific object sizes: entry count
+  // alone lets a few token-dense documents retain tens of MiB.
+  let bytes = 64 + cacheKey.length * 2 + lines.length * 32;
+  for (const line of lines) {
+    for (const token of line) {
+      bytes += 48 + token.text.length * 2;
+    }
+  }
+  return bytes;
+}
 
 // Tokenize `code` to per-line tokens, cached. Returns null when the language is
 // unsupported, the input is over the size cap, or parsing throws — callers then
@@ -59,7 +89,7 @@ export function tokenizeToLines(code: string, ext: string | null): HighlightToke
   } catch {
     return null;
   }
-  tokenizationCache.set(cacheKey, lines);
+  tokenizationCache.set(cacheKey, lines, estimateTokenizationBytes(cacheKey, lines));
   return lines;
 }
 
