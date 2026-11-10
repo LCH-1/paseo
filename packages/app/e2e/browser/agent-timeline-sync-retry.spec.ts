@@ -28,6 +28,7 @@ test.describe("Agent timeline sync retry", () => {
       const callout = page.getByTestId("agent-timeline-sync-error");
       const retry = page.getByTestId("agent-timeline-sync-retry");
       await expect(callout).toBeVisible({ timeout: 30_000 });
+      await expect(callout).toContainText("already has an active writer");
       await expect(retry).toBeEnabled();
       await page.screenshot({ path: testInfo.outputPath("1-sync-error.png"), fullPage: true });
 

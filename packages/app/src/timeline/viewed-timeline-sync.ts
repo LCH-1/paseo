@@ -14,6 +14,7 @@ import { useCreateFlowStore } from "@/stores/create-flow-store";
 import type { SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import { getSendingClientMessageIds } from "@/composer/submission/model";
 import { isAgentNotFoundError } from "@/utils/agent-not-found";
+import { describeErrorForLog } from "@/utils/error-messages";
 import {
   getInitDeferred,
   getInitKey,
@@ -305,6 +306,22 @@ function applyAuthoritativeTimelineResponse(input: {
   return true;
 }
 
+/** The chats a reported failure belongs to. Absent when the failure is not tied to a chat. */
+export interface ViewedTimelineSyncErrorScope {
+  agentIds: string[];
+}
+
+export function describeViewedTimelineSyncFailure(input: {
+  serverId: string;
+  error: unknown;
+  scope?: ViewedTimelineSyncErrorScope;
+}): string {
+  const parts = [`serverId=${input.serverId}`];
+  if (input.scope) parts.push(`agentIds=${input.scope.agentIds.join(",")}`);
+  parts.push(describeErrorForLog(input.error));
+  return parts.join(" ");
+}
+
 export interface ViewedTimelineSyncPorts {
   prepare(agentId: string): Promise<void>;
   replaceDemandedAgentIds(agentIds: string[]): void;
@@ -320,7 +337,7 @@ export interface ViewedTimelineSyncPorts {
    * demanded set. Disconnect and backgrounding keep the obligation and do not report here.
    */
   onCatchUpEnded(agentId: string): void;
-  reportError(error: unknown): void;
+  reportError(error: unknown, scope?: ViewedTimelineSyncErrorScope): void;
   onAgentDeleted?(agentId: string): void;
   schedule(task: () => void, delayMs: number): () => void;
 }
@@ -447,7 +464,7 @@ export function createViewedTimelineOwner(input: {
 }
 
 const RETRY_DELAY_MS = 1_000;
-const MAX_RETRY_DELAY_MS = 30_000;
+const MAX_RETRY_DELAY_MS = 60_000;
 
 type CatchUpStatus = "running" | "complete" | "error";
 
@@ -652,7 +669,7 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
           retryDelayMs: nextRetryDelayMs,
         });
         setVisibilityCatchUpError([agentId], error);
-        ports.reportError(error);
+        ports.reportError(error, { agentIds: [agentId] });
       }
     } finally {
       startAcknowledgedCatchUps();
@@ -663,7 +680,7 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
     if (loadedCache.has(agentId) || cacheLoads.has(agentId)) return;
     const load = ports
       .prepare(agentId)
-      .catch((error) => ports.reportError(error))
+      .catch((error) => ports.reportError(error, { agentIds: [agentId] }))
       .finally(() => {
         cacheLoads.delete(agentId);
         loadedCache.add(agentId);
@@ -720,8 +737,9 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
     current?.cancelRetry?.();
     const generation = (catchUpGenerations.get(agentId) ?? 0) + 1;
     catchUpGenerations.set(agentId, generation);
-    const retryDelayMs =
-      supersede || current?.status !== "error" ? undefined : current.retryDelayMs;
+    // Returning to the app, gap recovery and a manual retry each earn one immediate attempt,
+    // not a new failure streak. Only a completed or cancelled catch-up forgets the backoff.
+    const retryDelayMs = current?.retryDelayMs;
     catchUps.set(agentId, {
       generation,
       status: "running",
@@ -781,7 +799,7 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
         void reconcileMembership();
       }, nextRetryDelayMs);
       membershipRetryDelayMs = nextRetryDelayMs;
-      ports.reportError(error);
+      ports.reportError(error, { agentIds: requested });
       return;
     }
     if (disposed || !connected || generation !== membershipGeneration) return;

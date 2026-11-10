@@ -15,7 +15,10 @@ import type { StreamItem } from "@/types/stream";
 import { deriveAgentStreamTurnLiveness } from "@/timeline/session-stream-reducers";
 import { planTimelineTailFetch } from "@/timeline/timeline-sync-plan";
 import { requestTimelineReplacement } from "@/timeline/timeline-replacement";
-import { type ViewedTimelineOwner } from "@/timeline/viewed-timeline-sync";
+import {
+  describeViewedTimelineSyncFailure,
+  type ViewedTimelineOwner,
+} from "@/timeline/viewed-timeline-sync";
 import type { SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import { parseServerInfoStatusPayload } from "@getpaseo/protocol/messages";
 import {
@@ -470,8 +473,11 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       },
       fetchLatestTail: (agentId) =>
         getHostRuntimeStore().fetchAgentTimeline(serverId, agentId, planTimelineTailFetch()),
-      reportError: (error) => {
-        console.warn("[Session] viewed timeline synchronization failed", { serverId, error });
+      reportError: (error, scope) => {
+        console.warn(
+          "[Session] viewed timeline synchronization failed",
+          describeViewedTimelineSyncFailure({ serverId, error, scope }),
+        );
       },
       schedule: (task, delayMs) => {
         const timeout = setTimeout(task, delayMs);

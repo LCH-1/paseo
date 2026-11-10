@@ -57,7 +57,10 @@ import {
 } from "@/hooks/use-agent-screen-state-machine";
 import { useArchiveAgent } from "@/hooks/use-archive-agent";
 import { useContainerWidthBelow } from "@/hooks/use-container-width";
-import { reconcileMissingAgentStateWithPresentAgent } from "@/panels/agent-panel-load-state";
+import {
+  reconcileMissingAgentStateWithPresentAgent,
+  resolveTimelineSyncErrorReason,
+} from "@/panels/agent-panel-load-state";
 import { TimelineSyncStatus } from "@/timeline/sync-status";
 import { usePaneContext, usePaneFocus } from "@/panels/pane-context";
 import { useAgentFactsLine } from "@/panels/agent-facts-line";
@@ -826,6 +829,16 @@ function ChatAgentContent({
     readTimelineStatus,
   );
   const visibilityCatchUpStatus = isPaneVisible ? timelineStatus : "ready";
+  const readTimelineError = useCallback(
+    () =>
+      !agentId || !viewedTimelineSync ? null : viewedTimelineSync.getAgentTimelineError(agentId),
+    [agentId, viewedTimelineSync],
+  );
+  const timelineError = useSyncExternalStore(
+    subscribeToVisibilityCatchUp,
+    readTimelineError,
+    readTimelineError,
+  );
   const visibilityCatchUpError = readViewedTimelineError({
     agentId,
     status: visibilityCatchUpStatus,
@@ -1091,6 +1104,10 @@ function ChatAgentContent({
     viewState.tag === "ready" &&
     viewState.sync.status === "sync_error" &&
     viewState.sync.isRetrying;
+  const historySyncErrorReason = resolveTimelineSyncErrorReason({
+    missingAgentState,
+    timelineError,
+  });
 
   return (
     <ChatAgentReadyContent
@@ -1114,6 +1131,7 @@ function ChatAgentContent({
       showHistorySyncOverlay={showHistorySyncOverlay}
       showHistorySyncError={showHistorySyncError}
       isRetryingHistorySync={isRetryingHistorySync}
+      historySyncErrorReason={historySyncErrorReason}
       cwd={agentCwd}
       retryTimelineSync={retryTimelineSync}
       onAttentionInputFocus={attentionController.clearOnInputFocus}
@@ -1144,6 +1162,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   showHistorySyncOverlay,
   showHistorySyncError,
   isRetryingHistorySync,
+  historySyncErrorReason,
   retryTimelineSync,
   cwd,
   onAttentionInputFocus,
@@ -1170,6 +1189,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   showHistorySyncOverlay: boolean;
   showHistorySyncError: boolean;
   isRetryingHistorySync: boolean;
+  historySyncErrorReason: string | null;
   retryTimelineSync: () => void;
   cwd: string;
   onAttentionInputFocus: () => void;
@@ -1303,7 +1323,11 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
       {streamContent}
 
       {showHistorySyncError ? (
-        <TimelineSyncErrorCallout isRetrying={isRetryingHistorySync} onRetry={retryTimelineSync} />
+        <TimelineSyncErrorCallout
+          reason={historySyncErrorReason}
+          isRetrying={isRetryingHistorySync}
+          onRetry={retryTimelineSync}
+        />
       ) : null}
     </View>
   );
@@ -1366,9 +1390,11 @@ function ChatSurface({
 }
 
 function TimelineSyncErrorCallout({
+  reason,
   isRetrying,
   onRetry,
 }: {
+  reason: string | null;
   isRetrying: boolean;
   onRetry: () => void;
 }) {
@@ -1377,9 +1403,20 @@ function TimelineSyncErrorCallout({
     <View style={styles.timelineSyncCalloutRail}>
       <View style={styles.timelineSyncCalloutContent}>
         <View style={styles.timelineSyncCallout} testID="agent-timeline-sync-error">
-          <Text style={styles.timelineSyncCalloutText}>
-            {t("agentPanel.states.timelineSyncFailed")}
-          </Text>
+          <View style={styles.timelineSyncCalloutMessage}>
+            <Text style={styles.timelineSyncCalloutText}>
+              {t("agentPanel.states.timelineSyncFailed")}
+            </Text>
+            {reason ? (
+              <Text
+                style={styles.timelineSyncCalloutReason}
+                numberOfLines={3}
+                testID="agent-timeline-sync-error-reason"
+              >
+                {reason}
+              </Text>
+            ) : null}
+          </View>
           <Button
             size="sm"
             variant="secondary"
@@ -1810,9 +1847,18 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.spacing[2],
     paddingHorizontal: theme.spacing[4],
   },
+  timelineSyncCalloutMessage: {
+    flexShrink: 1,
+    minWidth: 0,
+    gap: theme.spacing[1],
+  },
   timelineSyncCalloutText: {
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.base,
+  },
+  timelineSyncCalloutReason: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
   },
   historySyncOverlay: {
     position: "absolute",

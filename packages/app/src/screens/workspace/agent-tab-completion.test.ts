@@ -109,6 +109,19 @@ describe("agent tab completion", () => {
     await fetchAgentTabCompletedAt(client, "a", start.getTime(), 2);
     expect(fetchAgentTimeline).toHaveBeenCalledTimes(3);
   });
+  it("asks once for a lookup the daemon refuses until the prompt or connection changes", async () => {
+    const fetchAgentTimeline = vi
+      .fn<DaemonClient["fetchAgentTimeline"]>()
+      .mockRejectedValue(new Error("usage limit reached"));
+    const client = { fetchAgentTimeline };
+    const refused = await fetchAgentTabCompletedAt(client, "a", start.getTime(), 1);
+    const repeated = await fetchAgentTabCompletedAt(client, "a", start.getTime(), 1);
+    expect(refused).toEqual({ lastUserAt: start.getTime(), completedAt: null });
+    expect(repeated).toBe(refused);
+    expect(fetchAgentTimeline).toHaveBeenCalledTimes(1);
+    await fetchAgentTabCompletedAt(client, "a", start.getTime(), 2);
+    expect(fetchAgentTimeline).toHaveBeenCalledTimes(2);
+  });
   it("formats seconds, minutes, hours, days and future clock skew", () => {
     for (const [age, label] of [
       [-5000, "0s"],

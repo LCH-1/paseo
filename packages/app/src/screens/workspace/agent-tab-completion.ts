@@ -4,6 +4,7 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { StreamItem } from "@/types/stream";
 import { hasActiveMessageSubmission } from "@/composer/submission/model";
 import { deriveStreamTurnTiming } from "@/timeline/turn-time";
+import { describeErrorForLog } from "@/utils/error-messages";
 
 const EMPTY_ITEMS: StreamItem[] = [];
 interface HistoryCompletion {
@@ -57,8 +58,11 @@ export function fetchAgentTabCompletedAt(
         result.completedAt = null;
       return result;
     })
-    .catch(() => {
-      console.warn("[agent-tab-completion] Recent response lookup failed");
+    .catch((error: unknown) => {
+      console.warn(
+        "[agent-tab-completion] Recent response lookup failed",
+        `agentId=${agentId} ${describeErrorForLog(error)}`,
+      );
       return { lastUserAt, completedAt: null };
     });
   requests.set(key, request);
