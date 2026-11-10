@@ -369,6 +369,69 @@ test("a generic not-found message remains retryable without the deletion code", 
   world.sync.dispose();
 });
 
+test("stale not-found from a disconnected request cannot delete a restored chat", async () => {
+  const world = new TimelineWorld();
+  world.sync.replaceVisibleAgentIds("pane", ["agent"]);
+  world.sync.setConnected(true);
+  (await world.nextMembership()).succeed();
+  const stale = await world.nextFetch("agent");
+
+  world.sync.setConnected(false);
+  world.sync.setConnected(true);
+  (await world.nextMembership()).succeed();
+  (await world.nextFetch("agent")).respond({ hasNewer: false });
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent")).toBe("ready"));
+
+  stale.fail(Object.assign(new Error("Agent not found"), { code: "agent_not_found" }));
+  for (let i = 0; i < 5; i += 1) await Promise.resolve();
+
+  expect(world.sync.isAgentDeleted("agent")).toBe(false);
+  expect(world.sync.getAgentTimelineStatus("agent")).toBe("ready");
+  world.expectNoPendingMembership();
+  world.expectNoPendingFetch();
+  world.sync.dispose();
+});
+
+test("stale not-found from a closed tab cannot delete its reopened chat", async () => {
+  const world = new TimelineWorld();
+  world.sync.replaceVisibleAgentIds("pane", ["agent"]);
+  world.sync.setConnected(true);
+  (await world.nextMembership()).succeed();
+  const stale = await world.nextFetch("agent");
+
+  world.sync.replaceVisibleAgentIds("pane", []);
+  world.sync.replaceOpenTabAgentIds([]);
+  (await world.nextMembership()).succeed();
+  world.sync.replaceVisibleAgentIds("pane", ["agent"]);
+  (await world.nextMembership()).succeed();
+  (await world.nextFetch("agent")).respond({ hasNewer: false });
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent")).toBe("ready"));
+
+  stale.fail(Object.assign(new Error("Agent not found"), { code: "agent_not_found" }));
+  for (let i = 0; i < 5; i += 1) await Promise.resolve();
+
+  expect(world.sync.isAgentDeleted("agent")).toBe(false);
+  expect(world.sync.getAgentTimelineStatus("agent")).toBe("ready");
+  world.expectNoPendingMembership();
+  world.sync.dispose();
+});
+
+test("stale not-found after disposal cannot create a deletion tombstone", async () => {
+  const world = new TimelineWorld();
+  world.sync.replaceVisibleAgentIds("pane", ["agent"]);
+  world.sync.setConnected(true);
+  (await world.nextMembership()).succeed();
+  const stale = await world.nextFetch("agent");
+  world.sync.dispose();
+
+  stale.fail(Object.assign(new Error("Agent not found"), { code: "agent_not_found" }));
+  for (let i = 0; i < 5; i += 1) await Promise.resolve();
+
+  expect(world.sync.isAgentDeleted("agent")).toBe(false);
+  world.expectNoPendingMembership();
+  world.expectNoPendingFetch();
+});
+
 test("deleting one open chat releases it without affecting another catch-up", async () => {
   const world = new TimelineWorld();
   world.sync.replaceVisibleAgentIds("pane", ["a", "b"]);

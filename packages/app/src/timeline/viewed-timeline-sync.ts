@@ -631,6 +631,7 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       }
       setVisibilityCatchUpReady(agentId);
     } catch (error) {
+      if (!ownsCatchUp(agentId, generation)) return;
       if (isAgentNotFoundError(error)) {
         forgetAgent(agentId);
         ports.onAgentDeleted?.(agentId);
