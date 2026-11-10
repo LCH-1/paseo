@@ -32,20 +32,18 @@ export function UsageMeter({
   percent: number;
   tone: UsageTone;
   quiet?: boolean;
-  /** A split bar uses fixed colors for used and remaining amounts. */
+  /** Sidebar bars fill the remaining share over a gray track in either input mode. */
   displayAs?: UsageDisplayAs;
   style?: StyleProp<ViewStyle>;
 }) {
-  const fillWidth = clampPct(percent);
+  const fillWidth = clampPct(displayAs === "used" ? 100 - percent : percent);
   const fillStyle = useMemo<StyleProp<ViewStyle>>(() => {
     let color = quiet ? styles.fillQuiet : fillToneStyle(tone);
-    if (displayAs === "used") color = styles.used;
-    else if (displayAs === "remaining") color = styles.remaining;
+    if (displayAs) color = styles.remaining;
     return [styles.fill, color, { width: `${fillWidth}%` }];
   }, [displayAs, fillWidth, quiet, tone]);
   let trackColor;
-  if (displayAs === "used") trackColor = styles.remaining;
-  else if (displayAs === "remaining") trackColor = styles.used;
+  if (displayAs) trackColor = styles.used;
   return (
     <View style={[styles.track, trackColor, style]}>
       <View style={fillStyle} />
@@ -68,8 +66,8 @@ const styles = StyleSheet.create((theme) => ({
   fillQuiet: {
     backgroundColor: theme.colors.surface4,
   },
-  used: { backgroundColor: theme.colors.statusWarning },
-  remaining: { backgroundColor: theme.colors.statusSuccess },
+  used: { backgroundColor: theme.colors.surface3 },
+  remaining: { backgroundColor: "#a7dcb5" },
   fillDefault: {
     backgroundColor: theme.colors.foregroundMuted,
   },
