@@ -1411,6 +1411,20 @@ export class AgentManager {
     return this.providerSubagents.fetchTimeline(parentAgentId, subagentId, options);
   }
 
+  /**
+   * Live rows of a child timeline are pushed only once a client has asked for that timeline.
+   * A workflow runs dozens of children whose transcripts nobody opens, and every row of each
+   * used to go to every window.
+   */
+  markProviderSubagentTimelineRequested(parentAgentId: string, subagentId: string): void {
+    this.requirePublicAgent(parentAgentId);
+    this.providerSubagents.markTimelineRequested(parentAgentId, subagentId);
+  }
+
+  isProviderSubagentTimelineRequested(parentAgentId: string, subagentId: string): boolean {
+    return this.providerSubagents.isTimelineRequested(parentAgentId, subagentId);
+  }
+
   createAgent(
     config: AgentSessionConfig,
     agentId: string | undefined,
@@ -1662,7 +1676,7 @@ export class AgentManager {
       });
       for (const event of imported.providerSubagentEvents ?? []) {
         const update = this.providerSubagents.apply(agent.id, event.provider, event.event);
-        this.dispatch({ type: "provider_subagent", event: update });
+        if (update) this.dispatch({ type: "provider_subagent", event: update });
       }
       return agent;
     } finally {
@@ -1972,7 +1986,7 @@ export class AgentManager {
         id: subagent.id,
         status: "canceled",
       });
-      this.dispatch({ type: "provider_subagent", event });
+      if (event) this.dispatch({ type: "provider_subagent", event });
     }
   }
 
@@ -3513,6 +3527,7 @@ export class AgentManager {
 
   async deleteAgentState(agentId: string): Promise<void> {
     this.discardRetainedAgentState(agentId);
+    this.providerSubagents.forgetRequestedTimelines(agentId);
     await this.deleteCommittedTimeline(agentId);
   }
 
@@ -4191,7 +4206,7 @@ export class AgentManager {
   ): Promise<void> {
     if (event.type === "provider_subagent") {
       const update = this.providerSubagents.apply(agent.id, event.provider, event.event);
-      this.dispatch({ type: "provider_subagent", event: update });
+      if (update) this.dispatch({ type: "provider_subagent", event: update });
       return;
     }
     // State transitions and foreground consumers must use the same turn identity.
@@ -4393,7 +4408,7 @@ export class AgentManager {
     }
     for (const event of providerSubagentEvents) {
       const update = this.providerSubagents.apply(agent.id, event.provider, event.event);
-      if (broadcast) {
+      if (update && broadcast) {
         this.dispatch({ type: "provider_subagent", event: update });
       }
     }
@@ -4459,6 +4474,7 @@ export class AgentManager {
     const providerSubagentEvents: AgentManagerEvent[] = [];
     for (const event of historySubagentEvents) {
       const update = this.providerSubagents.apply(agent.id, event.provider, event.event);
+      if (!update) continue;
       const managerEvent: AgentManagerEvent = { type: "provider_subagent", event: update };
       if (deferredBroadcast) {
         providerSubagentEvents.push(managerEvent);

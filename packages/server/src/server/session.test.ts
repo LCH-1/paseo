@@ -5583,6 +5583,185 @@ test("keeps selective delivery scoped per socket when a retained session also ha
   ]);
 });
 
+interface ProviderSubagentFeed {
+  sockets: object[];
+  targetedMessages: Array<{ source: object; message: SessionOutboundMessage }>;
+  requestedTimelines: Set<string>;
+  publish(event: Extract<AgentManagerEvent, { type: "provider_subagent" }>["event"]): void;
+  updatesFor(socket: object): ProviderSubagentUpdatePayload[];
+}
+
+type ProviderSubagentUpdatePayload = Extract<
+  SessionOutboundMessage,
+  { type: "agent.provider_subagents.update" }
+>["payload"];
+
+async function observeProviderSubagents(socketCount: number): Promise<ProviderSubagentFeed> {
+  const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];
+  const agentEventListeners: Array<(event: AgentManagerEvent) => void> = [];
+  const requestedTimelines = new Set<string>();
+  const session = createSessionForTest({
+    targetedMessages,
+    agentManager: {
+      getAgent: (id: string) => ({ id, internal: false }),
+      subscribe: vi.fn((listener: (event: AgentManagerEvent) => void) => {
+        agentEventListeners.push(listener);
+        return () => {};
+      }),
+      isProviderSubagentTimelineRequested: (_parentAgentId: string, subagentId: string) =>
+        requestedTimelines.has(subagentId),
+    },
+  });
+  const sockets = Array.from({ length: socketCount }, () => ({}));
+  for (const [index, socket] of sockets.entries()) {
+    session.updateClientCapabilities(
+      {
+        [CLIENT_CAPS.providerSubagents]: true,
+        [CLIENT_CAPS.projectedSubagentTimeline]: true,
+      },
+      socket,
+    );
+    await session.handleMessage(
+      {
+        type: "session.events.set_subscription.request",
+        requestId: `provider-children-${index}`,
+        events: ["agent.provider_subagents.update"],
+      },
+      socket,
+    );
+  }
+  targetedMessages.length = 0;
+  const listener = agentEventListeners[0];
+  if (!listener) throw new Error("Agent event listener was not installed");
+  return {
+    sockets,
+    targetedMessages,
+    requestedTimelines,
+    publish: (event) => listener({ type: "provider_subagent", event }),
+    updatesFor: (socket) =>
+      targetedMessages.flatMap(({ source, message }) =>
+        source === socket && message.type === "agent.provider_subagents.update"
+          ? [message.payload]
+          : [],
+      ),
+  };
+}
+
+function providerSubagentDescriptor(
+  id: string,
+  overrides: { status?: "running" | "completed"; subtitle?: string } = {},
+) {
+  return {
+    id,
+    parentAgentId: "workflow-parent",
+    parentSubagentId: null,
+    provider: "claude",
+    title: "Explore",
+    description: null,
+    status: overrides.status ?? ("running" as const),
+    createdAt: "2026-11-10T00:00:00.000Z",
+    updatedAt: "2026-11-10T00:00:00.000Z",
+    toolCallId: id,
+    cwd: null,
+    subtitle: overrides.subtitle ?? null,
+  };
+}
+
+function providerSubagentRow(subagentId: string, seq: number) {
+  return {
+    type: "timeline" as const,
+    parentAgentId: "workflow-parent",
+    subagentId,
+    provider: "claude",
+    row: {
+      seq,
+      timestamp: "2026-11-10T00:00:00.000Z",
+      item: { type: "assistant_message" as const, text: `row ${seq}` },
+    },
+    epoch: "epoch-1",
+  };
+}
+
+test("a burst of provider child reports reaches every window as the first report and the final state", async () => {
+  const feed = await observeProviderSubagents(5);
+  const reports = Array.from({ length: 500 }, (_, index) =>
+    providerSubagentDescriptor("child", { subtitle: `${index} tokens` }),
+  );
+  const final = providerSubagentDescriptor("child", {
+    subtitle: "500 tokens",
+    status: "completed",
+  });
+
+  for (const subagent of reports) feed.publish({ type: "upsert", subagent });
+  feed.publish({ type: "upsert", subagent: final });
+
+  const expected = [
+    { kind: "upsert", subagent: reports[0] },
+    { kind: "upsert", subagent: final },
+  ];
+  await vi.waitFor(() =>
+    expect(feed.sockets.map((socket) => feed.updatesFor(socket))).toEqual(
+      feed.sockets.map(() => expected),
+    ),
+  );
+});
+
+test("a provider child removal is sent at once and replaces the report that was waiting", async () => {
+  const feed = await observeProviderSubagents(1);
+  const [socket] = feed.sockets;
+  const removed = providerSubagentDescriptor("removed-child");
+  const kept = providerSubagentDescriptor("kept-child");
+  const keptCompleted = providerSubagentDescriptor("kept-child", { status: "completed" });
+
+  feed.publish({ type: "upsert", subagent: removed });
+  feed.publish({
+    type: "upsert",
+    subagent: providerSubagentDescriptor("removed-child", { status: "completed" }),
+  });
+  feed.publish({ type: "remove", parentAgentId: "workflow-parent", subagentId: "removed-child" });
+  feed.publish({ type: "upsert", subagent: kept });
+  feed.publish({ type: "upsert", subagent: keptCompleted });
+
+  const sentAtOnce = [
+    { kind: "upsert", subagent: removed },
+    { kind: "remove", parentAgentId: "workflow-parent", subagentId: "removed-child" },
+    { kind: "upsert", subagent: kept },
+  ];
+  expect(feed.updatesFor(socket)).toEqual(sentAtOnce);
+  // The window closing sends everything that waited, so a report surviving the removal would
+  // arrive ahead of this one.
+  await vi.waitFor(() =>
+    expect(feed.updatesFor(socket)).toEqual([
+      ...sentAtOnce,
+      { kind: "upsert", subagent: keptCompleted },
+    ]),
+  );
+});
+
+test("provider child timeline rows are pushed only for a timeline a client requested", async () => {
+  const feed = await observeProviderSubagents(2);
+  feed.requestedTimelines.add("opened-child");
+
+  for (let seq = 1; seq <= 200; seq += 1) {
+    feed.publish(providerSubagentRow("unopened-child", seq));
+  }
+  feed.publish(providerSubagentRow("opened-child", 1));
+  feed.requestedTimelines.add("unopened-child");
+  feed.publish(providerSubagentRow("unopened-child", 201));
+
+  const rows = (socket: object) =>
+    feed
+      .updatesFor(socket)
+      .flatMap((payload) =>
+        payload.kind === "timeline" ? [{ subagentId: payload.subagentId, seq: payload.seq }] : [],
+      );
+  const delivered = [
+    { subagentId: "opened-child", seq: 1 },
+    { subagentId: "unopened-child", seq: 201 },
+  ];
+  expect(feed.sockets.map(rows)).toEqual([delivered, delivered]);
+});
+
 test("sends project updates only to capable sockets in a retained session", async () => {
   const messages: SessionOutboundMessage[] = [];
   const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];

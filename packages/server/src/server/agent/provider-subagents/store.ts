@@ -75,15 +75,40 @@ function stickyField<T>(next: T | undefined, previous: T | null | undefined): T 
   return next === undefined ? (previous ?? null) : next;
 }
 
+/**
+ * Whether two descriptors of one subagent say the same thing. `updatedAt` is left out on purpose:
+ * a provider repeating what it already reported moves the clock and nothing a client renders.
+ */
+function describesSameState(
+  previous: ProviderSubagentDescriptor,
+  next: ProviderSubagentDescriptor,
+): boolean {
+  return (
+    previous.provider === next.provider &&
+    previous.title === next.title &&
+    previous.description === next.description &&
+    previous.status === next.status &&
+    previous.toolCallId === next.toolCallId &&
+    previous.cwd === next.cwd &&
+    previous.subtitle === next.subtitle &&
+    previous.parentSubagentId === next.parentSubagentId
+  );
+}
+
 export class ProviderSubagentStore {
   private readonly descriptors = new Map<string, ProviderSubagentDescriptor>();
   private readonly timelines = new InMemoryAgentTimelineStore();
+  private readonly requestedTimelines = new Set<string>();
 
+  /**
+   * Returns the change to announce, or `null` when an upsert left the descriptor as it was.
+   * Codex re-reports an unchanged child on every tool call the child makes.
+   */
   apply(
     parentAgentId: string,
     provider: AgentProvider,
     event: ProviderSubagentInputEvent,
-  ): ProviderSubagentStoreEvent {
+  ): ProviderSubagentStoreEvent | null {
     const key = storeKey(parentAgentId, event.id);
     if (event.type === "remove") {
       this.descriptors.delete(key);
@@ -127,8 +152,30 @@ export class ProviderSubagentStore {
       subtitle: stickyField(event.subtitle, previous?.subtitle),
       parentSubagentId: stickyField(event.parentSubagentId, previous?.parentSubagentId),
     };
+    if (previous && describesSameState(previous, subagent)) {
+      return null;
+    }
     this.descriptors.set(key, subagent);
     return { type: "upsert", subagent };
+  }
+
+  /**
+   * Record that a client asked for this child's timeline. It outlives `deleteParent` because a
+   * reload replays the child under the same id, and the pane that asked is still open.
+   */
+  markTimelineRequested(parentAgentId: string, subagentId: string): void {
+    this.requestedTimelines.add(storeKey(parentAgentId, subagentId));
+  }
+
+  isTimelineRequested(parentAgentId: string, subagentId: string): boolean {
+    return this.requestedTimelines.has(storeKey(parentAgentId, subagentId));
+  }
+
+  forgetRequestedTimelines(parentAgentId: string): void {
+    const prefix = storeKey(parentAgentId, "");
+    for (const key of this.requestedTimelines) {
+      if (key.startsWith(prefix)) this.requestedTimelines.delete(key);
+    }
   }
 
   list(parentAgentId: string): ProviderSubagentDescriptor[] {

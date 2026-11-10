@@ -109,6 +109,7 @@ import {
 } from "./workspace-labels/index.js";
 
 import { AgentManager, AgentRunCancellationError } from "./agent/agent-manager.js";
+import { ProviderSubagentUpsertCoalescer } from "./agent/provider-subagents/upsert-coalescer.js";
 import { buildTimelinePromptIndex } from "./agent/timeline-prompt-index.js";
 import { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
 import type {
@@ -780,6 +781,10 @@ export class Session {
     string,
     { owner: OwnedSubscription; events: Set<SessionEventSubscription>; notifications: boolean }
   >();
+  private readonly providerSubagentUpserts = new ProviderSubagentUpsertCoalescer({
+    timers: { setTimeout, clearTimeout },
+    onSend: (subagent) => this.forwardProviderSubagentUpdate({ type: "upsert", subagent }),
+  });
   private readonly workspaceUpdateTails = new Map<string, Promise<void>>();
   private readonly terminalManager: TerminalManager | null;
   private readonly providerSnapshotManager: ProviderSnapshotManager;
@@ -1868,9 +1873,26 @@ export class Session {
     return supportsProjection && this.supportsTimelineItem(item, source);
   }
 
-  private forwardProviderSubagentUpdate(
-    update: Extract<AgentManagerEvent, { type: "provider_subagent" }>["event"],
-  ): void {
+  private deliverProviderSubagentUpdate(update: ProviderSubagentManagerEvent): void {
+    if (update.type === "upsert") {
+      this.providerSubagentUpserts.push(update.subagent);
+      return;
+    }
+    if (update.type === "remove") {
+      this.providerSubagentUpserts.discard(update.parentAgentId, update.subagentId);
+    } else if (
+      !this.agentManager.isProviderSubagentTimelineRequested(
+        update.parentAgentId,
+        update.subagentId,
+      )
+    ) {
+      // Nobody opened this child. A pane that opens it later starts from a timeline fetch.
+      return;
+    }
+    this.forwardProviderSubagentUpdate(update);
+  }
+
+  private forwardProviderSubagentUpdate(update: ProviderSubagentManagerEvent): void {
     let message: SessionOutboundMessage;
     if (update.type === "upsert") {
       message = {
@@ -1970,7 +1992,7 @@ export class Session {
               : event.event.parentAgentId;
           if (this.agentManager.getAgent(parentAgentId)?.internal) return;
           this.emitProviderSubagentWorkspaceUpdate(event.event);
-          this.forwardProviderSubagentUpdate(event.event);
+          this.deliverProviderSubagentUpdate(event.event);
           return;
         }
 
@@ -8120,6 +8142,8 @@ export class Session {
         agentStorage: this.agentStorage,
         logger: this.sessionLogger,
       });
+      // Before the lookup: a restored pane can ask for a child this daemon has yet to see.
+      this.agentManager.markProviderSubagentTimelineRequested(msg.parentAgentId, msg.subagentId);
       const descriptor = this.agentManager.getProviderSubagent(msg.parentAgentId, msg.subagentId);
       if (!descriptor) {
         throw new Error("Provider subagent not found");
@@ -8676,6 +8700,7 @@ export class Session {
     this.unsubscribeWorkspaceMutations?.();
     this.unsubscribeWorkspaceMutations = null;
     this.agentUpdates.dispose();
+    this.providerSubagentUpserts.dispose();
     await this.hubExecutionController?.cleanup();
     if (this.unsubscribeTerminalWorkspaceContributionEvents) {
       this.unsubscribeTerminalWorkspaceContributionEvents();

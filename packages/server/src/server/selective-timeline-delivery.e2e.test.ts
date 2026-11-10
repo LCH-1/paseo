@@ -714,6 +714,20 @@ test("plugin items are gated in provider child streams, child fetches, and rewin
   provider.session.push({
     type: "provider_subagent",
     provider: "mock",
+    event: { type: "timeline", id: "child", item: { type: "reasoning", text: "Unopened" } },
+  });
+  await expect
+    .poll(
+      () =>
+        daemon.daemon.agentManager.fetchProviderSubagentTimeline(agent.id, "child").window.maxSeq,
+    )
+    .toBe(1);
+  // Live child rows follow a request for that child's timeline; the row above is history.
+  const opened = await capable.client.fetchProviderSubagentTimeline(agent.id, "child");
+  expect(opened.rows.map((row) => row.item)).toEqual([{ type: "reasoning", text: "Unopened" }]);
+  provider.session.push({
+    type: "provider_subagent",
+    provider: "mock",
     event: { type: "timeline", id: "child", item: plugin },
   });
   provider.session.push({
@@ -743,12 +757,16 @@ test("plugin items are gated in provider child streams, child fetches, and rewin
         : [],
     );
   }
-  expect(childItems(capable)).toContainEqual(plugin);
+  expect(childItems(capable)).toEqual([
+    plugin,
+    { type: "assistant_message", text: "Child result" },
+  ]);
   expect(childItems(legacy)).toEqual([{ type: "assistant_message", text: "Child result" }]);
   const oldChild = await legacy.client.fetchProviderSubagentTimeline(agent.id, "child");
   const newChild = await capable.client.fetchProviderSubagentTimeline(agent.id, "child");
   expect(newChild.rows.map((row) => row.item)).toContainEqual(plugin);
   expect(oldChild.rows.map((row) => row.item)).toEqual([
+    { type: "reasoning", text: "Unopened" },
     { type: "assistant_message", text: "Child result" },
   ]);
   expect(oldChild.window).toEqual(newChild.window);

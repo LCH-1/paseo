@@ -76,7 +76,7 @@ describe("ProviderSubagentStore", () => {
       },
     });
 
-    expect(update.type).toBe("timeline");
+    expect(update?.type).toBe("timeline");
     const [row] = subagents.fetchTimeline("parent-a", "child-1").rows;
     expect(row?.item).toMatchObject({
       type: "tool_call",
@@ -105,5 +105,102 @@ describe("ProviderSubagentStore", () => {
     });
     expect(page.rows.at(-1)?.seq).toBe(101);
     expect(page.hasOlder).toBe(false);
+  });
+
+  test("announces an upsert only when it changes what the descriptor says", () => {
+    const subagents = new ProviderSubagentStore();
+    const declared = subagents.apply("parent-a", "codex", {
+      type: "upsert",
+      id: "child-1",
+      title: "Explore",
+      description: "Find the bug",
+      status: "running",
+      toolCallId: "call-1",
+      parentSubagentId: null,
+      timestamp: "2026-07-12T10:00:00.000Z",
+    });
+
+    const repeats = Array.from({ length: 50 }, (_, index) =>
+      subagents.apply("parent-a", "codex", {
+        type: "upsert",
+        id: "child-1",
+        title: "Explore",
+        description: "Find the bug",
+        status: "running",
+        toolCallId: "call-1",
+        parentSubagentId: null,
+        timestamp: `2026-07-12T10:01:${String(index).padStart(2, "0")}.000Z`,
+      }),
+    );
+    const completed = subagents.apply("parent-a", "codex", {
+      type: "upsert",
+      id: "child-1",
+      status: "completed",
+      timestamp: "2026-07-12T10:02:00.000Z",
+    });
+
+    expect(declared).toMatchObject({ type: "upsert", subagent: { status: "running" } });
+    expect(repeats).toEqual(Array.from({ length: 50 }, () => null));
+    expect(completed).toEqual({
+      type: "upsert",
+      subagent: {
+        id: "child-1",
+        parentAgentId: "parent-a",
+        parentSubagentId: null,
+        provider: "codex",
+        title: "Explore",
+        description: "Find the bug",
+        status: "completed",
+        createdAt: "2026-07-12T10:00:00.000Z",
+        updatedAt: "2026-07-12T10:02:00.000Z",
+        toolCallId: "call-1",
+        cwd: null,
+        subtitle: null,
+      },
+    });
+  });
+
+  test("an unannounced repeat leaves the stored descriptor as last announced", () => {
+    const subagents = new ProviderSubagentStore();
+    const declared = subagents.apply("parent-a", "codex", {
+      type: "upsert",
+      id: "child-1",
+      title: "Explore",
+      status: "running",
+      timestamp: "2026-07-12T10:00:00.000Z",
+    });
+
+    subagents.apply("parent-a", "codex", {
+      type: "upsert",
+      id: "child-1",
+      title: "Explore",
+      status: "running",
+      timestamp: "2026-07-12T10:05:00.000Z",
+    });
+
+    expect(declared).toEqual({ type: "upsert", subagent: subagents.get("parent-a", "child-1") });
+  });
+
+  test("a requested timeline stays requested across a replay until its parent is forgotten", () => {
+    const subagents = new ProviderSubagentStore();
+    subagents.apply("parent-a", "claude", { type: "upsert", id: "child-1", status: "running" });
+    subagents.apply("parent-a", "claude", { type: "upsert", id: "child-2", status: "running" });
+    subagents.apply("parent-b", "claude", { type: "upsert", id: "child-1", status: "running" });
+
+    subagents.markTimelineRequested("parent-a", "child-1");
+    subagents.markTimelineRequested("parent-b", "child-1");
+    subagents.deleteParent("parent-a");
+
+    expect({
+      opened: subagents.isTimelineRequested("parent-a", "child-1"),
+      neverOpened: subagents.isTimelineRequested("parent-a", "child-2"),
+    }).toEqual({ opened: true, neverOpened: false });
+
+    subagents.forgetRequestedTimelines("parent-a");
+
+    expect({
+      forgotten: subagents.isTimelineRequested("parent-a", "child-1"),
+      otherParent: subagents.isTimelineRequested("parent-b", "child-1"),
+    }).toEqual({ forgotten: false, otherParent: true });
   });
 });

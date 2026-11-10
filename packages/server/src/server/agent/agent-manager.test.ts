@@ -5148,6 +5148,89 @@ test("force provider hydration removes children absent from current history", as
   });
 });
 
+test("a provider child re-reported unchanged is announced once per change", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-provider-child-repeat-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let session: TestAgentSession | null = null;
+  class ProviderChildRepeatClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new TestAgentSession(config);
+      return session;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new ProviderChildRepeatClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000120",
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const announced: string[] = [];
+  manager.subscribe(
+    (event) => {
+      if (event.type === "provider_subagent" && event.event.type === "upsert") {
+        announced.push(event.event.subagent.status);
+      }
+    },
+    { agentId: snapshot.id, replayState: false },
+  );
+
+  for (let report = 0; report < 100; report += 1) {
+    session?.pushEvent({
+      type: "provider_subagent",
+      provider: "codex",
+      event: {
+        type: "upsert",
+        id: "busy-child",
+        title: "Codex subagent",
+        description: null,
+        status: "running",
+        toolCallId: "spawn-1",
+        parentSubagentId: null,
+      },
+    });
+  }
+  session?.pushEvent({
+    type: "provider_subagent",
+    provider: "codex",
+    event: { type: "upsert", id: "busy-child", status: "completed" },
+  });
+  await vi.waitFor(() =>
+    expect(manager.listProviderSubagents(snapshot.id)).toEqual([
+      expect.objectContaining({ id: "busy-child", status: "completed" }),
+    ]),
+  );
+
+  expect(announced).toEqual(["running", "completed"]);
+});
+
+test("a requested provider child timeline stays requested across a reload from disk", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-provider-child-requested-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000121",
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  manager.markProviderSubagentTimelineRequested(snapshot.id, "opened-child");
+  await manager.reloadAgentSession(snapshot.id, undefined, { rehydrateFromDisk: true });
+  const afterReload = {
+    opened: manager.isProviderSubagentTimelineRequested(snapshot.id, "opened-child"),
+    neverOpened: manager.isProviderSubagentTimelineRequested(snapshot.id, "other-child"),
+  };
+  await manager.deleteAgentState(snapshot.id);
+
+  expect(afterReload).toEqual({ opened: true, neverOpened: false });
+  expect(manager.isProviderSubagentTimelineRequested(snapshot.id, "opened-child")).toBe(false);
+});
+
 test("reloadAgentSession preserves current title when config title is unset", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-reload-title-"));
   const storagePath = join(workdir, "agents");
