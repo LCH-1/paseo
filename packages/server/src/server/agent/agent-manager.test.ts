@@ -1648,6 +1648,365 @@ function fakeCodexEmitting(args: FakeCodexEmitterArgs): AgentClient {
 
 const logger = createTestLogger();
 
+function closedHistoryRecord(overrides: Partial<StoredAgentRecord> = {}): StoredAgentRecord {
+  return {
+    id: "00000000-0000-4000-8000-000000000301",
+    provider: "codex",
+    cwd: process.cwd(),
+    createdAt: "2026-11-01T00:00:00.000Z",
+    updatedAt: "2026-11-01T00:00:00.000Z",
+    lastUserMessageAt: "2026-11-01T00:00:00.000Z",
+    lastStatus: "closed",
+    labels: {},
+    persistence: { provider: "codex", sessionId: "closed-history" },
+    ...overrides,
+  };
+}
+
+test("closed timeline reads bypass interactive quota without creating a resident session", async () => {
+  const record = closedHistoryRecord({ cwd: join(tmpdir(), "removed-history-worktree") });
+  const historySession = new TestAgentSession({ provider: "codex", cwd: record.cwd });
+  historySession.streamHistory = async function* () {
+    yield {
+      type: "timeline",
+      provider: "codex",
+      item: { type: "user_message", text: "remember this" },
+    };
+    yield {
+      type: "timeline",
+      provider: "codex",
+      item: { type: "assistant_message", text: "remembered" },
+    };
+  };
+  const close = vi.spyOn(historySession, "close");
+  const client = new TestAgentClient();
+  const resume = vi.spyOn(client, "resumeSession").mockResolvedValue(historySession);
+  const create = vi.spyOn(client, "createSession");
+  const available = vi.spyOn(client, "isAvailable").mockResolvedValue(false);
+  const catalog = vi.spyOn(client, "fetchCatalog");
+  const start = vi.spyOn(historySession, "startTurn");
+  const registry = new AgentStorage(join(tmpdir(), randomUUID()), logger);
+  const get = vi.spyOn(registry, "get").mockResolvedValue(record);
+  const persist = vi.spyOn(registry, "upsert");
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry,
+    logger,
+    pluginLifecycle: {
+      emit: vi.fn(),
+      before: async (name, request) => {
+        if (name === "agent.session_open" && request.purpose === "interactive") {
+          throw new Error("All accounts exhausted");
+        }
+        return request;
+      },
+    },
+  });
+  const events = vi.fn();
+  const unsubscribe = manager.subscribe(events, { replayState: false });
+  try {
+    const [first, concurrent] = await Promise.all([
+      manager.readStoredTimeline(record, { direction: "tail", limit: 1 }),
+      manager.readStoredTimeline(record, { direction: "tail", limit: 1 }),
+    ]);
+    expect(first.rows.map((row) => row.item)).toEqual([
+      { type: "assistant_message", text: "remembered" },
+    ]);
+    expect(concurrent.epoch).toBe(first.epoch);
+    const older = await manager.readStoredTimeline(record, {
+      direction: "before",
+      cursor: { epoch: first.epoch, seq: first.startSeq! },
+      limit: 1,
+    });
+    expect(older.reset).toBe(false);
+    expect(older.rows.map((row) => row.item)).toEqual([
+      { type: "user_message", text: "remember this" },
+    ]);
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(resume.mock.calls[0]?.[3]).toEqual({ purpose: "history" });
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(create).not.toHaveBeenCalled();
+    expect(available).not.toHaveBeenCalled();
+    expect(catalog).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+    expect(events).not.toHaveBeenCalled();
+    expect(manager.getAgent(record.id)).toBeNull();
+    available.mockResolvedValue(true);
+    await expect(
+      manager.resumeAgentFromPersistence(record.persistence!, { cwd: process.cwd() }, record.id),
+    ).rejects.toThrow("All accounts exhausted");
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalled();
+  } finally {
+    unsubscribe();
+  }
+});
+
+test("closed timeline reads retain authoritative durable pagination without a provider", async () => {
+  const record = closedHistoryRecord({ provider: "removed-provider" });
+  const store = new RecordingTimelineStore();
+  await store.appendCommitted(record.id, { type: "assistant_message", text: "durable" });
+  const manager = new AgentManager({ durableTimelineStore: store, logger });
+  const first = await manager.readStoredTimeline(record, { direction: "tail", limit: 1 });
+  const expected = await store.fetchCommitted(record.id, {
+    direction: "after",
+    cursor: { epoch: first.epoch, seq: first.endSeq! },
+    limit: 1,
+  });
+  const emptyPage = await manager.readStoredTimeline(record, {
+    direction: "after",
+    cursor: { epoch: first.epoch, seq: first.endSeq! },
+    limit: 1,
+  });
+  expect(emptyPage).toEqual(expected);
+  expect(emptyPage.rows).toEqual([]);
+  expect(emptyPage.epoch).toBe(first.epoch);
+  expect(store.writes).toEqual([]);
+  expect(manager.getAgent(record.id)).toBeNull();
+});
+
+test("closed timeline reads reject empty legacy history and close failed temporary readers", async () => {
+  const record = closedHistoryRecord();
+  const session = new TestAgentSession({ provider: "codex", cwd: process.cwd() });
+  const close = vi.spyOn(session, "close");
+  const client = new TestAgentClient();
+  vi.spyOn(client, "resumeSession").mockImplementation(async () => {
+    const reader = new TestAgentSession({ provider: "codex", cwd: process.cwd() });
+    reader.streamHistory = session.streamHistory;
+    reader.close = () => session.close();
+    return reader;
+  });
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  await expect(manager.readStoredTimeline(record)).rejects.toThrow("history");
+  expect(close).toHaveBeenCalledTimes(1);
+  session.streamHistory = async function* () {
+    yield {
+      type: "timeline",
+      provider: "codex",
+      item: { type: "assistant_message", text: "partial" },
+    };
+    throw new Error("history interrupted");
+  };
+  await expect(manager.readStoredTimeline(record)).rejects.toThrow("history interrupted");
+  expect(close).toHaveBeenCalledTimes(2);
+  session.streamHistory = async function* () {
+    yield {
+      type: "timeline",
+      provider: "codex",
+      item: { type: "assistant_message", text: "complete" },
+    };
+  };
+  const recovered = await manager.readStoredTimeline(record);
+  expect(recovered.rows.map((row) => row.item)).toEqual([
+    { type: "assistant_message", text: "complete" },
+  ]);
+  expect(close).toHaveBeenCalledTimes(3);
+  expect(manager.getAgent(record.id)).toBeNull();
+});
+
+test("a new empty closed timeline needs no provider while lost history remains an error", async () => {
+  const manager = new AgentManager({ logger });
+  const empty = closedHistoryRecord({ persistence: null, lastUserMessageAt: null });
+  const first = await manager.readStoredTimeline(empty);
+  expect(first.rows).toEqual([]);
+  expect((await manager.readStoredTimeline(empty)).epoch).toBe(first.epoch);
+  await expect(
+    manager.readStoredTimeline(closedHistoryRecord({ id: randomUUID(), persistence: null })),
+  ).rejects.toThrow("history");
+});
+
+test("closed timeline reads wait for runtime closure and retain the existing epoch", async () => {
+  const closeStarted = deferred<void>();
+  const releaseClose = deferred<void>();
+  const session = new TestAgentSession({ provider: "codex", cwd: process.cwd() });
+  session.close = async () => {
+    closeStarted.resolve();
+    await releaseClose.promise;
+  };
+  const client = new TestAgentClient();
+  vi.spyOn(client, "createSession").mockResolvedValue(session);
+  const resume = vi.spyOn(client, "resumeSession");
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  const agent = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, undefined, {
+    workspaceId: undefined,
+  });
+  session.streamHistory = async function* () {
+    yield {
+      type: "timeline",
+      provider: "codex",
+      item: { type: "user_message", text: "retained prompt" },
+    };
+  };
+  await manager.hydrateTimelineFromProvider(agent.id, { force: true });
+  const before = manager.fetchTimeline(agent.id, { limit: 0 });
+  const close = manager.closeAgent(agent.id);
+  await closeStarted.promise;
+  const record = closedHistoryRecord({ id: agent.id });
+  let resolved = false;
+  const read = manager.readStoredTimeline(record, { limit: 0 }).then((result) => {
+    resolved = true;
+    return result;
+  });
+  await Promise.resolve();
+  expect(resolved).toBe(false);
+  releaseClose.resolve();
+  await close;
+  const after = await read;
+  expect(after).toEqual(before);
+  expect(resume).not.toHaveBeenCalled();
+  expect(manager.getAgent(agent.id)).toBeNull();
+});
+
+test("failed temporary history close blocks success and another runtime until release", async () => {
+  const record = closedHistoryRecord();
+  let failClose = true;
+  const session = new TestAgentSession({ provider: "codex", cwd: process.cwd() });
+  session.streamHistory = async function* () {
+    yield {
+      type: "timeline",
+      provider: "codex",
+      item: { type: "assistant_message", text: "history" },
+    };
+  };
+  const close = vi.spyOn(session, "close").mockImplementation(async () => {
+    if (failClose) throw new Error("reader close failed");
+  });
+  const client = new TestAgentClient();
+  const resume = vi.spyOn(client, "resumeSession").mockResolvedValue(session);
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  await expect(manager.readStoredTimeline(record)).rejects.toThrow("reader close failed");
+  await expect(
+    manager.resumeAgentFromPersistence(record.persistence!, { cwd: record.cwd }, record.id),
+  ).rejects.toThrow("reader close failed");
+  expect(resume).toHaveBeenCalledTimes(1);
+  failClose = false;
+  const recovered = await manager.readStoredTimeline(record);
+  expect(recovered.rows).toHaveLength(1);
+  expect(resume).toHaveBeenCalledTimes(2);
+  expect(close).toHaveBeenCalledTimes(3);
+  expect(manager.getAgent(record.id)).toBeNull();
+});
+
+test("shutdown retries ownership of a temporary history reader whose close failed", async () => {
+  const record = closedHistoryRecord();
+  const session = new TestAgentSession({ provider: "codex", cwd: process.cwd() });
+  session.streamHistory = async function* () {
+    yield {
+      type: "timeline",
+      provider: "codex",
+      item: { type: "assistant_message", text: "history" },
+    };
+  };
+  const close = vi.spyOn(session, "close").mockRejectedValueOnce(new Error("reader close failed"));
+  const client = new TestAgentClient();
+  const resume = vi.spyOn(client, "resumeSession").mockResolvedValue(session);
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  await expect(manager.readStoredTimeline(record)).rejects.toThrow("reader close failed");
+  manager.prepareForShutdown();
+  await manager.flushForShutdown();
+  await manager.flushForShutdown();
+  expect(close).toHaveBeenCalledTimes(2);
+  expect(resume).toHaveBeenCalledTimes(1);
+});
+
+test("history reader close timeout retains one pending close for shutdown", async () => {
+  const record = closedHistoryRecord();
+  const releaseClose = deferred<void>();
+  const session = new TestAgentSession({ provider: "codex", cwd: process.cwd() });
+  session.streamHistory = async function* () {
+    yield {
+      type: "timeline",
+      provider: "codex",
+      item: { type: "assistant_message", text: "history" },
+    };
+  };
+  const close = vi.spyOn(session, "close").mockImplementation(() => releaseClose.promise);
+  const client = new TestAgentClient();
+  const resume = vi.spyOn(client, "resumeSession").mockResolvedValue(session);
+  const manager = new AgentManager({
+    clients: { codex: client },
+    logger,
+    rescueTimeouts: { reloadSessionCloseMs: 30 },
+  });
+  await expect(manager.readStoredTimeline(record)).rejects.toThrow(
+    "Timed out closing temporary history reader",
+  );
+  manager.prepareForShutdown();
+  const shutdown = manager.flushForShutdown();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(close).toHaveBeenCalledTimes(1);
+  releaseClose.resolve();
+  await shutdown;
+  await manager.flushForShutdown();
+  expect(close).toHaveBeenCalledTimes(1);
+  expect(resume).toHaveBeenCalledTimes(1);
+});
+
+test("closed timeline reads wait for this agent's outstanding durable writes", async () => {
+  const record = closedHistoryRecord();
+  const releaseWrite = deferred<void>();
+  const store = new RecordingTimelineStore();
+  const originalInsert = store.bulkInsert.bind(store);
+  vi.spyOn(store, "bulkInsert").mockImplementation(async (id, rows) => {
+    await releaseWrite.promise;
+    await originalInsert(id, rows);
+  });
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    durableTimelineStore: store,
+    logger,
+  });
+  const agent = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, record.id, {
+    workspaceId: undefined,
+  });
+  await manager.appendTimelineItem(agent.id, { type: "user_message", text: "latest" });
+  const before = manager.fetchTimeline(agent.id);
+  await manager.closeAgent(agent.id);
+  let resolved = false;
+  const read = manager.readStoredTimeline(record).then((result) => {
+    resolved = true;
+    return result;
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(resolved).toBe(false);
+  releaseWrite.resolve();
+  expect(await read).toEqual(before);
+  expect((await store.getCommittedRows(agent.id)).map((row) => row.item)).toEqual([
+    { type: "user_message", text: "latest" },
+  ]);
+});
+
+test.each([false, true])(
+  "a failed durable write preserves full memory or reports incomplete history: partial=%s",
+  async (partial) => {
+    const record = closedHistoryRecord();
+    const store = new RecordingTimelineStore();
+    if (partial) await store.appendCommitted(record.id, { type: "user_message", text: "old" });
+    vi.spyOn(store, "bulkInsert").mockRejectedValue(new Error("disk unavailable"));
+    const manager = new AgentManager({
+      clients: { codex: new TestAgentClient() },
+      durableTimelineStore: store,
+      logger,
+    });
+    const agent = await manager.resumeAgentFromPersistence(
+      record.persistence!,
+      { cwd: record.cwd },
+      record.id,
+    );
+    await manager.appendTimelineItem(agent.id, { type: "assistant_message", text: "latest" });
+    const before = manager.fetchTimeline(agent.id);
+    await manager.closeAgent(agent.id);
+    if (partial) {
+      await expect(manager.readStoredTimeline(record)).rejects.toThrow("history");
+    } else {
+      expect(await manager.readStoredTimeline(record)).toEqual(before);
+    }
+  },
+);
+
 test("does not register a session that finishes starting after shutdown begins", async () => {
   const client = new HeldAgentCreationClient();
   const manager = new AgentManager({

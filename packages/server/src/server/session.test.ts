@@ -28,6 +28,7 @@ import { DownloadTokenStore } from "./file-download/token-store.js";
 import { StructuredAgentFallbackError } from "./agent/agent-response-loop.js";
 import type { StoredAgentRecord } from "./agent/agent-storage.js";
 import type { AgentManagerEvent } from "./agent/agent-manager.js";
+import { InMemoryAgentTimelineStore } from "./agent/agent-timeline-store.js";
 import type { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
 import { WorkspaceLabelError, type WorkspaceLabelService } from "./workspace-labels/index.js";
 import { createPersistedProjectRecord } from "./workspace-registry.js";
@@ -249,7 +250,7 @@ test.each(["Storage temporarily unavailable", "Agent not found: upstream history
   },
 );
 
-test("timeline fetch does not mark an archived agent's failed resume as deleted", async () => {
+test("timeline fetch does not mark an archived agent's failed history read as deleted", async () => {
   const agentId = "11111111-1111-4111-8111-111111111123";
   const messages: SessionOutboundMessage[] = [];
   const session = createSessionForTest({
@@ -258,7 +259,7 @@ test("timeline fetch does not mark an archived agent's failed resume as deleted"
       waitForAgentClose: vi.fn(async () => {}),
       getAgent: vi.fn(() => null),
       getRegisteredProviderIds: vi.fn(() => ["codex"]),
-      resumeAgentFromPersistence: vi.fn(async () => {
+      readStoredTimeline: vi.fn(async () => {
         throw new Error("History provider temporarily unavailable");
       }),
     },
@@ -288,6 +289,84 @@ test("timeline fetch does not mark an archived agent's failed resume as deleted"
       }),
     }),
   ]);
+});
+
+test("closed timeline fetch, search and prompt listing never acquire an interactive runtime", async () => {
+  const agentId = "11111111-1111-4111-8111-111111111124";
+  const record: StoredAgentRecord = {
+    id: agentId,
+    provider: "claude",
+    cwd: "/tmp/history",
+    title: "existing conversation",
+    createdAt: "2026-11-01T00:00:00.000Z",
+    updatedAt: "2026-11-01T00:00:00.000Z",
+    lastStatus: "closed",
+    labels: {},
+    persistence: { provider: "claude", sessionId: "native-history" },
+  };
+  const timeline = new InMemoryAgentTimelineStore();
+  timeline.initialize(agentId, {
+    items: [
+      { type: "user_message", text: "remember this" },
+      { type: "assistant_message", text: "remembered" },
+    ],
+  });
+  const readStoredTimeline = vi.fn(async (_record, options) => timeline.fetch(agentId, options));
+  const resume = vi.fn(async () => {
+    throw new Error("All Claude accounts exhausted");
+  });
+  const create = vi.fn();
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      waitForAgentClose: vi.fn(async () => {}),
+      getAgent: vi.fn(() => null),
+      readStoredTimeline,
+      resumeAgentFromPersistence: resume,
+      createAgent: create,
+    },
+    agentStorage: { get: vi.fn(async () => record) },
+  });
+  await session.handleMessage({
+    type: "fetch_agent_timeline_request",
+    agentId,
+    requestId: "closed-fetch",
+  });
+  await session.handleMessage({
+    type: "agent.timeline.search.request",
+    agentId,
+    requestId: "closed-search",
+    query: "remember",
+  });
+  await session.handleMessage({
+    type: "agent.timeline.list_prompts.request",
+    agentId,
+    requestId: "closed-prompts",
+  });
+  expect(messages).toHaveLength(3);
+  expect(messages[0]).toMatchObject({
+    type: "fetch_agent_timeline_response",
+    payload: {
+      agent: { id: agentId, status: "closed" },
+      entries: [
+        { provider: "claude", item: { type: "user_message", text: "remember this" } },
+        { provider: "claude", item: { type: "assistant_message", text: "remembered" } },
+      ],
+      error: null,
+    },
+  });
+  expect(messages[1]).toMatchObject({
+    type: "agent.timeline.search.response",
+    payload: { locations: expect.any(Array), error: null },
+  });
+  expect(messages[2]).toMatchObject({
+    type: "agent.timeline.list_prompts.response",
+    payload: { prompts: [{ preview: "remember this" }], error: null },
+  });
+  expect(readStoredTimeline).toHaveBeenCalledTimes(4);
+  expect(resume).not.toHaveBeenCalled();
+  expect(create).not.toHaveBeenCalled();
 });
 
 const checkoutGitMocks = vi.hoisted(() => ({

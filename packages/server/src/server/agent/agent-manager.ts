@@ -97,7 +97,8 @@ import {
   type ProviderSubagentStoreEvent,
 } from "./provider-subagents/store.js";
 import { withTimeout } from "../../utils/promise-timeout.js";
-import { extractAttention } from "../persistence-hooks.js";
+import { extractAttention, toAgentPersistenceHandle } from "../persistence-hooks.js";
+import { AgentNotFoundError } from "./agent-loading.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
@@ -767,6 +768,8 @@ export class AgentManager {
   private readonly idFactory: () => string;
   private readonly registry?: AgentStorage;
   private readonly durableTimelineStore?: AgentTimelineStore;
+  private readonly pendingTimelineWrites = new Map<string, Set<Promise<void>>>();
+  private readonly temporaryHistoryReaders = new Map<string, AgentSession>();
   private readonly previousStatuses = new Map<string, AgentLifecycleStatus>();
   private readonly backgroundTasks = new Set<Promise<void>>();
   private readonly agentRegistrationTasks = new Set<Promise<void>>();
@@ -1251,6 +1254,130 @@ export class AgentManager {
     return this.timelineStore.fetch(id, options);
   }
 
+  /** Read a closed agent without acquiring a runtime that could accept a prompt. */
+  readStoredTimeline(
+    record: StoredAgentRecord,
+    options?: AgentTimelineFetchOptions,
+  ): Promise<AgentTimelineFetchResult> {
+    return this.trackAgentRegistrationOperation(
+      this.runLifecycleMutation(record.id, async () => {
+        this.assertAcceptingAgentRegistrations();
+        await this.closeTemporaryHistoryReader(record.id);
+        if (this.agents.has(record.id)) return this.fetchTimeline(record.id, options);
+        if (this.registry) {
+          const current = await this.registry.get(record.id);
+          if (!current) throw new AgentNotFoundError(record.id);
+          record = current;
+        }
+        const retained = await this.readRetainedOrCommittedTimeline(record.id, options);
+        if (retained) return retained;
+
+        const handle = toAgentPersistenceHandle(this.clients.keys(), record.persistence);
+        if (!handle) {
+          if (record.persistence || record.lastUserMessageAt || record.runtimeInfo?.sessionId) {
+            throw new Error(`Stored history is unavailable for agent ${record.id}`);
+          }
+          if (!this.timelineStore.has(record.id)) this.timelineStore.initialize(record.id);
+          return this.timelineStore.fetch(record.id, options);
+        }
+        const rows = await this.readClosedProviderHistory(record, handle);
+        // Some providers return an empty stream when the transcript is missing or
+        // unreadable. A successful reset would erase the client's cached conversation.
+        if (rows.length === 0) {
+          throw new Error(`Provider history is unavailable for agent ${record.id}`);
+        }
+        // Collect first, then seed once. Concurrent readers share the lifecycle lane
+        // and this epoch; no registry write, live session, or timeline deletion occurs.
+        this.timelineStore.initialize(record.id, { rows });
+        return this.timelineStore.fetch(record.id, options);
+      }),
+    );
+  }
+
+  private async readRetainedOrCommittedTimeline(
+    agentId: string,
+    options?: AgentTimelineFetchOptions,
+  ): Promise<AgentTimelineFetchResult | null> {
+    const retained = this.timelineStore.has(agentId)
+      ? this.timelineStore.fetch(agentId, { limit: 1 })
+      : null;
+    if (!this.durableTimelineStore) {
+      return retained?.rows.length ? this.timelineStore.fetch(agentId, options) : null;
+    }
+    await Promise.all(this.pendingTimelineWrites.get(agentId) ?? []);
+    const committed = await this.durableTimelineStore.fetchCommitted(agentId, options);
+    // A complete retained snapshot also owns the epoch clients already have. It
+    // may be ahead of disk after a failed write; never replace it with stale rows.
+    if (
+      retained?.rows.length &&
+      retained.window.minSeq === 1 &&
+      retained.window.maxSeq >= committed.window.maxSeq
+    ) {
+      return this.timelineStore.fetch(agentId, options);
+    }
+    if (retained && retained.window.maxSeq > committed.window.maxSeq) {
+      throw new Error(`Stored history is not fully committed for agent ${agentId}`);
+    }
+    // An empty cursor page is valid when the durable window contains history.
+    return committed.window.maxSeq > 0 ? committed : null;
+  }
+
+  private async readClosedProviderHistory(
+    record: StoredAgentRecord,
+    handle: AgentPersistenceHandle,
+  ): Promise<AgentTimelineRow[]> {
+    const client = this.requireClient(handle.provider);
+    const config = await this.normalizeConfig(
+      { ...handle.metadata, ...buildStoredAgentConfig(record), provider: handle.provider },
+      { purpose: "history", resolveDefaultModel: false },
+    );
+    const launchContext = await this.buildLaunchContext(
+      record.id,
+      client,
+      config.cwd,
+      { enabled: false },
+      undefined,
+      { reason: "resume", purpose: "history", workspaceId: record.workspaceId ?? null },
+    );
+    const session = await client.resumeSession(handle, config, launchContext, {
+      purpose: "history",
+    });
+    this.temporaryHistoryReaders.set(record.id, session);
+    const rows: AgentTimelineRow[] = [];
+    try {
+      for await (const rawEvent of session.streamHistory()) {
+        if (rawEvent.type !== "timeline") continue;
+        const event = limitAgentStreamEventContent(rawEvent);
+        if (event.type !== "timeline") continue;
+        const item = projectAgentMessage(event.item);
+        if (!item) continue;
+        rows.push({
+          seq: rows.length + 1,
+          timestamp: event.timestamp ?? record.createdAt,
+          item,
+          ...(event.turnId ? { turnId: event.turnId } : {}),
+        });
+      }
+      return rows;
+    } finally {
+      await this.closeTemporaryHistoryReader(record.id);
+    }
+  }
+
+  private async closeTemporaryHistoryReader(agentId: string): Promise<void> {
+    const session = this.temporaryHistoryReaders.get(agentId);
+    if (!session) return;
+    const result = await this.waitWithTimeout({
+      operation: this.closeSession(session),
+      timeoutMs: this.rescueTimeouts.reloadSessionCloseMs,
+      onLateError: (error) => {
+        this.logger.warn({ err: error, agentId }, "Temporary history reader close failed");
+      },
+    });
+    if (result === "timed_out") throw new Error("Timed out closing temporary history reader");
+    this.temporaryHistoryReaders.delete(agentId);
+  }
+
   listProviderSubagents(parentAgentId: string): ProviderSubagentDescriptor[] {
     this.requirePublicAgent(parentAgentId);
     return this.providerSubagents.list(parentAgentId);
@@ -1407,6 +1534,7 @@ export class AgentManager {
       agentId ?? this.idFactory(),
       "resumeAgentFromPersistence",
     );
+    await this.closeTemporaryHistoryReader(resolvedAgentId);
     const metadata = (handle.metadata ?? {}) as Partial<AgentSessionConfig>;
     const mergedConfig = {
       ...metadata,
@@ -5205,7 +5333,7 @@ export class AgentManager {
         "Failed to append timeline row to durable store",
       );
     });
-    this.trackBackgroundTask(task);
+    this.trackTimelineWrite(agentId, task);
   }
 
   private enqueueDurableTimelineBulkInsert(
@@ -5221,7 +5349,7 @@ export class AgentManager {
         "Failed to seed durable timeline store",
       );
     });
-    this.trackBackgroundTask(task);
+    this.trackTimelineWrite(agentId, task);
   }
 
   private enqueueDurableTimelineUpdate(agentId: string, row: AgentTimelineRow): void {
@@ -5231,6 +5359,17 @@ export class AgentManager {
         { err, agentId, seq: row.seq, itemType: row.item.type },
         "Failed to enrich durable timeline row",
       );
+    });
+    this.trackTimelineWrite(agentId, task);
+  }
+
+  private trackTimelineWrite(agentId: string, task: Promise<void>): void {
+    const pending = this.pendingTimelineWrites.get(agentId) ?? new Set<Promise<void>>();
+    pending.add(task);
+    this.pendingTimelineWrites.set(agentId, pending);
+    void task.finally(() => {
+      pending.delete(task);
+      if (pending.size === 0) this.pendingTimelineWrites.delete(agentId);
     });
     this.trackBackgroundTask(task);
   }
@@ -5269,6 +5408,13 @@ export class AgentManager {
    */
   async flushForShutdown(): Promise<void> {
     await this.flushTasks({ includeAgentRegistrations: true });
+    const readers = await Promise.allSettled(
+      [...this.temporaryHistoryReaders.keys()].map((agentId) =>
+        this.runLifecycleMutation(agentId, () => this.closeTemporaryHistoryReader(agentId)),
+      ),
+    );
+    const failed = readers.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
   }
 
   private async flushTasks(options: { includeAgentRegistrations: boolean }): Promise<void> {
