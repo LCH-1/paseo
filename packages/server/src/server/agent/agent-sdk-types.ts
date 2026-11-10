@@ -689,6 +689,14 @@ export interface AgentSession {
   ): Promise<AgentPermissionResult | void>;
   describePersistence(): AgentPersistenceHandle | null;
   /**
+   * The provider subagents still running that outlive the turn that launched them and report back
+   * on their own, such as Claude's background subagents and workflows. Each is named by the id its
+   * `provider_subagent` events carry, so a caller can tell this work's own reports from any other
+   * subagent's. Read from the live runtime only: replayed history proves nothing about what is
+   * running now. Providers whose turns own all of their work omit it.
+   */
+  getRunningBackgroundWorkIds?(): readonly string[];
+  /**
    * Resolve once every foreground turn that predates this call can no longer run or become active.
    * Calling while already idle is a successful no-op. Reject only when foreground ownership is
    * still uncertain.

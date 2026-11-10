@@ -251,6 +251,24 @@ export class ClaudeTaskProtocolSource {
     return !this.idsWithExistingParentToolCard.has(subagentId);
   }
 
+  /**
+   * The subagents whose work outlives a turn and is still running: a backgrounded subagent, or a
+   * workflow. Claude wakes the main session when either reports back.
+   *
+   * A workflow always runs in the background, and `is_backgrounded` is not set for one. A
+   * foreground subagent blocks the tool call that spawned it, so it never outlives a turn that
+   * ended normally; counting one whose end went unannounced would keep reporting background work
+   * that is not there.
+   */
+  runningBackgroundSubagentIds(): string[] {
+    const ids: string[] = [];
+    for (const [taskId, id] of this.subagentIdByTaskId) {
+      if (this.lastStatusById.get(id) !== "running") continue;
+      if (this.backgroundedIds.has(id) || this.workflowTaskIds.has(taskId)) ids.push(id);
+    }
+    return ids;
+  }
+
   observe(message: SDKMessage): SubagentObservation[] {
     if (message.type !== "system") return [];
     switch (message.subtype) {

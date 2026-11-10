@@ -103,6 +103,13 @@ import { AgentNotFoundError } from "./agent-loading.js";
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
 const IMPORTABLE_SESSION_LIST_TIMEOUT_MS = 90_000;
+/**
+ * After a session's background work ends, how long its finished attention waits for the turn the
+ * provider starts on its own to report that work.
+ */
+const BACKGROUND_WORK_WAKE_GRACE_MS = 15_000;
+/** Background work that reports nothing for this long stops holding finished attention back. */
+const BACKGROUND_WORK_QUIET_LIMIT_MS = 30 * 60 * 1000;
 const STORED_AGENT_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: false,
   supportsSessionPersistence: true,
@@ -309,6 +316,35 @@ interface PendingTurnRetry {
   attempts: number;
   timer: ReturnType<typeof setTimeout> | null;
 }
+
+/**
+ * Finished attention held back because the turn ended while its session still had background
+ * work running. The agent is idle and unattended for as long as this exists.
+ *
+ * Close, reload and daemon shutdown release the runtime and end that work with it, so they record
+ * the held turn as unread without a completion notice. Archive drops it.
+ */
+interface DeferredFinishedAttention {
+  timer: ReturnType<typeof setTimeout>;
+  /**
+   * When the timer may raise the attention. Background activity pushes it back, and the timer
+   * re-arms itself for the remainder instead of being reset on every subagent event.
+   */
+  deadline: number;
+  /** The background work has ended; only the wake grace is left. */
+  settling: boolean;
+}
+
+type AttentionCause =
+  | "turn_ended"
+  | "turn_stopped"
+  | "entered_error"
+  | "background_work_finished"
+  | "background_work_quiet"
+  | "runtime_released"
+  | "marked_unread";
+
+type DeferredAttentionDropCause = "turn_started" | "entered_error" | "agent_closed";
 
 interface ProviderEnabledFlag {
   enabled: boolean;
@@ -764,6 +800,9 @@ export class AgentManager {
   private readonly foregroundMutationTails = new Map<string, Promise<void>>();
   private readonly runs = new AgentRunState();
   private readonly turnRetries = new Map<string, PendingTurnRetry>();
+  private readonly deferredFinishedAttention = new Map<string, DeferredFinishedAttention>();
+  /** Per agent, when each of its running background tasks last showed a sign of life. */
+  private readonly backgroundWorkSeenAt = new Map<string, Map<string, number>>();
   private readonly subscribers = new Set<SubscriptionRecord>();
   private readonly idFactory: () => string;
   private readonly registry?: AgentStorage;
@@ -1716,6 +1755,7 @@ export class AgentManager {
       await this.cancelAgentRunBefore(agentId, "reload");
       existing = this.requireSessionAgent(agentId);
     }
+    this.raiseDeferredFinishedAttention(agentId, { cause: "runtime_released", notify: false });
     const rehydrateFromDisk = options?.rehydrateFromDisk ?? false;
     const preservedHistoryPrimed = existing.historyPrimed;
     const preservedLastUsage = existing.lastUsage;
@@ -1919,7 +1959,9 @@ export class AgentManager {
 
     const close = this.runLifecycleMutation(agentId, async () => {
       // A preceding reload or archive may already have closed the durable agent.
-      if (this.agents.has(agentId)) await this.closeAgentRuntime(agentId);
+      if (!this.agents.has(agentId)) return;
+      this.raiseDeferredFinishedAttention(agentId, { cause: "runtime_released", notify: false });
+      await this.closeAgentRuntime(agentId);
     });
     this.inFlightAgentCloses.set(agentId, close);
     const clearClose = () => {
@@ -1999,6 +2041,9 @@ export class AgentManager {
     requestedArchivedAt?: string,
   ): Promise<{ archivedAt: string }> {
     const agent = this.requireAgent(agentId);
+    // The runtime stays registered across the awaits below. Held attention coming due in between
+    // would announce the chat being archived and leave its archived record unread.
+    this.dropDeferredFinishedAttention(agent, "agent_closed");
     if (agent.internal) {
       // Nothing about an internal agent is on disk, and archiving must not put
       // it there. Its final snapshot is kept in memory for a while (see
@@ -2392,6 +2437,10 @@ export class AgentManager {
   async clearAgentAttention(agentId: string): Promise<void> {
     const agent = this.requireAgent(agentId);
     if (agent.attention.requiresAttention) {
+      this.logger.info(
+        { agentId, provider: agent.provider, reason: agent.attention.attentionReason },
+        "Agent attention cleared",
+      );
       agent.attention = { requiresAttention: false };
       await this.persistSnapshot(agent);
       this.emitState(agent, { persist: false });
@@ -2408,11 +2457,7 @@ export class AgentManager {
       if (!canMarkUnread) {
         throw new Error(`Agent is no longer finished and read: ${agentId}`);
       }
-      liveAgent.attention = {
-        requiresAttention: true,
-        attentionReason: "finished",
-        attentionTimestamp: new Date(),
-      };
+      this.raiseAttention(liveAgent, "finished", { cause: "marked_unread", notify: false });
       await this.persistSnapshot(liveAgent);
       this.emitState(liveAgent, { persist: false });
       return;
@@ -2435,6 +2480,10 @@ export class AgentManager {
       attentionTimestamp: updatedAt,
     };
     await registry.upsert(nextRecord);
+    this.logger.info(
+      { agentId, provider: record.provider, reason: "finished", cause: "marked_unread" },
+      "Agent attention set",
+    );
     this.dispatchStoredAgentState(nextRecord);
   }
 
@@ -2497,7 +2546,13 @@ export class AgentManager {
 
     // Close and native restore share the lifecycle lane with persisted resume.
     // No new history or interactive runtime can acquire the writer between them.
-    if (this.agents.has(agentId)) await this.closeAgentRuntime(agentId);
+    const liveAgent = this.agents.get(agentId);
+    if (liveAgent) {
+      // Restoring writes back the record read above, so held attention coming due while the
+      // runtime closes would only announce a chat that then reads as already seen.
+      this.dropDeferredFinishedAttention(liveAgent, "agent_closed");
+      await this.closeAgentRuntime(agentId);
+    }
     await this.syncNativeArchiveState(record.provider, record.persistence, "restore");
 
     await registry.upsert({
@@ -3332,7 +3387,15 @@ export class AgentManager {
       (agent.lifecycle === "running" ? this.runs.trackAutonomousRun(agentId, null) : null);
     // A queued Stop belongs to the run present when the request arrived, not
     // a later prompt that starts before this foreground mutation can enter.
-    return this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId, run));
+    const result = await this.runForegroundMutation(agentId, () =>
+      this.cancelAgentRunNow(agentId, run),
+    );
+    // Stopping a turn reports it at once, as it always has: background work that outlives the
+    // stopped turn does not hold its attention back.
+    if (run) {
+      this.raiseDeferredFinishedAttention(agentId, { cause: "turn_stopped", notify: true });
+    }
+    return result;
   }
 
   private async cancelAgentRunNow(
@@ -4066,6 +4129,8 @@ export class AgentManager {
     this.agentStreamCoalescer.flushAndDiscard(agent.id);
     this.agents.delete(agent.id);
     this.previousStatuses.delete(agent.id);
+    this.dropDeferredFinishedAttention(agent, "agent_closed");
+    this.backgroundWorkSeenAt.delete(agent.id);
     if (agent.unsubscribeSession) {
       agent.unsubscribeSession();
       agent.unsubscribeSession = null;
@@ -4207,6 +4272,8 @@ export class AgentManager {
     if (event.type === "provider_subagent") {
       const update = this.providerSubagents.apply(agent.id, event.provider, event.event);
       if (update) this.dispatch({ type: "provider_subagent", event: update });
+      // An unchanged re-report still proves the background work is alive.
+      this.noteBackgroundWorkActivity(agent, event.event.id);
       return;
     }
     // State transitions and foreground consumers must use the same turn identity.
@@ -5304,6 +5371,13 @@ export class AgentManager {
       return;
     }
 
+    // A turn that starts decides attention again when it ends, and an error is reported at once.
+    if (currentStatus === "running") {
+      this.dropDeferredFinishedAttention(agent, "turn_started");
+    } else if (currentStatus === "error") {
+      this.dropDeferredFinishedAttention(agent, "entered_error");
+    }
+
     // Skip if already requires attention
     if (agent.attention.requiresAttention) {
       return;
@@ -5311,25 +5385,178 @@ export class AgentManager {
 
     // Check if agent transitioned from running to idle (finished)
     if (previousStatus === "running" && currentStatus === "idle") {
-      agent.attention = {
-        requiresAttention: true,
-        attentionReason: "finished",
-        attentionTimestamp: new Date(),
-      };
-      this.broadcastAgentAttention(agent, "finished");
+      // The provider wakes the session when its background work reports back, so the turn that
+      // just ended is not the end of the work. Announcing it now would show the chat as finished
+      // and unread, then flip it back to working.
+      const quietDeadline = this.backgroundWorkQuietDeadline(agent);
+      if (quietDeadline !== null) {
+        this.deferFinishedAttention(agent, quietDeadline);
+        return;
+      }
+      this.raiseAttention(agent, "finished", { cause: "turn_ended", notify: true });
       return;
     }
 
     // Check if agent entered error state
     if (previousStatus !== "error" && currentStatus === "error") {
-      agent.attention = {
-        requiresAttention: true,
-        attentionReason: "error",
-        attentionTimestamp: new Date(),
-      };
-      this.broadcastAgentAttention(agent, "error");
+      this.raiseAttention(agent, "error", { cause: "entered_error", notify: true });
       return;
     }
+  }
+
+  private raiseAttention(
+    agent: ManagedAgent,
+    reason: "finished" | "error",
+    options: { cause: AttentionCause; notify: boolean },
+  ): void {
+    agent.attention = {
+      requiresAttention: true,
+      attentionReason: reason,
+      attentionTimestamp: new Date(),
+    };
+    this.logger.info(
+      { agentId: agent.id, provider: agent.provider, reason, cause: options.cause },
+      "Agent attention set",
+    );
+    if (options.notify) {
+      this.broadcastAgentAttention(agent, reason);
+    }
+  }
+
+  /**
+   * When the agent's running background work stops holding attention back for want of any sign
+   * of life, or null when none is running or that moment has passed. Each task is measured from
+   * its own last report, and from now the first time a turn ends on one that has reported
+   * nothing. A task whose end was never reported therefore holds attention back for one quiet
+   * limit in total, whatever the later turns run.
+   */
+  private backgroundWorkQuietDeadline(agent: ManagedAgent): number | null {
+    const runningIds = agent.session?.getRunningBackgroundWorkIds?.() ?? [];
+    if (runningIds.length === 0) {
+      this.backgroundWorkSeenAt.delete(agent.id);
+      return null;
+    }
+    const now = Date.now();
+    const previous = this.backgroundWorkSeenAt.get(agent.id);
+    const seenAt = new Map<string, number>(runningIds.map((id) => [id, previous?.get(id) ?? now]));
+    this.backgroundWorkSeenAt.set(agent.id, seenAt);
+    const deadline = Math.max(...seenAt.values()) + BACKGROUND_WORK_QUIET_LIMIT_MS;
+    return deadline > now ? deadline : null;
+  }
+
+  private deferFinishedAttention(agent: ManagedAgent, deadline: number): void {
+    clearTimeout(this.deferredFinishedAttention.get(agent.id)?.timer);
+    this.deferredFinishedAttention.set(agent.id, {
+      timer: this.armDeferredFinishedAttention(agent.id, deadline - Date.now()),
+      deadline,
+      settling: false,
+    });
+    this.logger.info(
+      {
+        agentId: agent.id,
+        provider: agent.provider,
+        backgroundWork: [...(this.backgroundWorkSeenAt.get(agent.id)?.keys() ?? [])],
+        quietDeadline: new Date(deadline).toISOString(),
+      },
+      "Agent finished attention deferred while background work runs",
+    );
+  }
+
+  private armDeferredFinishedAttention(
+    agentId: string,
+    delayMs: number,
+  ): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(() => this.onDeferredFinishedAttentionDue(agentId), delayMs);
+    timer.unref();
+    return timer;
+  }
+
+  private onDeferredFinishedAttentionDue(agentId: string): void {
+    const deferred = this.deferredFinishedAttention.get(agentId);
+    if (!deferred) {
+      return;
+    }
+    const remainingMs = deferred.deadline - Date.now();
+    if (remainingMs > 0) {
+      deferred.timer = this.armDeferredFinishedAttention(agentId, remainingMs);
+      return;
+    }
+    this.raiseDeferredFinishedAttention(agentId, {
+      cause: deferred.settling ? "background_work_finished" : "background_work_quiet",
+      notify: true,
+    });
+  }
+
+  /**
+   * A live subagent event. Only one from background work that is still running is a sign of that
+   * work's life: any other subagent reporting says nothing about a background task that has gone
+   * silent, and must not renew its hold on attention.
+   */
+  private noteBackgroundWorkActivity(agent: ActiveManagedAgent, subagentId: string): void {
+    const runningIds = agent.session.getRunningBackgroundWorkIds?.();
+    if (!runningIds) {
+      return;
+    }
+    const deferred = this.deferredFinishedAttention.get(agent.id);
+    if (runningIds.length === 0) {
+      this.backgroundWorkSeenAt.delete(agent.id);
+      if (deferred && !deferred.settling) {
+        deferred.settling = true;
+        deferred.deadline = Date.now() + BACKGROUND_WORK_WAKE_GRACE_MS;
+        clearTimeout(deferred.timer);
+        deferred.timer = this.armDeferredFinishedAttention(agent.id, BACKGROUND_WORK_WAKE_GRACE_MS);
+      }
+      return;
+    }
+    if (!runningIds.includes(subagentId)) {
+      return;
+    }
+    const now = Date.now();
+    const seenAt = this.backgroundWorkSeenAt.get(agent.id);
+    if (seenAt) {
+      seenAt.set(subagentId, now);
+    } else {
+      this.backgroundWorkSeenAt.set(agent.id, new Map([[subagentId, now]]));
+    }
+    if (deferred) {
+      deferred.settling = false;
+      deferred.deadline = now + BACKGROUND_WORK_QUIET_LIMIT_MS;
+    }
+  }
+
+  private raiseDeferredFinishedAttention(
+    agentId: string,
+    options: { cause: AttentionCause; notify: boolean },
+  ): void {
+    const deferred = this.deferredFinishedAttention.get(agentId);
+    if (!deferred) {
+      return;
+    }
+    clearTimeout(deferred.timer);
+    this.deferredFinishedAttention.delete(agentId);
+    const agent = this.agents.get(agentId);
+    // Marking the chat unread by hand already covers the turn that was held back.
+    if (!agent || agent.lifecycle !== "idle" || agent.attention.requiresAttention) {
+      return;
+    }
+    this.raiseAttention(agent, "finished", options);
+    this.emitState(agent);
+  }
+
+  private dropDeferredFinishedAttention(
+    agent: ManagedAgent,
+    cause: DeferredAttentionDropCause,
+  ): void {
+    const deferred = this.deferredFinishedAttention.get(agent.id);
+    if (!deferred) {
+      return;
+    }
+    clearTimeout(deferred.timer);
+    this.deferredFinishedAttention.delete(agent.id);
+    this.logger.info(
+      { agentId: agent.id, provider: agent.provider, cause },
+      "Agent deferred finished attention dropped",
+    );
   }
 
   private enqueueBackgroundPersist(agent: ManagedAgent): void {

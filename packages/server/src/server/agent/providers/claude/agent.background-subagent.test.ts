@@ -185,6 +185,56 @@ describe("background Claude subagents", () => {
     });
   });
 
+  test("names running background work by its subagent event id from the turn that launched it until it settles", async () => {
+    queryFactory.mockImplementation(() =>
+      buildQueryMock([
+        { type: "system", subtype: "init", session_id: "bg-session", permissionMode: "default" },
+        {
+          type: "system",
+          subtype: "task_started",
+          task_id: "bg-task",
+          tool_use_id: "toolu_background",
+          task_type: "local_agent",
+          subagent_type: "general-purpose",
+          description: "Count files here",
+          is_backgrounded: true,
+        },
+        { type: "result", subtype: "success", usage: {}, total_cost_usd: 0 },
+        {
+          type: "system",
+          subtype: "task_notification",
+          task_id: "bg-task",
+          tool_use_id: "toolu_background",
+          status: "completed",
+        },
+        { type: "system", subtype: "init", session_id: "bg-session", permissionMode: "default" },
+        { type: "result", subtype: "success", usage: {}, total_cost_usd: 0 },
+      ]),
+    );
+    const session = await new ClaudeAgentClient({
+      logger: createTestLogger(),
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    }).createSession({ provider: "claude", cwd: process.cwd() });
+    const backgroundWorkAtTurnEnd: Array<readonly string[] | undefined> = [];
+    const subagentEventIds = new Set<string>();
+    const bothTurnsEnded = new Promise<void>((resolve) => {
+      session.subscribe((event) => {
+        if (event.type === "provider_subagent") subagentEventIds.add(event.event.id);
+        if (event.type !== "turn_completed") return;
+        backgroundWorkAtTurnEnd.push(session.getRunningBackgroundWorkIds?.());
+        if (backgroundWorkAtTurnEnd.length === 2) resolve();
+      });
+    });
+
+    await session.startTurn("delegate work");
+    await bothTurnsEnded;
+    await session.close();
+
+    expect(backgroundWorkAtTurnEnd).toEqual([["toolu_background"], []]);
+    expect([...subagentEventIds]).toEqual(["toolu_background"]);
+  });
+
   test("exposes a workflow through the same provider-subagent stream as its child frames", async () => {
     const workflowOutputPath = writeWorkflowOutput();
     queryFactory.mockImplementation(() =>

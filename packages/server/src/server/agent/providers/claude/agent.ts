@@ -2895,6 +2895,10 @@ class ClaudeAgentSession implements AgentSession {
     return this.persistence;
   }
 
+  getRunningBackgroundWorkIds(): string[] {
+    return this.taskProtocolSource.runningBackgroundSubagentIds();
+  }
+
   async close(): Promise<void> {
     this.logger.trace(
       {

@@ -568,6 +568,63 @@ describe("ClaudeTaskProtocolSource", () => {
     ]);
   });
 
+  it("names running background subagents until every backgrounded subagent and workflow has settled", () => {
+    const source = new ClaudeTaskProtocolSource();
+    expect(source.runningBackgroundSubagentIds()).toEqual([]);
+
+    source.observe(taskStarted({ is_backgrounded: true }));
+    // A workflow always runs in the background, and Claude sets no is_backgrounded on one.
+    source.observe(
+      taskStarted({
+        task_id: "wf-1",
+        tool_use_id: "toolu_workflow",
+        task_type: "local_workflow",
+        subagent_type: undefined,
+      }),
+    );
+    expect(source.runningBackgroundSubagentIds()).toEqual(["toolu_01DgLoPMW9", "toolu_workflow"]);
+
+    source.observe(taskNotification("completed"));
+    expect(source.runningBackgroundSubagentIds()).toEqual(["toolu_workflow"]);
+
+    source.observe(taskNotification("completed", "wf-1"));
+    expect(source.runningBackgroundSubagentIds()).toEqual([]);
+  });
+
+  it("counts a foreground subagent as background work only once it is moved there", () => {
+    // A foreground child blocks its Task call, so a turn that ends normally is not waiting on it.
+    const source = new ClaudeTaskProtocolSource();
+    source.observe(taskStarted({ is_backgrounded: false }));
+    expect(source.runningBackgroundSubagentIds()).toEqual([]);
+
+    source.observe({
+      type: "system",
+      subtype: "task_updated",
+      task_id: "a1730a6215e1f5cf6",
+      patch: { is_backgrounded: true },
+    } as unknown as SDKMessage);
+    expect(source.runningBackgroundSubagentIds()).toEqual(["toolu_01DgLoPMW9"]);
+  });
+
+  it("does not count a backgrounded shell as background work", () => {
+    // A dev server left running in the background never reports back, so it must not look like
+    // work the session is still waiting on.
+    const source = new ClaudeTaskProtocolSource();
+    source.observe(
+      taskStarted({ task_type: "local_bash", subagent_type: undefined, is_backgrounded: true }),
+    );
+
+    expect(source.runningBackgroundSubagentIds()).toEqual([]);
+  });
+
+  it("names no running background subagents after the process that owned them is lost", () => {
+    const source = new ClaudeTaskProtocolSource();
+    source.observe(taskStarted({ is_backgrounded: true }));
+    source.failRunningTasks();
+
+    expect(source.runningBackgroundSubagentIds()).toEqual([]);
+  });
+
   it("ignores unrelated system messages", () => {
     const source = new ClaudeTaskProtocolSource();
     expect(

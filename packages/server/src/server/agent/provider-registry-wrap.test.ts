@@ -30,6 +30,7 @@ const OPTIONAL_AGENT_SESSION_METHOD_NAMES = [
   "revertFiles",
   "revertBoth",
   "tryHandleOutOfBand",
+  "getRunningBackgroundWorkIds",
 ] as const satisfies readonly OptionalAgentSessionMethodName[];
 
 type MissingOptionalAgentSessionMethod = Exclude<
@@ -131,6 +132,11 @@ class FakeSession implements AgentSession {
     return null;
   }
 
+  getRunningBackgroundWorkIds() {
+    this.recordedCalls.push("getRunningBackgroundWorkIds");
+    return ["toolu_background"];
+  }
+
   async interrupt() {
     this.recordedCalls.push("interrupt");
   }
@@ -199,6 +205,7 @@ describe("wrapSessionProvider", () => {
     await wrapped.revertBoth?.({ messageId: "message-1" });
     const handler = wrapped.tryHandleOutOfBand?.("/compact");
     await handler?.run({ emit: () => {} });
+    expect(wrapped.getRunningBackgroundWorkIds?.()).toEqual(["toolu_background"]);
 
     expect(session.steers).toEqual([
       { prompt: "follow-up", options: { expectedTurnId: "turn-1" } },
@@ -214,6 +221,7 @@ describe("wrapSessionProvider", () => {
       "revertBoth",
       "tryHandleOutOfBand",
       "tryHandleOutOfBand.run",
+      "getRunningBackgroundWorkIds",
     ]);
   });
   test("keeps provider-owned session values live", () => {
@@ -245,5 +253,13 @@ describe("wrapSessionProvider", () => {
     const session: AgentSession = new FakeSession();
     session.steerActiveTurn = undefined;
     expect(wrapSessionProvider("custom-claude", session).steerActiveTurn).toBeUndefined();
+  });
+
+  test("leaves background work unreported when the provider does not track it", () => {
+    const session: AgentSession = new FakeSession();
+    session.getRunningBackgroundWorkIds = undefined;
+    expect(
+      wrapSessionProvider("custom-claude", session).getRunningBackgroundWorkIds,
+    ).toBeUndefined();
   });
 });

@@ -8873,6 +8873,506 @@ test("clearAgentAttention on errored agent stays cleared until a new error trans
   expect(persistedAfterSecondFailure?.attentionReason).toBe("error");
 });
 
+type BackgroundWorkTurn =
+  | "launches_background_work"
+  | "launches_silent_background_work"
+  | "hears_from_background_work"
+  | "runs_foreground_subagent"
+  | "plain"
+  | "holds";
+
+const BACKGROUND_SUBAGENT_ID = "background-subagent";
+
+class BackgroundWorkSession extends TestAgentSession {
+  nextTurn: BackgroundWorkTurn = "launches_background_work";
+  closeDelayMs = 0;
+  readonly closeEntered = deferred<void>();
+  private backgroundWorkRunning = false;
+  private heldTurnId: string | null = null;
+  private turnCount = 0;
+
+  getRunningBackgroundWorkIds(): string[] {
+    return this.backgroundWorkRunning ? [BACKGROUND_SUBAGENT_ID] : [];
+  }
+
+  override async startTurn(): Promise<{ turnId: string }> {
+    const turnId = `background-work-turn-${++this.turnCount}`;
+    const turn = this.nextTurn;
+    setTimeout(() => {
+      this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+      if (turn === "launches_background_work") {
+        this.reportBackgroundSubagent({ status: "running" });
+      }
+      if (turn === "launches_silent_background_work") {
+        this.backgroundWorkRunning = true;
+      }
+      if (turn === "hears_from_background_work") {
+        this.reportBackgroundSubagent({ subtitle: "40k tokens" });
+      }
+      if (turn === "runs_foreground_subagent") {
+        this.pushEvent({
+          type: "provider_subagent",
+          provider: this.provider,
+          event: { type: "upsert", id: "foreground-subagent", status: "completed" },
+        });
+      }
+      if (turn === "holds") {
+        this.heldTurnId = turnId;
+      } else {
+        this.pushEvent({ type: "turn_completed", provider: this.provider, turnId });
+      }
+    }, 0);
+    return { turnId };
+  }
+
+  override async interrupt(): Promise<void> {
+    if (!this.heldTurnId) return;
+    const turnId = this.heldTurnId;
+    this.heldTurnId = null;
+    this.pushEvent({ type: "turn_canceled", provider: this.provider, turnId, reason: "stopped" });
+  }
+
+  override async close(): Promise<void> {
+    this.closeEntered.resolve();
+    if (this.closeDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.closeDelayMs));
+    }
+  }
+
+  reportBackgroundSubagent(
+    update: { status: "running" | "completed" | "failed" } | { subtitle: string },
+  ): void {
+    if ("status" in update) {
+      this.backgroundWorkRunning = update.status === "running";
+    }
+    this.pushEvent({
+      type: "provider_subagent",
+      provider: this.provider,
+      event: { type: "upsert", id: BACKGROUND_SUBAGENT_ID, ...update },
+    });
+  }
+
+  /** The provider's own turn, opened to report finished background work. */
+  wake(): void {
+    this.pushEvent({ type: "turn_started", provider: this.provider });
+  }
+
+  finishWake(): void {
+    this.pushEvent({ type: "turn_completed", provider: this.provider });
+  }
+
+  /** The runtime died between turns, taking its background work with it. */
+  exitBetweenTurns(): void {
+    this.reportBackgroundSubagent({ status: "failed" });
+    this.pushEvent({ type: "turn_failed", provider: this.provider, error: "runtime exited" });
+  }
+}
+
+interface BackgroundWorkFixture {
+  manager: AgentManager;
+  agentId: string;
+  session: BackgroundWorkSession;
+  storage: AgentStorage;
+  attentionReasons: string[];
+  runTurn(): Promise<void>;
+}
+
+async function withBackgroundWorkAgent(
+  run: (fixture: BackgroundWorkFixture) => Promise<void>,
+): Promise<void> {
+  vi.useFakeTimers();
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-background-work-"));
+  const config = { provider: "codex", cwd: workdir } as const;
+  const session = new BackgroundWorkSession(config);
+  class BackgroundWorkClient extends TestAgentClient {
+    override async createSession(): Promise<AgentSession> {
+      return session;
+    }
+  }
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const attentionReasons: string[] = [];
+  const manager = new AgentManager({
+    clients: { codex: new BackgroundWorkClient() },
+    logger,
+    registry: storage,
+    onAgentAttention: ({ reason }) => {
+      attentionReasons.push(reason);
+    },
+  });
+  try {
+    const agent = await manager.createAgent(config, undefined, { workspaceId: undefined });
+    await run({
+      manager,
+      agentId: agent.id,
+      session,
+      storage,
+      attentionReasons,
+      async runTurn() {
+        const turn = drainAsyncGenerator(manager.streamAgent(agent.id, "work"));
+        await vi.advanceTimersByTimeAsync(0);
+        await turn;
+        await manager.flush();
+      },
+    });
+  } finally {
+    manager.prepareForShutdown();
+    await vi.advanceTimersByTimeAsync(0);
+    await manager.flush();
+    vi.useRealTimers();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+}
+
+const BACKGROUND_WORK_WAKE_GRACE_MS = 15_000;
+const BACKGROUND_WORK_QUIET_LIMIT_MS = 30 * 60 * 1000;
+
+test("holds finished attention while background work runs, then raises it when no turn follows", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, storage, attentionReasons, runTurn }) => {
+      await runTurn();
+      expect(manager.getAgent(agentId)?.lifecycle).toBe("idle");
+      expect(manager.getAgent(agentId)?.attention).toEqual({ requiresAttention: false });
+
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(attentionReasons).toEqual([]);
+
+      session.reportBackgroundSubagent({ status: "completed" });
+      await manager.flush();
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_WAKE_GRACE_MS - 1);
+      expect(manager.getAgent(agentId)?.attention).toEqual({ requiresAttention: false });
+      expect(attentionReasons).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await manager.flush();
+      expect(manager.getAgent(agentId)?.attention).toMatchObject({
+        requiresAttention: true,
+        attentionReason: "finished",
+      });
+      expect(attentionReasons).toEqual(["finished"]);
+      expect(await storage.get(agentId)).toMatchObject({
+        lastStatus: "idle",
+        requiresAttention: true,
+        attentionReason: "finished",
+      });
+    },
+  );
+});
+
+test("drops held finished attention when the session wakes, and decides again when that turn ends", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, attentionReasons, runTurn }) => {
+      await runTurn();
+      session.reportBackgroundSubagent({ status: "completed" });
+      session.wake();
+      await manager.flush();
+      expect(manager.getAgent(agentId)?.lifecycle).toBe("running");
+
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_QUIET_LIMIT_MS);
+      expect(manager.getAgent(agentId)?.attention).toEqual({ requiresAttention: false });
+      expect(attentionReasons).toEqual([]);
+
+      session.finishWake();
+      await manager.flush();
+      expect(manager.getAgent(agentId)?.lifecycle).toBe("idle");
+      expect(manager.getAgent(agentId)?.attention).toMatchObject({
+        requiresAttention: true,
+        attentionReason: "finished",
+      });
+      expect(attentionReasons).toEqual(["finished"]);
+    },
+  );
+});
+
+test("keeps holding finished attention when more background work starts before the wake grace ends", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, attentionReasons, runTurn }) => {
+      await runTurn();
+      session.reportBackgroundSubagent({ status: "completed" });
+      await manager.flush();
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_WAKE_GRACE_MS - 1);
+      session.reportBackgroundSubagent({ status: "running" });
+      await manager.flush();
+
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_WAKE_GRACE_MS);
+      expect(manager.getAgent(agentId)?.attention).toEqual({ requiresAttention: false });
+      expect(attentionReasons).toEqual([]);
+
+      session.reportBackgroundSubagent({ status: "completed" });
+      await manager.flush();
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_WAKE_GRACE_MS);
+      await manager.flush();
+      expect(manager.getAgent(agentId)?.attention).toMatchObject({
+        requiresAttention: true,
+        attentionReason: "finished",
+      });
+      expect(attentionReasons).toEqual(["finished"]);
+    },
+  );
+});
+
+test("stops holding finished attention once background work has been quiet for the limit", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, attentionReasons, runTurn }) => {
+      await runTurn();
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      session.reportBackgroundSubagent({ subtitle: "12k tokens" });
+      await manager.flush();
+
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_QUIET_LIMIT_MS - 1);
+      expect(manager.getAgent(agentId)?.attention).toEqual({ requiresAttention: false });
+      expect(attentionReasons).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await manager.flush();
+      expect(manager.getAgent(agentId)?.attention).toMatchObject({
+        requiresAttention: true,
+        attentionReason: "finished",
+      });
+      expect(attentionReasons).toEqual(["finished"]);
+    },
+  );
+});
+
+test("does not hold later turns for background work that never reports its end", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, attentionReasons, runTurn }) => {
+      await runTurn();
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_QUIET_LIMIT_MS);
+      await manager.flush();
+      await manager.clearAgentAttention(agentId);
+      expect(attentionReasons).toEqual(["finished"]);
+
+      session.nextTurn = "plain";
+      await runTurn();
+      expect(session.getRunningBackgroundWorkIds()).toEqual([BACKGROUND_SUBAGENT_ID]);
+      expect(manager.getAgent(agentId)?.attention).toMatchObject({
+        requiresAttention: true,
+        attentionReason: "finished",
+      });
+      expect(attentionReasons).toEqual(["finished", "finished"]);
+    },
+  );
+});
+
+test("another subagent's activity does not renew the hold for background work that never reports its end", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, attentionReasons, runTurn }) => {
+      await runTurn();
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_QUIET_LIMIT_MS);
+      await manager.flush();
+      await manager.clearAgentAttention(agentId);
+      expect(attentionReasons).toEqual(["finished"]);
+
+      session.nextTurn = "runs_foreground_subagent";
+      await runTurn();
+      expect(session.getRunningBackgroundWorkIds()).toEqual([BACKGROUND_SUBAGENT_ID]);
+      expect(manager.getAgent(agentId)?.attention).toMatchObject({
+        requiresAttention: true,
+        attentionReason: "finished",
+      });
+      expect(attentionReasons).toEqual(["finished", "finished"]);
+    },
+  );
+});
+
+test("holds a later turn again when the background work itself reported during it", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, attentionReasons, runTurn }) => {
+      await runTurn();
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_QUIET_LIMIT_MS);
+      await manager.flush();
+      await manager.clearAgentAttention(agentId);
+      expect(attentionReasons).toEqual(["finished"]);
+
+      session.nextTurn = "hears_from_background_work";
+      await runTurn();
+      expect(manager.getAgent(agentId)?.attention).toEqual({ requiresAttention: false });
+
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_QUIET_LIMIT_MS - 1);
+      expect(attentionReasons).toEqual(["finished"]);
+      await vi.advanceTimersByTimeAsync(1);
+      await manager.flush();
+      expect(attentionReasons).toEqual(["finished", "finished"]);
+    },
+  );
+});
+
+test("holds finished attention for one quiet limit in total when background work reports nothing at all", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, attentionReasons, runTurn }) => {
+      session.nextTurn = "launches_silent_background_work";
+      await runTurn();
+      expect(manager.getAgent(agentId)?.attention).toEqual({ requiresAttention: false });
+
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_QUIET_LIMIT_MS - 1);
+      expect(attentionReasons).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await manager.flush();
+      expect(attentionReasons).toEqual(["finished"]);
+      await manager.clearAgentAttention(agentId);
+
+      session.nextTurn = "plain";
+      await runTurn();
+      expect(session.getRunningBackgroundWorkIds()).toEqual([BACKGROUND_SUBAGENT_ID]);
+      expect(manager.getAgent(agentId)?.attention).toMatchObject({
+        requiresAttention: true,
+        attentionReason: "finished",
+      });
+      expect(attentionReasons).toEqual(["finished", "finished"]);
+    },
+  );
+});
+
+test("raises finished attention at turn end when no background work is running", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, attentionReasons, runTurn }) => {
+      session.nextTurn = "plain";
+      await runTurn();
+      expect(manager.getAgent(agentId)?.attention).toMatchObject({
+        requiresAttention: true,
+        attentionReason: "finished",
+      });
+      expect(attentionReasons).toEqual(["finished"]);
+    },
+  );
+});
+
+test("reports an error at once and forgets the finished attention it was holding", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, attentionReasons, runTurn }) => {
+      await runTurn();
+      session.exitBetweenTurns();
+      await manager.flush();
+      expect(manager.getAgent(agentId)?.lifecycle).toBe("error");
+      expect(manager.getAgent(agentId)?.attention).toMatchObject({
+        requiresAttention: true,
+        attentionReason: "error",
+      });
+
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_QUIET_LIMIT_MS);
+      await manager.flush();
+      expect(attentionReasons).toEqual(["error"]);
+    },
+  );
+});
+
+test("stopping a turn raises its attention at once while background work keeps running", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, attentionReasons, runTurn }) => {
+      await runTurn();
+      session.nextTurn = "holds";
+      const turn = drainAsyncGenerator(manager.streamAgent(agentId, "more work"));
+      await vi.advanceTimersByTimeAsync(0);
+      await manager.flush();
+      expect(manager.getAgent(agentId)?.lifecycle).toBe("running");
+
+      await expect(manager.cancelAgentRun(agentId)).resolves.toEqual({ status: "settled" });
+      await turn;
+      expect(session.getRunningBackgroundWorkIds()).toEqual([BACKGROUND_SUBAGENT_ID]);
+      expect(manager.getAgent(agentId)?.attention).toMatchObject({
+        requiresAttention: true,
+        attentionReason: "finished",
+      });
+      expect(attentionReasons).toEqual(["finished"]);
+    },
+  );
+});
+
+test("closing an agent records the finished attention it was holding without announcing it", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, storage, attentionReasons, runTurn }) => {
+      await runTurn();
+      await manager.closeAgent(agentId);
+
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_QUIET_LIMIT_MS);
+      await manager.flush();
+      expect(attentionReasons).toEqual([]);
+      expect(await storage.get(agentId)).toMatchObject({
+        lastStatus: "closed",
+        requiresAttention: true,
+        attentionReason: "finished",
+      });
+    },
+  );
+});
+
+test("reloading an agent records the finished attention it was holding without announcing it", async () => {
+  await withBackgroundWorkAgent(async ({ manager, agentId, attentionReasons, runTurn }) => {
+    await runTurn();
+    await manager.reloadAgentSession(agentId);
+
+    await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_QUIET_LIMIT_MS);
+    await manager.flush();
+    expect(manager.getAgent(agentId)?.attention).toMatchObject({
+      requiresAttention: true,
+      attentionReason: "finished",
+    });
+    expect(attentionReasons).toEqual([]);
+  });
+});
+
+test("archiving an agent drops the finished attention it was holding", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, storage, attentionReasons, runTurn }) => {
+      await runTurn();
+      await manager.archiveAgent(agentId);
+
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_QUIET_LIMIT_MS);
+      await manager.flush();
+      expect(attentionReasons).toEqual([]);
+      expectArchivedAgentRecord(await storage.get(agentId), "closed");
+    },
+  );
+});
+
+test("archiving an agent keeps its record read when the held finished attention comes due mid-archive", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, storage, attentionReasons, runTurn }) => {
+      await runTurn();
+      session.reportBackgroundSubagent({ status: "completed" });
+      await manager.flush();
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_WAKE_GRACE_MS - 500);
+
+      session.closeDelayMs = 1_000;
+      const archive = manager.archiveAgent(agentId);
+      await session.closeEntered.promise;
+      await vi.advanceTimersByTimeAsync(session.closeDelayMs);
+      await archive;
+      await manager.flush();
+
+      expect(attentionReasons).toEqual([]);
+      expectArchivedAgentRecord(await storage.get(agentId), "closed");
+    },
+  );
+});
+
+test("unarchiving an agent does not announce the finished attention its retained runtime was holding", async () => {
+  await withBackgroundWorkAgent(
+    async ({ manager, agentId, session, storage, attentionReasons, runTurn }) => {
+      await runTurn();
+      session.reportBackgroundSubagent({ status: "completed" });
+      await manager.flush();
+      // An archived record can keep a live runtime, as when its history is opened.
+      const record = await storage.get(agentId);
+      await storage.upsert({ ...record!, archivedAt: new Date().toISOString() });
+      await vi.advanceTimersByTimeAsync(BACKGROUND_WORK_WAKE_GRACE_MS - 500);
+
+      session.closeDelayMs = 1_000;
+      const unarchive = manager.unarchiveSnapshot(agentId);
+      await session.closeEntered.promise;
+      await vi.advanceTimersByTimeAsync(session.closeDelayMs);
+      await expect(unarchive).resolves.toBe(true);
+      await manager.flush();
+
+      expect(attentionReasons).toEqual([]);
+      expect(await storage.get(agentId)).toMatchObject({
+        archivedAt: null,
+        requiresAttention: false,
+      });
+    },
+  );
+});
+
 test("streamAgent clears pending run when startTurn fails before a turn id exists", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-start-turn-failure-"));
   const storagePath = join(workdir, "agents");
