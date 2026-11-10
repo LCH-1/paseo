@@ -3,6 +3,7 @@ import type { UsagePreferences } from "./preferences";
 import {
   choosePinnedUsageLayout,
   resolvePinnedUsage,
+  resolveProviderPinnedUsage,
   type PinnedUsageSource,
   type PinnedUsageWindow,
 } from "./pinned";
@@ -56,6 +57,31 @@ const codex = report({
   sourceId: "codex",
   sourceLabel: "Codex",
   windows: [{ id: "weekly", label: "Weekly", remainingPct: 88 }],
+});
+
+it("combines accounts into one provider meter without counting legacy duplicates", () => {
+  const first = report({
+    sourceId: "claude",
+    sourceLabel: "Claude",
+    account: "one",
+    windows: [{ id: "weekly", label: "Weekly", usedPct: 100 }],
+  });
+  const second = report({
+    sourceId: "claude",
+    sourceLabel: "Claude",
+    account: "two",
+    windows: [{ id: "weekly", label: "Weekly", usedPct: 0 }],
+  });
+  const duplicate = { ...first, sourceId: "claude-windows", id: "claude-windows:one" };
+  const result = resolveProviderPinnedUsage([first, second, duplicate, codex], preferences(null));
+  expect(result.map((source) => source.key)).toEqual(["claude", "codex"]);
+  expect(result[0].windows).toHaveLength(1);
+  expect(result[0].windows[0]).toMatchObject({ percent: 50, percentText: "50%", tone: "default" });
+  expect(
+    resolveProviderPinnedUsage([first, second], preferences(null, "remaining"))[0].windows[0]
+      .percent,
+  ).toBe(50);
+  expect(resolveProviderPinnedUsage([first], preferences(null))[0].windows[0].percent).toBe(100);
 });
 
 function windows(reports: UsageReportEntry[], prefs: UsagePreferences): PinnedUsageWindow[] {

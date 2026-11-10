@@ -89,6 +89,7 @@ import { projectIconCache } from "@/projects/icon-cache";
 import { nativePerformanceTrace } from "@/performance/native-trace";
 import { revokePushNotifications } from "@/push-notifications";
 import { createAppWebSocketFactory } from "./websocket-factory";
+import { HostStatusPresence, shareWindowHostStatuses } from "./host-status-presence";
 
 export type HostRuntimeConnectionStatus = "idle" | "connecting" | "online" | "offline" | "error";
 export type PairingNavigationTarget = "openProject" | "hostRoot" | "hostSettings";
@@ -2734,6 +2735,7 @@ export class HostRuntimeStore {
 }
 
 let singletonHostRuntimeStore: HostRuntimeStore | null = null;
+const hostStatusPresence = new HostStatusPresence();
 const HOST_RUNTIME_STORE_GLOBAL_KEY = "__paseoHostRuntimeStore";
 
 export function getHostRuntimeStore(): HostRuntimeStore {
@@ -2749,7 +2751,42 @@ export function getHostRuntimeStore(): HostRuntimeStore {
 
   singletonHostRuntimeStore = new HostRuntimeStore();
   Reflect.set(globalThis, HOST_RUNTIME_STORE_GLOBAL_KEY, singletonHostRuntimeStore);
+  if (isWeb && typeof BroadcastChannel !== "undefined") {
+    const store = singletonHostRuntimeStore;
+    const stop = shareWindowHostStatuses({
+      presence: hostStatusPresence,
+      read: () =>
+        Object.fromEntries(
+          store.getHosts().flatMap((host) => {
+            const snapshot = store.getSnapshot(host.serverId);
+            return snapshot ? [[host.serverId, snapshot.connectionStatus]] : [];
+          }),
+        ),
+      subscribe: (listener) => store.subscribeAll(listener),
+    });
+    window.addEventListener("pagehide", stop, { once: true });
+  }
   return singletonHostRuntimeStore;
+}
+
+export function useHostRuntimeDisplayConnectionStatus(
+  serverId: string,
+): HostRuntimeConnectionStatus {
+  const store = getHostRuntimeStore();
+  const read = () =>
+    hostStatusPresence.status(serverId, store.getSnapshot(serverId)?.connectionStatus);
+  return useSyncExternalStore(
+    (listener) => {
+      const local = store.subscribe(serverId, listener);
+      const remote = hostStatusPresence.subscribe(listener);
+      return () => {
+        local();
+        remote();
+      };
+    },
+    read,
+    read,
+  );
 }
 
 export function getHostRuntimeConnectionStatusSince(serverId: string): number | null {
@@ -2787,8 +2824,8 @@ export function useHostRuntimeConnectionStatus(serverId: string): HostRuntimeCon
   const store = getHostRuntimeStore();
   return useSyncExternalStore(
     (onStoreChange) => store.subscribe(serverId, onStoreChange),
-    () => store.getSnapshot(serverId)?.connectionStatus ?? "connecting",
-    () => store.getSnapshot(serverId)?.connectionStatus ?? "connecting",
+    () => store.getSnapshot(serverId)?.connectionStatus ?? "idle",
+    () => store.getSnapshot(serverId)?.connectionStatus ?? "idle",
   );
 }
 

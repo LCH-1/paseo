@@ -1,15 +1,6 @@
 import type { SidebarHostProjectGroup } from "@/components/sidebar/host-project-groups";
 import { SidebarCollapseAllHostsButton } from "@/components/sidebar/sidebar-collapse-actions";
-import { router } from "expo-router";
-import {
-  CircleGauge,
-  FolderPlus,
-  GitBranch,
-  Server,
-  Settings,
-  X,
-  type LucideIcon,
-} from "lucide-react-native";
+import { FolderPlus, GitBranch, X, type LucideIcon } from "lucide-react-native";
 import { useTranslation } from "react-i18next";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
@@ -36,15 +27,12 @@ import {
   SIDEBAR_RESIZE_ACTIVATION_OFFSET,
   SIDEBAR_RESIZE_FAIL_OFFSET,
 } from "@/components/sidebar-resize-handle-layout";
-import { HostPicker } from "@/components/hosts/host-picker";
 import { SidebarDisplayPreferencesMenu } from "@/components/sidebar/display-preferences/menu";
 import { SidebarSectionHeader } from "@/components/sidebar/sidebar-section-header";
 import { getProjectWindowScope } from "@/project-window/state";
-import { SidebarSeparator } from "@/components/sidebar/sidebar-separator";
 import { SidebarNavRows } from "@/components/sidebar/sidebar-nav-rows";
 import { SidebarActivityPanel } from "@/components/sidebar/activity/panel";
 import { SidebarFooterIconHighlight } from "@/components/sidebar/sidebar-footer-icon-highlight";
-import { SidebarHelpMenu } from "@/components/sidebar/sidebar-help-menu";
 import { SidebarResizeHandle } from "@/components/sidebar-resize-handle";
 import { DensityIcon } from "@/components/ui/density-icon";
 import { Shortcut } from "@/components/ui/shortcut";
@@ -64,23 +52,14 @@ import { RetainedPanelActivity } from "@/components/retained-panel";
 import type { SidebarWorkspaceGroup } from "@/components/sidebar/sidebar-labels";
 import type { SidebarProjectIconTarget } from "@/utils/sidebar-project-row-model";
 import { type SidebarGroupMode, useSidebarViewStore } from "@/stores/sidebar-view-store";
-import { useHosts } from "@/runtime/host-runtime";
 import { PluginSidebarItem } from "@/plugins/sidebar-items";
-import { builtinSidebarNavLabelKey } from "@/sidebar-nav/model";
 import { useSidebarNavItems } from "@/sidebar-nav/use-sidebar-nav-items";
 import { usePanelStore } from "@/stores/panel-store";
 import { useOwnsWindowChromeCorner, WindowChromeSafeArea } from "@/utils/desktop-window";
 import { useCloseAgentListGesture } from "@/mobile-panels/gestures";
 import { MobilePanelOverlay } from "@/mobile-panels/presentation";
 import type { ShortcutKey } from "@/utils/format-shortcut";
-import { buildSettingsAddHostRoute, buildSettingsRoute } from "@/utils/host-routes";
-import { openHostOverview } from "@/navigation/settings-navigation";
-import {
-  UsageSidebarItem,
-  UsageSidebarRoot,
-  useHasUsageSummary,
-  useOpenSidebarUsage,
-} from "@/usage";
+import { UsageSidebarItem, UsageSidebarRoot } from "@/usage";
 import { SidebarAgentListSkeleton } from "./sidebar-agent-list-skeleton";
 import { SidebarCalloutSlot } from "./sidebar-callout-slot";
 import { SidebarWorkspaceList } from "./sidebar-workspace-list";
@@ -111,18 +90,11 @@ interface SidebarSharedProps {
   handleRefresh: () => void;
   handleOpenProject: () => void;
   handleImportSession: () => void;
-  handleSettings: () => void;
   labels: SidebarLabels;
-  handleAddHost: () => void;
-  handleOpenHostSettings: (serverId: string) => void;
 }
 
 interface SidebarLabels {
   addProject: string;
-  hosts: string;
-  settings: string;
-  searchHosts: string;
-  usage: string;
   closeSidebar: string;
 }
 
@@ -189,36 +161,6 @@ export const LeftSidebar = memo(function LeftSidebar({ active }: { active: boole
     void openProjectPicker();
   }, [openProjectPicker]);
 
-  const handleSettingsMobile = useCallback(() => {
-    showMobileAgent();
-    router.push(buildSettingsRoute());
-  }, [showMobileAgent]);
-
-  const handleSettingsDesktop = useCallback(() => {
-    router.push(buildSettingsRoute());
-  }, []);
-
-  const handleAddHostMobile = useCallback(() => {
-    showMobileAgent();
-    router.push(buildSettingsAddHostRoute(Date.now()));
-  }, [showMobileAgent]);
-
-  const handleAddHostDesktop = useCallback(() => {
-    router.push(buildSettingsAddHostRoute(Date.now()));
-  }, []);
-
-  const handleOpenHostSettingsMobile = useCallback(
-    (serverId: string) => {
-      showMobileAgent();
-      openHostOverview(serverId);
-    },
-    [showMobileAgent],
-  );
-
-  const handleOpenHostSettingsDesktop = useCallback((serverId: string) => {
-    openHostOverview(serverId);
-  }, []);
-
   const handleImportSessionMobile = useCallback(() => {
     showMobileAgent();
     openImportSession();
@@ -227,10 +169,6 @@ export const LeftSidebar = memo(function LeftSidebar({ active }: { active: boole
   const labels = useMemo(
     (): SidebarLabels => ({
       addProject: t("sidebar.actions.addProject"),
-      hosts: t("sidebar.actions.hosts"),
-      settings: t("sidebar.actions.settings"),
-      searchHosts: t("sidebar.host.searchPlaceholder"),
-      usage: t(builtinSidebarNavLabelKey("usage")),
       closeSidebar: t("sidebar.actions.closeSidebar"),
     }),
     [t],
@@ -269,9 +207,6 @@ export const LeftSidebar = memo(function LeftSidebar({ active }: { active: boole
             closeSidebar={showMobileAgent}
             handleOpenProject={handleOpenProjectMobile}
             handleImportSession={handleImportSessionMobile}
-            handleSettings={handleSettingsMobile}
-            handleAddHost={handleAddHostMobile}
-            handleOpenHostSettings={handleOpenHostSettingsMobile}
           />
         </RetainedPanelActivity>
         {importSessionSheet}
@@ -288,19 +223,12 @@ export const LeftSidebar = memo(function LeftSidebar({ active }: { active: boole
           active={active}
           handleOpenProject={handleOpenProjectDesktop}
           handleImportSession={openImportSession}
-          handleSettings={handleSettingsDesktop}
-          handleAddHost={handleAddHostDesktop}
-          handleOpenHostSettings={handleOpenHostSettingsDesktop}
         />
       </RetainedPanelActivity>
       {importSessionSheet}
     </>
   );
 });
-
-function sidebarHostOptionTestID(serverId: string): string {
-  return `sidebar-host-row-${serverId}`;
-}
 
 function FooterIconButton({
   buttonRef,
@@ -354,59 +282,6 @@ function FooterIconButton({
   );
 }
 
-function SidebarHostPicker({
-  label,
-  onAddHost,
-  onOpenHostSettings,
-}: {
-  label: string;
-  onAddHost: () => void;
-  onOpenHostSettings: (serverId: string) => void;
-}) {
-  const hosts = useHosts();
-  const triggerRef = useRef<View | null>(null);
-  const [isOpen, setIsOpen] = useState(false);
-
-  const handleSelect = useCallback(
-    (id: string) => {
-      onOpenHostSettings(id);
-    },
-    [onOpenHostSettings],
-  );
-
-  const handleOpen = useCallback(() => setIsOpen(true), []);
-
-  return (
-    <HostPicker
-      hosts={hosts}
-      value=""
-      onSelect={handleSelect}
-      open={isOpen}
-      onOpenChange={setIsOpen}
-      anchorRef={triggerRef}
-      includeAddHost
-      onAddHost={onAddHost}
-      showActiveConnection
-      onOpenHostSettings={onOpenHostSettings}
-      searchable
-      desktopPlacement="top-start"
-      desktopMinWidth={240}
-      addHostTestID="sidebar-host-add"
-      hostOptionTestID={sidebarHostOptionTestID}
-    >
-      <FooterIconButton
-        buttonRef={triggerRef}
-        onPress={handleOpen}
-        testID="sidebar-hosts-trigger"
-        label={label}
-        icon={Server}
-        // Server's two boxes fill more of the square than the other glyphs.
-        iconSizeAdjustment={-1}
-      />
-    </HostPicker>
-  );
-}
-
 function IconTooltipContent({
   label,
   shortcutKeys,
@@ -424,33 +299,35 @@ function IconTooltipContent({
 
 function SidebarFooter({
   handleOpenProject,
-  handleSettings,
   labels,
-  handleAddHost,
-  handleOpenHostSettings,
   onBeforeNavigate,
 }: {
   handleOpenProject: () => void;
-  handleSettings: () => void;
-  labels: {
-    addProject: string;
-    hosts: string;
-    settings: string;
-    searchHosts: string;
-    usage: string;
-  };
-  handleAddHost: () => void;
-  handleOpenHostSettings: (serverId: string) => void;
+  labels: { addProject: string };
   onBeforeNavigate?: () => void;
 }) {
   const newAgentKeys = useShortcutKeys("new-agent");
-  const settingsKeys = useShortcutKeys("toggle-settings");
-
-  // One line of icons: Add project, Usage, Hosts, then Help and Settings at the end.
+  const { items } = useSidebarNavItems("footer");
+  const rowsRef = useRef<View | null>(null);
+  const plugins = items.filter((item) => item.visible && item.kind === "plugin");
   return (
     <UsageSidebarRoot>
       <View style={styles.footerContainer} testID="sidebar-footer">
-        <SidebarFooterRows onBeforeNavigate={onBeforeNavigate} />
+        {plugins.length ? (
+          <View ref={rowsRef} collapsable={false} style={styles.footerRows}>
+            {plugins.map((item) =>
+              item.kind === "plugin" ? (
+                <PluginSidebarItem
+                  key={item.key}
+                  group={item.group}
+                  section="footer"
+                  fallbackAnchorRef={rowsRef}
+                  onBeforeNavigate={onBeforeNavigate}
+                />
+              ) : null,
+            )}
+          </View>
+        ) : null}
         <View style={styles.sidebarFooter} testID="sidebar-footer-bottom-line">
           <FooterIconButton
             onPress={handleOpenProject}
@@ -459,70 +336,12 @@ function SidebarFooter({
             icon={FolderPlus}
             shortcutKeys={newAgentKeys}
           />
-          <SidebarUsageIcon label={labels.usage} />
-          <SidebarHostPicker
-            label={labels.hosts}
-            onAddHost={handleAddHost}
-            onOpenHostSettings={handleOpenHostSettings}
-          />
-          <View style={styles.footerSpacer} />
-          <SidebarHelpMenu />
-          <FooterIconButton
-            onPress={handleSettings}
-            testID="sidebar-settings"
-            label={labels.settings}
-            icon={Settings}
-            shortcutKeys={settingsKeys}
-          />
+          <View style={styles.footerUsage}>
+            <UsageSidebarItem />
+          </View>
         </View>
       </View>
     </UsageSidebarRoot>
-  );
-}
-
-function SidebarUsageIcon({ label }: { label: string }) {
-  const openUsage = useOpenSidebarUsage();
-  return (
-    <FooterIconButton
-      onPress={openUsage}
-      testID="sidebar-usage-icon"
-      label={label}
-      icon={CircleGauge}
-    />
-  );
-}
-
-/**
- * The footer rows in the user's `sidebarFooterItems` order: the Usage item and plugin rows. The
- * Usage item is left out while it has no summary to show.
- */
-function SidebarFooterRows({ onBeforeNavigate }: { onBeforeNavigate?: () => void }) {
-  const { items } = useSidebarNavItems("footer");
-  const hasUsageSummary = useHasUsageSummary();
-  const rowsRef = useRef<View | null>(null);
-  const visibleItems = items.filter(
-    (item) => item.visible && (item.kind === "plugin" || hasUsageSummary),
-  );
-  if (visibleItems.length === 0) return null;
-  return (
-    <>
-      <View ref={rowsRef} collapsable={false} style={styles.footerRows}>
-        {visibleItems.map((item) =>
-          item.kind === "plugin" ? (
-            <PluginSidebarItem
-              key={item.key}
-              group={item.group}
-              section="footer"
-              fallbackAnchorRef={rowsRef}
-              onBeforeNavigate={onBeforeNavigate}
-            />
-          ) : (
-            <UsageSidebarItem key={item.key} />
-          ),
-        )}
-      </View>
-      <SidebarSeparator testID="sidebar-footer-separator" />
-    </>
   );
 }
 
@@ -547,10 +366,7 @@ function MobileSidebar({
   handleRefresh,
   handleOpenProject,
   handleImportSession,
-  handleSettings,
   labels,
-  handleAddHost,
-  handleOpenHostSettings,
   insetsTop,
   insetsBottom,
   closeSidebar,
@@ -578,16 +394,13 @@ function MobileSidebar({
   );
 
   const navigationTrailing = useMemo(
-    () =>
-      isProjectWindow ? (
-        <View style={styles.workspaceActions}>
-          {workspaceActionsElement}
-          {closeButton}
-        </View>
-      ) : (
-        closeButton
-      ),
-    [closeButton, isProjectWindow],
+    () => (
+      <View style={styles.workspaceActions}>
+        {workspaceActionsElement}
+        {closeButton}
+      </View>
+    ),
+    [closeButton],
   );
 
   return (
@@ -634,10 +447,7 @@ function MobileSidebar({
         </SidebarActivityPanel>
         <SidebarFooter
           handleOpenProject={handleOpenProject}
-          handleSettings={handleSettings}
           labels={labels}
-          handleAddHost={handleAddHost}
-          handleOpenHostSettings={handleOpenHostSettings}
           onBeforeNavigate={closeSidebar}
         />
       </View>
@@ -693,10 +503,7 @@ function DesktopSidebar({
   handleRefresh,
   handleOpenProject,
   handleImportSession,
-  handleSettings,
   labels,
-  handleAddHost,
-  handleOpenHostSettings,
   insetsTop,
   active,
 }: DesktopSidebarProps) {
@@ -812,7 +619,7 @@ function DesktopSidebar({
           )}
           <SidebarNavRows
             style={sidebarHeaderGroupStyle}
-            firstRowTrailing={isProjectWindow ? workspaceActionsElement : null}
+            firstRowTrailing={workspaceActionsElement}
           />
         </View>
 
@@ -843,13 +650,7 @@ function DesktopSidebar({
         </SidebarActivityPanel>
         <SidebarCalloutSlot />
 
-        <SidebarFooter
-          handleOpenProject={handleOpenProject}
-          handleSettings={handleSettings}
-          labels={labels}
-          handleAddHost={handleAddHost}
-          handleOpenHostSettings={handleOpenHostSettings}
-        />
+        <SidebarFooter handleOpenProject={handleOpenProject} labels={labels} />
 
         <SidebarResizeHandle
           edge="right"
@@ -873,7 +674,7 @@ function WorkspaceActions() {
           </View>
         </TooltipTrigger>
         <TooltipContent side="bottom" align="center" offset={8}>
-          <IconTooltipContent label="Display preferences" />
+          <IconTooltipContent label="메뉴 및 설정" />
         </TooltipContent>
       </Tooltip>
     </View>
@@ -882,9 +683,7 @@ function WorkspaceActions() {
 
 const workspaceActionsElement = <WorkspaceActions />;
 
-const workspacesSectionHeaderElement = (
-  <SidebarSectionHeader title="Workspaces">{workspaceActionsElement}</SidebarSectionHeader>
-);
+const workspacesSectionHeaderElement = <SidebarSectionHeader title="Workspaces" />;
 
 // Static styles for Animated.Views — must NOT use Unistyles dynamic theme to
 // avoid the "Unable to find node on an unmounted component" crash when Unistyles
@@ -965,8 +764,8 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[2],
     paddingVertical: theme.spacing[1.5],
   },
-  // Pushes Help and Settings to the end of the icon line.
-  footerSpacer: {
+  footerUsage: {
+    minWidth: 0,
     flex: 1,
   },
   // Usage and plugin rows sit above the footer's icon line, spaced like the header nav rows.

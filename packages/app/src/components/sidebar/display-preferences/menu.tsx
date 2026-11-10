@@ -1,3 +1,5 @@
+import { router } from "expo-router";
+import { buildSettingsRoute } from "@/utils/host-routes";
 import {
   useCallback,
   useMemo,
@@ -22,7 +24,7 @@ import {
   GitPullRequest,
   Globe,
   Server,
-  Settings2,
+  Ellipsis,
   Tag,
   Type,
 } from "lucide-react-native";
@@ -61,7 +63,7 @@ import { WorkspaceLabelManagerModal } from "@/workspace-labels/manager-modal";
 
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
-const ThemedSettings2 = withUnistyles(Settings2);
+const ThemedEllipsis = withUnistyles(Ellipsis);
 /** CI's mark: the subject of the checks row, and the shape the icon-only option leaves behind. */
 const ThemedCircleCheck = withUnistyles(CircleCheck);
 const ThemedCircle = withUnistyles(Circle);
@@ -174,6 +176,7 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
   const [managerOpen, setManagerOpen] = useState(false);
   const openManager = useCallback(() => setManagerOpen(true), []);
   const closeManager = useCallback(() => setManagerOpen(false), []);
+  const openSettings = useCallback(() => router.push(buildSettingsRoute()), []);
 
   const triggerStyle = useCallback(
     ({ hovered = false }: PressableStateCallbackType & { hovered?: boolean }) => [
@@ -291,10 +294,10 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
         <MenuTrigger
           style={triggerStyle}
           accessibilityRole={isWeb ? undefined : "button"}
-          accessibilityLabel={t("sidebar.display.trigger")}
+          accessibilityLabel={t("sidebar.actions.settings")}
           testID="sidebar-display-preferences-menu"
         >
-          <ThemedSettings2 size={14} uniProps={mutedIconMapping} />
+          <ThemedEllipsis size={14} uniProps={mutedIconMapping} />
         </MenuTrigger>
         <MenuSurface
           align="end"
@@ -303,6 +306,10 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
           sheetTitle={t("sidebar.display.heading")}
           testID="sidebar-display-preferences-content"
         >
+          <MenuItem onSelect={openSettings} testID="sidebar-settings">
+            {t("sidebar.actions.settings")}
+          </MenuItem>
+          <MenuSeparator />
           <MenuSubTrigger
             id="grouping"
             value={t(GROUPING_LABEL_KEYS[preferences.grouping])}

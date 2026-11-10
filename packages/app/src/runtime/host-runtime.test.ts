@@ -34,6 +34,23 @@ import { readDesktopManagedLocalCredential } from "@/desktop/daemon/local-creden
 import type { HostConfirmationRequest } from "./host-confirmation";
 import * as desktopHost from "@/desktop/host";
 import * as desktopDaemon from "@/desktop/daemon/desktop-daemon";
+import { HostStatusPresence } from "./host-status-presence";
+
+it("shares live host observations across project windows without treating unconnected hosts as connecting", () => {
+  let now = 0;
+  const presence = new HostStatusPresence(() => now);
+  expect(presence.status("remote", undefined)).toBe("idle");
+  presence.receive({ owner: "integrated", statuses: { remote: "online", gaming: "offline" } });
+  expect(presence.status("remote", undefined)).toBe("online");
+  expect(presence.status("gaming", undefined)).toBe("offline");
+  now = 25_000;
+  expect(presence.status("remote", undefined)).toBe("idle");
+  expect(presence.status("remote", "connecting")).toBe("connecting");
+  presence.receive({ owner: "integrated", statuses: { remote: "online" } });
+  presence.receive({ owner: "integrated", closed: true });
+  expect(presence.status("remote", "error")).toBe("error");
+  expect(presence.status("remote", "online")).toBe("online");
+});
 
 it("keeps the local UI host available beside a dedicated remote project", async () => {
   const selected = makeHost({ serverId: "srv_remote_project_ui" });

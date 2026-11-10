@@ -35,7 +35,10 @@ export function selectNotificationWindow<
         win.projectWindow.projectId === target.projectId
       : win.projectWindow === null,
   );
-  return candidates.find((win) => win.id === senderId) ?? candidates[0] ?? null;
+  const matching = candidates.find((win) => win.id === senderId) ?? candidates[0];
+  if (matching) return matching;
+  const integrated = windows.filter((win) => win.projectWindow === null);
+  return integrated.find((win) => win.id === senderId) ?? integrated[0] ?? null;
 }
 
 export function resolveProjectWindowTitle(

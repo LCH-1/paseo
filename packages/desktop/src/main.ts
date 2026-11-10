@@ -705,11 +705,14 @@ async function getRestoredWindowGeometry(options: CreateDesktopWindowOptions) {
   // Keep the legacy primary-window preference for a first launch/migration.
   // A restored multi-window session owns each window's geometry independently.
   const restoreWindowState = options.restoreWindowState ?? false;
-  const windowStateStore = restoreWindowState
-    ? createWindowStateStore({ userDataPath: app.getPath("userData") })
-    : null;
+  const preferences = createWindowStateStore({ userDataPath: app.getPath("userData") });
+  const windowStateStore = restoreWindowState ? preferences : null;
+  const preferred = await preferences.load();
   const savedWindowState =
-    options.savedWindow?.state ?? (windowStateStore ? await windowStateStore.load() : null);
+    options.savedWindow?.state ??
+    (restoreWindowState || !preferred
+      ? preferred
+      : { width: preferred.width, height: preferred.height, isMaximized: false });
   const restoredWindowState = savedWindowState
     ? clampWindowStateToWorkAreas(savedWindowState, getWorkAreasPrimaryFirst())
     : null;
@@ -894,14 +897,12 @@ async function openNotificationTarget(
   const workspaceId = typeof data?.workspaceId === "string" ? data.workspaceId.trim() : undefined;
   const agentTarget = serverId && agentId ? { serverId, agentId, workspaceId, pin: true } : null;
   if (!win) {
-    const key = target ? JSON.stringify([target.serverId, target.projectId]) : "default";
+    const key = "default";
     let pending = notificationWindowCreations.get(key);
     if (!pending) {
-      const scope = target ? createProjectWindowScope(target) : undefined;
-      let initialRoute = scope ? projectWindowRoute(scope) : "/";
+      let initialRoute = "/";
       if (agentTarget) initialRoute = buildAgentDeepLinkRoute(agentTarget);
       pending = createWindow({
-        projectWindow: scope,
         initialRoute,
       }).finally(() => notificationWindowCreations.delete(key));
       notificationWindowCreations.set(key, pending);

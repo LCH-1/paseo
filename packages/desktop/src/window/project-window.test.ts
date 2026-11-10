@@ -33,6 +33,16 @@ describe("project windows", () => {
     ];
     expect(selectNotificationWindow(windows, 2, target)).toEqual(windows[1]);
   });
+  it("uses an integrated window when the notification project has no open window", () => {
+    const windows = [
+      { id: 1, projectWindow: { ...target, projectId: "unrelated" } },
+      { id: 2, projectWindow: null },
+      { id: 3, projectWindow: null },
+    ];
+    expect(selectNotificationWindow(windows, 1, target)).toEqual(windows[1]);
+    expect(selectNotificationWindow(windows, 3, target)).toEqual(windows[2]);
+    expect(selectNotificationWindow(windows.slice(0, 1), 1, target)).toBeNull();
+  });
   it("keeps untargeted notifications out of unrelated project windows", () => {
     const windows = [
       { id: 1, projectWindow: target },

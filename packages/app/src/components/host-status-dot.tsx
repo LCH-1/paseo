@@ -2,18 +2,19 @@ import { View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import {
   type HostRuntimeConnectionStatus,
-  useHostRuntimeConnectionStatus,
+  useHostRuntimeDisplayConnectionStatus,
 } from "@/runtime/host-runtime";
 
 export function HostStatusDot({ serverId }: { serverId: string }) {
-  const status = useHostRuntimeConnectionStatus(serverId);
+  const status = useHostRuntimeDisplayConnectionStatus(serverId);
 
-  return <View style={[styles.dot, statusStyle(status)]} />;
+  return <View accessibilityLabel={status} style={[styles.dot, statusStyle(status)]} />;
 }
 
 function statusStyle(status: HostRuntimeConnectionStatus) {
   if (status === "online") return styles.dotOnline;
   if (status === "connecting") return styles.dotConnecting;
+  if (status === "idle") return styles.dotIdle;
   return styles.dotOffline;
 }
 
@@ -26,6 +27,7 @@ const styles = StyleSheet.create((theme) => ({
   dotOnline: {
     backgroundColor: theme.colors.statusSuccess,
   },
+  dotIdle: { backgroundColor: theme.colors.foregroundMuted },
   dotConnecting: {
     backgroundColor: theme.colors.statusWarning,
   },

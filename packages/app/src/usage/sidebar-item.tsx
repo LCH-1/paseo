@@ -26,7 +26,7 @@ import {
   choosePinnedUsageLayout,
   METER_GAP,
   MIN_METER_WIDTH,
-  resolvePinnedUsage,
+  resolveProviderPinnedUsage,
   type PinnedUsageLayout,
   type PinnedUsageSource,
 } from "./pinned";
@@ -36,7 +36,7 @@ import { UsageModal } from "./usage-modal";
 function useUsageSummary(): readonly PinnedUsageSource[] {
   const { preferences } = useUsagePreferences();
   const reports = useUsageHostReports(useUsageHostId());
-  return useMemo(() => resolvePinnedUsage(reports, preferences), [preferences, reports]);
+  return useMemo(() => resolveProviderPinnedUsage(reports, preferences), [preferences, reports]);
 }
 
 /** Whether the sidebar Usage item has anything to show. */
