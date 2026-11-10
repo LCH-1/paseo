@@ -101,14 +101,13 @@ export function resolvePinnedUsage(
   });
 }
 
-/** Equal-capacity account windows share one provider meter; missing data is excluded. */
+/** One provider icon, with every account's own windows and values kept separately. */
 export function resolveProviderPinnedUsage(
   reports: readonly UsageReportEntry[],
   preferences: UsagePreferences,
 ): PinnedUsageSource[] {
   const accounts = resolvePinnedUsage(reports, preferences);
   const sources = new Map<string, PinnedUsageSource>();
-  const counts = new Map<string, number>();
   for (const account of accounts) {
     const entry = reports.find((report) => report.id === account.key);
     if (!entry) continue;
@@ -120,24 +119,17 @@ export function resolveProviderPinnedUsage(
     }
     for (const window of account.windows) {
       const windowId = window.key.slice(account.key.length + 1);
-      const key = `${provider}/${windowId}`;
-      const existing = source.windows.find((candidate) => candidate.key === key);
-      if (!existing) {
-        source.windows.push({ ...window, key });
-        counts.set(key, 1);
-      } else {
-        const count = counts.get(key) ?? 1;
-        existing.percent = (existing.percent * count + window.percent) / (count + 1);
-        counts.set(key, count + 1);
-      }
-    }
-  }
-  for (const source of sources.values()) {
-    for (const window of source.windows) {
-      window.percentText = formatPct(window.percent);
-      const used = preferences.displayAs === "used" ? window.percent : 100 - window.percent;
-      window.tone = windowTone({ id: window.key, label: window.shortLabel, usedPct: used });
-      window.label = `${source.key} ${window.shortLabel} ${window.percentText} ${preferences.displayAs}`;
+      const raw =
+        entry.report.status === "available"
+          ? entry.report.windows.find((candidate) => candidate.id === windowId)
+          : undefined;
+      const reset = raw?.resetsAt ? Date.parse(raw.resetsAt) : NaN;
+      source.windows.push({
+        ...window,
+        label: Number.isFinite(reset)
+          ? `${window.label} · 초기화 ${new Date(reset).toLocaleString()}`
+          : window.label,
+      });
     }
   }
   return [...sources.values()];

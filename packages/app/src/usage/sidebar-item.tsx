@@ -1,35 +1,15 @@
-import {
-  createContext,
-  Fragment,
-  useCallback,
-  useContext,
-  useMemo,
-  useState,
-  type ReactNode,
-} from "react";
+import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  Pressable,
-  Text,
-  View,
-  type LayoutChangeEvent,
-  type PressableStateCallbackType,
-} from "react-native";
+import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { builtinSidebarNavLabelKey } from "@/sidebar-nav/model";
 import { useUsagePreferences } from "./display";
 import { useUsageHostId } from "./hosts";
 import { useUsageHostReports } from "./queries";
 import { UsageSourceIcon } from "./source-icon";
 import { UsageMeter } from "./meter";
-import {
-  choosePinnedUsageLayout,
-  METER_GAP,
-  MIN_METER_WIDTH,
-  resolveProviderPinnedUsage,
-  type PinnedUsageLayout,
-  type PinnedUsageSource,
-} from "./pinned";
+import { resolveProviderPinnedUsage, type PinnedUsageSource } from "./pinned";
 import { UsageModal } from "./usage-modal";
 
 /** Each summary window with data on the usage host, under its source; empty while none has. */
@@ -99,15 +79,7 @@ function triggerStyle({ hovered }: PressableStateCallbackType & { hovered?: bool
   return hovered ? [styles.trigger, styles.triggerHovered] : styles.trigger;
 }
 
-function layoutWidth(event: LayoutChangeEvent): number {
-  return event.nativeEvent.layout.width;
-}
-
-/**
- * One line: each account's icon, then per window a meter and "31% 5h". Off-screen copies measure
- * the line with labels and with percents alone; the richest layout that fits is shown, and what
- * it leaves out takes no space at all.
- */
+/** Provider icons and separate account meters only; details live in the hover card. */
 function PinnedUsageTrigger({
   label,
   sources,
@@ -117,103 +89,55 @@ function PinnedUsageTrigger({
   sources: readonly PinnedUsageSource[];
   onPress: () => void;
 }) {
-  const [available, setAvailable] = useState<number | null>(null);
-  const [labelsWidth, setLabelsWidth] = useState<number | null>(null);
-  const [percentsWidth, setPercentsWidth] = useState<number | null>(null);
-  const handleAvailableLayout = useCallback((event: LayoutChangeEvent) => {
-    setAvailable(layoutWidth(event));
-  }, []);
-  const handleLabelsLayout = useCallback((event: LayoutChangeEvent) => {
-    setLabelsWidth(layoutWidth(event));
-  }, []);
-  const handlePercentsLayout = useCallback((event: LayoutChangeEvent) => {
-    setPercentsWidth(layoutWidth(event));
-  }, []);
-  const layout = choosePinnedUsageLayout({
-    available,
-    labelsWidth,
-    percentsWidth,
-    windowCount: sources.reduce((count, source) => count + source.windows.length, 0),
-  });
   return (
-    <Pressable
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityLabel={pinnedUsageLabel(label, sources)}
-      style={triggerStyle}
-      testID="sidebar-usage"
-    >
-      <View style={styles.line} onLayout={handleAvailableLayout}>
-        <PinnedUsageLine sources={sources} layout={layout} />
-      </View>
-      <View
-        style={styles.measure}
-        pointerEvents="none"
-        accessibilityElementsHidden
-        importantForAccessibility="no-hide-descendants"
-        aria-hidden
-      >
-        <View style={styles.measured} onLayout={handleLabelsLayout}>
-          <PinnedUsageLine sources={sources} layout="labels" measuring />
-        </View>
-        <View style={styles.measured} onLayout={handlePercentsLayout}>
-          <PinnedUsageLine sources={sources} layout="percents" measuring />
-        </View>
-      </View>
-    </Pressable>
-  );
-}
-
-/**
- * The line's items as direct children of one row, so every meter shares the leftover width
- * equally.
- */
-function PinnedUsageLine({
-  sources,
-  layout,
-  measuring = false,
-}: {
-  sources: readonly PinnedUsageSource[];
-  layout: PinnedUsageLayout;
-  measuring?: boolean;
-}) {
-  return sources.map((source, sourceIndex) => (
-    <Fragment key={source.key}>
-      <View
-        style={sourceIndex === 0 ? null : styles.sourceGap}
-        testID={measuring ? undefined : "sidebar-usage-source"}
-      >
-        <UsageSourceIcon svg={source.icon} size={14} />
-      </View>
-      {source.windows.map((window, windowIndex) => {
-        const leadStyle = windowIndex === 0 ? styles.iconGap : styles.windowGap;
-        return (
-          <Fragment key={window.key}>
-            {layout === "meters" ? (
-              <View style={[styles.meterSlot, leadStyle]}>
-                <UsageMeter
-                  percent={window.percent}
-                  tone={window.tone}
-                  quiet
-                  style={styles.meter}
-                />
+    <Tooltip delayDuration={250}>
+      <TooltipTrigger asChild>
+        <Pressable
+          onPress={onPress}
+          accessibilityRole="button"
+          accessibilityLabel={pinnedUsageLabel(label, sources)}
+          style={triggerStyle}
+          testID="sidebar-usage"
+        >
+          <View style={styles.line}>
+            {sources.map((source) => (
+              <View key={source.key} style={styles.source}>
+                <View testID="sidebar-usage-source" accessibilityLabel={source.key}>
+                  <UsageSourceIcon svg={source.icon} size={14} />
+                </View>
+                {source.windows.map((window) => (
+                  <View
+                    key={window.key}
+                    style={styles.meterSlot}
+                    testID="sidebar-usage-meter"
+                    accessibilityLabel={window.label}
+                  >
+                    <UsageMeter
+                      percent={window.percent}
+                      tone={window.tone}
+                      quiet
+                      style={styles.meter}
+                    />
+                  </View>
+                ))}
               </View>
-            ) : null}
-            <Text
-              style={[styles.percent, layout === "meters" ? null : leadStyle]}
-              numberOfLines={1}
-              testID={measuring ? undefined : "sidebar-usage-pinned-window"}
-            >
-              {window.percentText}
-              {layout === "percents" || window.shortLabel === "" ? null : (
-                <Text style={styles.windowLabel}>{` ${window.shortLabel}`}</Text>
-              )}
-            </Text>
-          </Fragment>
-        );
-      })}
-    </Fragment>
-  ));
+            ))}
+          </View>
+        </Pressable>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="end" offset={8} testID="sidebar-usage-details">
+        <View style={styles.details}>
+          {sources.flatMap((source) =>
+            source.windows.map((window) => (
+              <Text key={window.key} style={styles.detail}>
+                {window.label}
+              </Text>
+            )),
+          )}
+        </View>
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 const styles = StyleSheet.create((theme) => ({
@@ -237,48 +161,29 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: "row",
     alignItems: "center",
     overflow: "hidden",
+    gap: theme.spacing[3],
   },
-  // Wide enough that nothing inside wraps or shrinks; each child reports its natural width.
-  measure: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    width: 10_000,
-    opacity: 0,
-  },
-  measured: {
-    alignSelf: "flex-start",
+  source: {
+    flex: 1,
+    minWidth: 0,
     flexDirection: "row",
     alignItems: "center",
+    gap: theme.spacing[1.5],
   },
-  sourceGap: {
-    marginLeft: theme.spacing[3],
-  },
-  iconGap: {
-    marginLeft: theme.spacing[1.5],
-  },
-  windowGap: {
-    marginLeft: theme.spacing[2],
-  },
-  // Every slot takes an equal share of the leftover width, so the line fills the row.
   meterSlot: {
-    flexGrow: 1,
-    flexShrink: 1,
-    flexBasis: 0,
-    minWidth: MIN_METER_WIDTH,
-    marginRight: METER_GAP,
+    flex: 1,
+    minWidth: 4,
   },
   meter: {
     height: 6,
     borderRadius: 3,
   },
-  percent: {
-    flexShrink: 0,
-    color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
-    fontVariant: ["tabular-nums"],
+  details: {
+    maxWidth: 360,
+    gap: theme.spacing[1.5],
   },
-  windowLabel: {
-    color: theme.colors.foregroundMuted,
+  detail: {
+    color: theme.colors.popoverForeground,
+    fontSize: theme.fontSize.sm,
   },
 }));

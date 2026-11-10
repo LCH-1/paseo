@@ -59,7 +59,7 @@ const codex = report({
   windows: [{ id: "weekly", label: "Weekly", remainingPct: 88 }],
 });
 
-it("combines accounts into one provider meter without counting legacy duplicates", () => {
+it("shares a provider icon while retaining separate account meters and avoiding legacy duplicates", () => {
   const first = report({
     sourceId: "claude",
     sourceLabel: "Claude",
@@ -75,12 +75,17 @@ it("combines accounts into one provider meter without counting legacy duplicates
   const duplicate = { ...first, sourceId: "claude-windows", id: "claude-windows:one" };
   const result = resolveProviderPinnedUsage([first, second, duplicate, codex], preferences(null));
   expect(result.map((source) => source.key)).toEqual(["claude", "codex"]);
-  expect(result[0].windows).toHaveLength(1);
-  expect(result[0].windows[0]).toMatchObject({ percent: 50, percentText: "50%", tone: "default" });
+  expect(result[0].windows).toHaveLength(2);
+  expect(result[0].windows.map((window) => window.percent)).toEqual([100, 0]);
+  expect(result[0].windows.map((window) => window.label)).toEqual([
+    "Claude (one) Weekly 100% used",
+    "Claude (two) Weekly 0% used",
+  ]);
   expect(
-    resolveProviderPinnedUsage([first, second], preferences(null, "remaining"))[0].windows[0]
-      .percent,
-  ).toBe(50);
+    resolveProviderPinnedUsage([first, second], preferences(null, "remaining"))[0].windows.map(
+      (window) => window.percent,
+    ),
+  ).toEqual([0, 100]);
   expect(resolveProviderPinnedUsage([first], preferences(null))[0].windows[0].percent).toBe(100);
 });
 
