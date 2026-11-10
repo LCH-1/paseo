@@ -233,11 +233,14 @@ export function SessionHistoryTable({
       );
     setActionAgent(null);
   }, [actionAgent, archiveAgent]);
-  useSyncExternalStore(
+  const presenceRevision = useSyncExternalStore(
     agentTabPresenceBridge.subscribe,
     agentTabPresenceBridge.getSnapshot,
     agentTabPresenceBridge.getSnapshot,
   );
+  // Rows keep their identity while a conversation is unchanged, so a tab opening or
+  // closing has to reach the cells through extraData.
+  const listState = useMemo(() => ({ compact, presenceRevision }), [compact, presenceRevision]);
   useEffect(() => {
     if (!isWeb) return;
     const node = tableRef.current as unknown as HTMLElement | null;
@@ -284,7 +287,7 @@ export function SessionHistoryTable({
           refreshControl={refreshControl}
           ListFooterComponent={footer}
           renderItem={renderRow}
-          extraData={compact}
+          extraData={listState}
         />
       </View>
       <Modal

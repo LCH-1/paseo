@@ -122,6 +122,31 @@ describe("agent tab completion", () => {
     await fetchAgentTabCompletedAt(client, "a", start.getTime(), 2);
     expect(fetchAgentTimeline).toHaveBeenCalledTimes(2);
   });
+  it("bounds remembered lookups and keeps the ones still being asked for", async () => {
+    const fetchAgentTimeline = vi
+      .fn<DaemonClient["fetchAgentTimeline"]>()
+      .mockRejectedValue(new Error("offline"));
+    const client = { fetchAgentTimeline };
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const callsFor = (agentId: string) =>
+        fetchAgentTimeline.mock.calls.filter(([requested]) => requested === agentId).length;
+      await fetchAgentTabCompletedAt(client, "open-tab", null, 1);
+      await fetchAgentTabCompletedAt(client, "closed-tab", null, 1);
+      for (let index = 0; index < 1000; index += 1) {
+        await fetchAgentTabCompletedAt(client, `agent-${index}`, null, 1);
+        await fetchAgentTabCompletedAt(client, "open-tab", null, 1);
+      }
+      expect(callsFor("open-tab")).toBe(1);
+      expect(callsFor("closed-tab")).toBe(1);
+      await fetchAgentTabCompletedAt(client, "closed-tab", null, 1);
+      expect(callsFor("closed-tab")).toBe(2);
+      await fetchAgentTabCompletedAt(client, "agent-999", null, 1);
+      expect(callsFor("agent-999")).toBe(1);
+    } finally {
+      warning.mockRestore();
+    }
+  });
   it("formats seconds, minutes, hours, days and future clock skew", () => {
     for (const [age, label] of [
       [-5000, "0s"],

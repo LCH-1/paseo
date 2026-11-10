@@ -12,6 +12,9 @@ interface HistoryCompletion {
   completedAt: number | null;
 }
 type TimelineClient = Pick<DaemonClient, "fetchAgentTimeline">;
+// Every new request time of every restored tab adds a key, so the per-connection cache
+// keeps only the most recently asked ones. A dropped key costs one repeated lookup.
+const HISTORY_REQUEST_LIMIT = 256;
 const historyRequests = new WeakMap<TimelineClient, Map<string, Promise<HistoryCompletion>>>();
 
 export function fetchAgentTabCompletedAt(
@@ -27,7 +30,11 @@ export function fetchAgentTabCompletedAt(
   }
   const key = JSON.stringify([agentId, lastUserAt, generation]);
   const previous = requests.get(key);
-  if (previous) return previous;
+  if (previous) {
+    requests.delete(key);
+    requests.set(key, previous);
+    return previous;
+  }
   const request = client
     .fetchAgentTimeline(agentId, {
       direction: "tail",
@@ -66,6 +73,10 @@ export function fetchAgentTabCompletedAt(
       return { lastUserAt, completedAt: null };
     });
   requests.set(key, request);
+  if (requests.size > HISTORY_REQUEST_LIMIT) {
+    const oldest = requests.keys().next();
+    if (!oldest.done) requests.delete(oldest.value);
+  }
   return request;
 }
 

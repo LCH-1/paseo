@@ -335,16 +335,18 @@ function ActivitySessionList({
     },
     [],
   );
-  const retainPressed = useCallback(
-    (row: ActivityRow) => {
-      if (releasePressed.current) clearTimeout(releasePressed.current);
-      setPressed({ row, index: rows.findIndex((item) => sessionKey(item) === sessionKey(row)) });
-      // Reading a conversation removes it from Unreviewed. Keep the clicked DOM
-      // row stable through the second click, even if its attention clears first.
-      releasePressed.current = setTimeout(() => setPressed(null), 600);
-    },
-    [rows],
-  );
+  // Every row receives this handler, so it reads the rows at click time rather than
+  // changing with them: a reply streaming into one row would otherwise redraw them all.
+  const latestRows = useRef(rows);
+  latestRows.current = rows;
+  const retainPressed = useCallback((row: ActivityRow) => {
+    if (releasePressed.current) clearTimeout(releasePressed.current);
+    const index = latestRows.current.findIndex((item) => sessionKey(item) === sessionKey(row));
+    setPressed({ row, index });
+    // Reading a conversation removes it from Unreviewed. Keep the clicked DOM
+    // row stable through the second click, even if its attention clears first.
+    releasePressed.current = setTimeout(() => setPressed(null), 600);
+  }, []);
   const displayedRows = useMemo(() => {
     if (!pressed || rows.some((row) => sessionKey(row) === sessionKey(pressed.row))) return rows;
     const next = [...rows];
