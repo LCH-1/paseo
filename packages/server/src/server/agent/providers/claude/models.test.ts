@@ -83,6 +83,7 @@ describe("getClaudeModels", () => {
       "claude-opus-5-5",
       "claude-opus-5",
       "claude-mythos-5-1",
+      "claude-fable-5-2",
       "claude-fable-5-1",
       "claude-fable-5",
       "claude-fable-5[1m]",
@@ -119,6 +120,7 @@ describe("getClaudeModels", () => {
         ["claude-opus-5-5", 1_000_000],
         ["claude-opus-5", 1_000_000],
         ["claude-mythos-5-1", 1_000_000],
+        ["claude-fable-5-2", 1_000_000],
         ["claude-fable-5-1", 1_000_000],
         ["claude-fable-5", 1_000_000],
         ["claude-fable-5[1m]", 1_000_000],
@@ -743,6 +745,31 @@ describe("Claude Fable 5 catalog", () => {
   it("resolves retired Fable 5 IDs to the canonical catalog entry", () => {
     expect(findClaudeModel("claude-fable-5[1m]")?.id).toBe("claude-fable-5");
     expect(findClaudeModel("claude-fable-5-20260301[1m]")?.id).toBe("claude-fable-5");
+  });
+});
+
+describe("Claude Fable 5.2 catalog", () => {
+  it("offers the new model without replacing the selected default or older Fable choices", () => {
+    const models = getClaudeModels();
+    const model = findClaudeModel("claude-fable-5-2-20261109[1m]");
+    expect(model).toMatchObject({
+      id: "claude-fable-5-2",
+      label: "Fable 5.2",
+      contextWindowMaxTokens: 1_000_000,
+      defaultThinkingOptionId: "high",
+    });
+    expect(model?.thinkingOptions?.map((option) => option.id)).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultracode",
+    ]);
+    expect(models.filter((item) => item.isDefault).map((item) => item.id)).toEqual([
+      "claude-opus-5-5",
+    ]);
+    expect(models.map((item) => item.id)).toContain("claude-fable-5-1");
   });
 });
 
