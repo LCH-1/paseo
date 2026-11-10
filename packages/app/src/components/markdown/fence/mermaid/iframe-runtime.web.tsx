@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { DiagramColorScheme, MermaidRenderRequest } from "./render-model";
-import { mermaidRuntimeHtml } from "./runtime/html.gen";
 import { parseMermaidRuntimeMessage, type MermaidRuntimeRenderMessage } from "./runtime/messages";
 import { MermaidRuntimeRequestDriver } from "./runtime/request-driver";
 
@@ -24,6 +23,9 @@ export function MermaidIframeRuntime({
   onRendered,
   onRenderFailed,
 }: MermaidIframeRuntimeProps) {
+  // Keep the large runtime document unevaluated until a diagram actually mounts.
+  const { mermaidRuntimeHtml } =
+    require("./runtime/html.gen") as typeof import("./runtime/html.gen");
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const driverRef = useRef<MermaidRuntimeRequestDriver | null>(null);
   driverRef.current ??= new MermaidRuntimeRequestDriver();
