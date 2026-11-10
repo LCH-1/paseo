@@ -225,6 +225,8 @@ export class CodexAppServerClient {
   private disposed = false;
   private stderrBuffer = "";
   private processExit: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+  private stdoutClosed = false;
+  private childCleanup: Promise<void> | null = null;
   private stdoutDrainTimer: NodeJS.Timeout | null = null;
   private resolveTermination!: () => void;
   private readonly terminationPromise = new Promise<void>((resolve) => {
@@ -260,27 +262,20 @@ export class CodexAppServerClient {
       stream.on("error", (error) => this.handleUnexpectedTermination(error));
     }
     const onStdoutClosed = (): void => {
-      this.handleUnexpectedTermination(
-        this.processExit
-          ? this.createExitError()
-          : new Error("Codex app-server stdout closed before the process exited"),
-      );
+      this.stdoutClosed = true;
+      // EOF often precedes exit and the last stderr chunk. Keep that diagnostic
+      // window bounded, while preventing new requests on the unusable pipe.
+      this.scheduleTerminationDrain();
     };
     child.stdout.on("end", onStdoutClosed);
     child.stdout.on("close", onStdoutClosed);
 
     child.on("exit", (code, signal) => {
       this.processExit = { code, signal };
-      if (this.disposed || this.stdoutDrainTimer) {
-        return;
-      }
       // `exit` can precede the final stdout data. Prefer EOF/close so the last
       // response or turn/completed is delivered before termination, but bound
       // the wait when an inherited pipe remains open in a wrapper descendant.
-      this.stdoutDrainTimer = setTimeout(() => {
-        this.handleUnexpectedTermination(this.createExitError());
-      }, APP_SERVER_STDOUT_DRAIN_TIMEOUT_MS);
-      this.stdoutDrainTimer.unref();
+      this.scheduleTerminationDrain();
     });
     child.on("close", (code, signal) => {
       this.processExit ??= { code, signal };
@@ -293,7 +288,7 @@ export class CodexAppServerClient {
   }
 
   get isClosed(): boolean {
-    return this.disposed || this.processExit !== null;
+    return this.disposed || this.stdoutClosed || this.processExit !== null;
   }
 
   waitForTermination(): Promise<void> {
@@ -314,6 +309,9 @@ export class CodexAppServerClient {
     }
     if (this.processExit) {
       return Promise.reject(this.createExitError());
+    }
+    if (this.stdoutClosed) {
+      return Promise.reject(this.createStdoutClosedError());
     }
     const id = this.nextId++;
     const payload: JsonRpcRequest = { id, method, params };
@@ -356,6 +354,20 @@ export class CodexAppServerClient {
     } catch {
       // ignore
     }
+    await this.cleanupChild();
+  }
+
+  private cleanupChild(): Promise<void> {
+    if (this.childCleanup) return this.childCleanup;
+    const cleanup: Promise<void> = this.terminateChild().catch((error) => {
+      if (this.childCleanup === cleanup) this.childCleanup = null;
+      throw error;
+    });
+    this.childCleanup = cleanup;
+    return cleanup;
+  }
+
+  private async terminateChild(): Promise<void> {
     const result = await terminateWithTreeKill(this.child, {
       gracefulTimeoutMs: APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
       forceTimeoutMs: APP_SERVER_FORCE_SHUTDOWN_TIMEOUT_MS,
@@ -380,6 +392,22 @@ export class CodexAppServerClient {
     this.resolveTermination();
     this.stdoutLineReader.close();
     this.rejectPending(error);
+    this.logger.warn(
+      {
+        ...this.getTraceContext(),
+        childPid: this.child.pid,
+        exitCode: this.processExit?.code,
+        signal: this.processExit?.signal,
+        stdoutClosed: this.stdoutClosed,
+        err: error,
+      },
+      "provider.codex.transport.unexpected_termination",
+    );
+    // A wrapper can outlive its closed pipe. Retire this transport's own child
+    // even if the user never sends another message; dispose shares the cleanup.
+    if (!this.processExit) {
+      void this.reapUnexpectedChild();
+    }
     const handler = this.unexpectedTerminationHandler;
     this.unexpectedTerminationHandler = null;
     if (!handler) {
@@ -399,6 +427,33 @@ export class CodexAppServerClient {
         ? "Codex app-server exited"
         : `Codex app-server exited with code ${code ?? "null"} and signal ${signal ?? "null"}`;
     return new Error(`${message}\n${this.stderrBuffer}`.trim());
+  }
+
+  private async reapUnexpectedChild(): Promise<void> {
+    try {
+      await this.cleanupChild();
+    } catch (error) {
+      this.logger.warn(
+        { err: error, childPid: this.child.pid },
+        "Failed to reap disconnected Codex app-server",
+      );
+    }
+  }
+
+  private createStdoutClosedError(): Error {
+    return new Error(
+      `Codex app-server stdout closed before the process exited (no exit within ${APP_SERVER_STDOUT_DRAIN_TIMEOUT_MS}ms)\n${this.stderrBuffer}`.trim(),
+    );
+  }
+
+  private scheduleTerminationDrain(): void {
+    if (this.disposed || this.stdoutDrainTimer) return;
+    this.stdoutDrainTimer = setTimeout(() => {
+      this.handleUnexpectedTermination(
+        this.processExit ? this.createExitError() : this.createStdoutClosedError(),
+      );
+    }, APP_SERVER_STDOUT_DRAIN_TIMEOUT_MS);
+    this.stdoutDrainTimer.unref();
   }
 
   private clearStdoutDrainTimer(): void {

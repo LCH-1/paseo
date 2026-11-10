@@ -100,6 +100,7 @@ describe("Codex app-server transport", () => {
   test.each(["end", "close"] as const)(
     "stdout %s rejects pending requests even when the child stays alive",
     async (event) => {
+      vi.useFakeTimers();
       const child = createCodexAppServerChildProcess();
       const client = new CodexAppServerClient(child, createTestLogger());
       const onTermination = vi.fn();
@@ -108,7 +109,7 @@ describe("Codex app-server transport", () => {
       const rejection = expect(request).rejects.toThrow("stdout closed");
 
       child.stdout.emit(event);
-
+      await vi.advanceTimersByTimeAsync(1000);
       await rejection;
       expect(onTermination).toHaveBeenCalledOnce();
       child.emit("close", 0, null);
@@ -116,8 +117,70 @@ describe("Codex app-server transport", () => {
       child.stdout.end();
       child.stderr.end();
       child.stdin.end();
+      vi.useRealTimers();
     },
   );
+
+  test("stdout EOF preserves the later exit code and final stderr instead of a generic pipe error", async () => {
+    const child = createCodexAppServerChildProcess();
+    const client = new CodexAppServerClient(child, createTestLogger());
+    const terminated = vi.fn();
+    client.setUnexpectedTerminationHandler(terminated);
+    const pending = client.request("initialize", {});
+    const rejected = expect(pending).rejects.toThrow(/code 23[\s\S]*final provider diagnostic/);
+    child.stdout.emit("end");
+    expect(client.isClosed).toBe(true);
+    expect(terminated).not.toHaveBeenCalled();
+    child.emit("exit", 23, null);
+    child.stderr.write("final provider diagnostic");
+    child.emit("close", 23, null);
+    await rejected;
+    expect(terminated).toHaveBeenCalledOnce();
+    child.stderr.end();
+    child.stdin.end();
+  });
+
+  test("stdout EOF without process exit bounds diagnostics and reaps only its owned child once", async () => {
+    vi.useFakeTimers();
+    const child = createCodexAppServerChildProcess();
+    const kill = vi.spyOn(child, "kill");
+    const client = new CodexAppServerClient(child, createTestLogger());
+    const terminated = vi.fn();
+    client.setUnexpectedTerminationHandler(terminated);
+    const pending = client.request("initialize", {});
+    const rejected = expect(pending).rejects.toThrow(/stdout closed[\s\S]*last stderr/);
+    try {
+      child.stdout.emit("end");
+      child.stdout.emit("close");
+      child.stderr.write("last stderr");
+      await vi.advanceTimersByTimeAsync(999);
+      expect(terminated).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+      await client.dispose();
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect(terminated).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+      child.stderr.end();
+      child.stdin.end();
+    }
+  });
+
+  test("intentional dispose during EOF grace cancels the unexpected termination", async () => {
+    const child = createCodexAppServerChildProcess(),
+      client = new CodexAppServerClient(child, createTestLogger()),
+      terminated = vi.fn();
+    client.setUnexpectedTerminationHandler(terminated);
+    const pending = client.request("initialize", {}),
+      rejected = expect(pending).rejects.toThrow("client is closed");
+    child.stdout.emit("end");
+    await client.dispose();
+    await rejected;
+    expect(terminated).not.toHaveBeenCalled();
+    child.stderr.end();
+    child.stdin.end();
+  });
 
   test("synchronous stdin write failures reject the returned request and settle transport", async () => {
     const child = createCodexAppServerChildProcess();
