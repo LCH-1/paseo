@@ -249,6 +249,55 @@ test("replacement self-heals when Codex reports that the tracked turn is already
   }
 });
 
+test("early stdout EOF retains the real failure and permits only an explicit follow-up turn", async () => {
+  const initial = createFakeCodexAppServer();
+  const replacement = createFakeCodexAppServer();
+  const servers = [initial, replacement];
+  const session = new CodexAppServerAgentSession(
+    { provider: "codex", cwd: process.cwd(), modeId: "auto", model: "gpt-5.4" },
+    null,
+    logger,
+    async () => {
+      const server = servers.shift();
+      if (!server) throw new Error("Unexpected extra Codex spawn");
+      return server.child;
+    },
+  );
+  const events: AgentStreamEvent[] = [];
+  session.subscribe((event) => events.push(event));
+  try {
+    const run = session.run("inspect once without replaying side effects");
+    await initial.waitForTurnStart();
+    initial.startsTurn({ threadId: "thread-1", turnId: "early-eof-turn" });
+    const rejection = expect(run).rejects.toThrow(/code 23[\s\S]*late provider diagnostic/);
+    const ended = new Promise<void>((resolve) => initial.child.stdout.once("end", resolve));
+    initial.child.stdout.end();
+    await ended;
+    initial.child.stderr.write("late provider diagnostic");
+    initial.child.emit("exit", 23, null);
+    initial.child.emit("close", 23, null);
+    await rejection;
+    expect(events.filter((event) => event.type === "turn_failed")).toHaveLength(1);
+    expect(initial.requests().filter((request) => request.method === "turn/start")).toHaveLength(1);
+    expect(
+      replacement.requests().filter((request) => request.method === "turn/start"),
+    ).toHaveLength(0);
+
+    const followup = session.run("new explicit follow-up");
+    await replacement.waitForTurnStart();
+    replacement.startsTurn({ threadId: "thread-1", turnId: "follow-up-turn" });
+    replacement.completeTurn();
+    await expect(followup).resolves.toMatchObject({ sessionId: "thread-1" });
+    expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn_failed")).toHaveLength(1);
+  } finally {
+    await session.close();
+    initial.child.stderr.end();
+    replacement.child.stdout.end();
+    replacement.child.stderr.end();
+  }
+});
+
 test("intentional agent close stays clean while a Codex turn is active", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "codex-process-close-"));
   const appServer = createFakeCodexAppServer();
