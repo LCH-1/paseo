@@ -4396,6 +4396,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       cancelRequested: false,
     };
     this.pendingForegroundStart = pendingStart;
+    let dispatchedTurn: { client: CodexAppServerClient; turnId: string } | null = null;
 
     this.dismissPendingPlanApprovals("Dismissed by a new prompt");
 
@@ -4444,6 +4445,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (pendingStart.cancelRequested) {
         throw new Error("Codex turn start was interrupted before reaching Codex");
       }
+      dispatchedTurn = { client: this.client, turnId };
       const response = toObjectRecord(
         await this.client.request("turn/start", turnStart.params, TURN_START_TIMEOUT_MS),
       );
@@ -4461,6 +4463,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       }
       return { turnId };
     } catch (error) {
+      await this.retireAmbiguousTurnStart(dispatchedTurn, error);
       this.pendingForegroundTurnIdentification?.resolve(null);
       this.pendingForegroundTurnIdentification = null;
       this.activeForegroundTurnId = null;
@@ -4471,6 +4474,33 @@ export class CodexAppServerAgentSession implements AgentSession {
         this.pendingForegroundStart = null;
       }
       pendingStart.resolve();
+    }
+  }
+
+  private async retireAmbiguousTurnStart(
+    dispatchedTurn: { client: CodexAppServerClient; turnId: string } | null,
+    error: unknown,
+  ): Promise<void> {
+    if (
+      !dispatchedTurn ||
+      this.client !== dispatchedTurn.client ||
+      this.activeForegroundTurnId !== dispatchedTurn.turnId ||
+      (error instanceof CodexAppServerRpcError && this.currentTurnId === null)
+    ) {
+      return;
+    }
+    // A lost reply cannot prove an accepted native turn stopped. Retire
+    // its process before releasing admission, even without turn/started.
+    // A failed cleanup retains the closed client so connect retries its
+    // retirement before creating any replacement. Never replay the prompt.
+    this.clearPendingPermissions();
+    try {
+      await this.disposeClient();
+    } catch (disposeError) {
+      this.logger.warn(
+        { err: disposeError, startError: error },
+        "Failed to retire Codex app-server after ambiguous turn start",
+      );
     }
   }
 

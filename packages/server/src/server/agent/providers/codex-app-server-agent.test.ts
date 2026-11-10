@@ -123,6 +123,7 @@ interface CodexSessionTestAccess {
 }
 
 interface CodexClientLike {
+  readonly isClosed?: boolean;
   request: (method: string, ...rest: unknown[]) => Promise<unknown>;
 }
 
@@ -924,7 +925,7 @@ describe("Codex app-server provider", () => {
       throw new Error(`Unexpected request: ${method}`);
     });
     session.activeForegroundTurnId = null;
-    session.client = createStub<CodexClientLike>({ request });
+    session.client = createStub<CodexClientLike>({ isClosed: false, request });
 
     await session.setMode("auto");
     await session.startTurn("needs approval");
@@ -1031,7 +1032,7 @@ describe("Codex app-server provider", () => {
       throw new Error(`Unexpected request: ${method}`);
     });
     session.activeForegroundTurnId = null;
-    session.client = createStub<CodexClientLike>({ request });
+    session.client = createStub<CodexClientLike>({ isClosed: false, request });
 
     await session.startTurn("needs approval");
 
@@ -1052,7 +1053,7 @@ describe("Codex app-server provider", () => {
       throw new Error(`Unexpected request: ${method}`);
     });
     session.activeForegroundTurnId = null;
-    session.client = createStub<CodexClientLike>({ request });
+    session.client = createStub<CodexClientLike>({ isClosed: false, request });
 
     await session.startTurn("inherit config");
 
@@ -1081,7 +1082,7 @@ describe("Codex app-server provider", () => {
       throw new Error(`Unexpected request: ${method}`);
     });
     session.activeForegroundTurnId = null;
-    session.client = createStub<CodexClientLike>({ request });
+    session.client = createStub<CodexClientLike>({ isClosed: false, request });
 
     await session.startTurn("use writable roots");
 
@@ -1206,7 +1207,7 @@ describe("Codex app-server provider", () => {
       throw new Error(`Unexpected request: ${method}`);
     });
     session.activeForegroundTurnId = null;
-    session.client = createStub<CodexClientLike>({ request });
+    session.client = createStub<CodexClientLike>({ isClosed: false, request });
 
     await session.startTurn("finish");
 
@@ -2671,7 +2672,7 @@ describe("Codex app-server provider", () => {
     });
 
     session.activeForegroundTurnId = null;
-    session.client = createStub<CodexClientLike>({ request });
+    session.client = createStub<CodexClientLike>({ isClosed: false, request });
 
     await session.startTurn("Return JSON", {
       outputSchema: {
@@ -2727,7 +2728,7 @@ describe("Codex app-server provider", () => {
     });
 
     session.activeForegroundTurnId = null;
-    session.client = createStub<CodexClientLike>({ request });
+    session.client = createStub<CodexClientLike>({ isClosed: false, request });
 
     await session.startTurn("/paseo-implement in a worktree, remember to use Claude for the UI");
 
@@ -4271,6 +4272,185 @@ describe("Codex app-server provider", () => {
       appServer.assertNoErrors();
     } finally {
       await session.close();
+    }
+  });
+
+  test.each([false, true])(
+    "retires a timed-out turn/start before admitting another prompt (native started: %s)",
+    async (nativeStarted) => {
+      const first = createFakeCodexAppServer({ "turn/start": () => new Promise(() => {}) });
+      const second = createFakeCodexAppServer();
+      const spawn = vi.fn(async () => (spawn.mock.calls.length === 1 ? first.child : second.child));
+      const kill = vi.spyOn(first.child, "kill").mockReturnValue(true);
+      const session = new CodexAppServerAgentSession(
+        createConfig(),
+        null,
+        createTestLogger(),
+        spawn,
+      );
+      try {
+        await session.connect();
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        const started = session.startTurn("first explicit prompt");
+        const rejected = expect(started).rejects.toThrow("request timed out for turn/start");
+        await first.waitForTurnStart();
+        if (nativeStarted) {
+          first.startsTurn({ threadId: "thread-1", turnId: "still-running" });
+          const permission = waitForNextPermission(session);
+          first.requestCommandApproval({
+            itemId: "abandoned-approval",
+            threadId: "thread-1",
+            turnId: "still-running",
+            command: "git status",
+            cwd: "/workspace/project",
+            reason: "Approval before the delayed start reply",
+          });
+          await permission;
+        }
+        await vi.advanceTimersByTimeAsync(90_000);
+
+        expect(kill).toHaveBeenCalledExactlyOnceWith("SIGTERM");
+        await expect(session.startTurn("blocked during process retirement")).rejects.toThrow(
+          "already active",
+        );
+        expect(spawn).toHaveBeenCalledTimes(1);
+        first.child.emit("exit", null, "SIGTERM");
+        await rejected;
+        expect(session.getPendingPermissions()).toEqual([]);
+        await session.startTurn("second explicit prompt");
+        expect(spawn).toHaveBeenCalledTimes(2);
+        expect(first.requests().filter((request) => request.method === "turn/start")).toHaveLength(
+          1,
+        );
+        expect(second.requests().filter((request) => request.method === "turn/start")).toHaveLength(
+          1,
+        );
+        expect(second.requests()).toContainEqual(
+          expect.objectContaining({
+            method: "thread/resume",
+            params: expect.objectContaining({ threadId: "thread-1" }),
+          }),
+        );
+        first.assertNoErrors();
+        second.assertNoErrors();
+      } finally {
+        kill.mockRestore();
+        vi.useRealTimers();
+        await session.close();
+      }
+    },
+  );
+
+  test("a failed turn/start retirement prevents replacement until cleanup succeeds", async () => {
+    const first = createFakeCodexAppServer({ "turn/start": () => new Promise(() => {}) });
+    const second = createFakeCodexAppServer();
+    const spawn = vi.fn(async () => (spawn.mock.calls.length === 1 ? first.child : second.child));
+    const kill = vi.spyOn(first.child, "kill").mockReturnValue(true);
+    const session = new CodexAppServerAgentSession(createConfig(), null, createTestLogger(), spawn);
+    try {
+      await session.connect();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const started = session.startTurn("ambiguous first prompt");
+      const rejected = expect(started).rejects.toThrow("request timed out for turn/start");
+      await first.waitForTurnStart();
+      first.startsTurn({ threadId: "thread-1", turnId: "still-running" });
+      await vi.advanceTimersByTimeAsync(93_000);
+      await rejected;
+      expect(kill.mock.calls.map(([signal]) => signal)).toEqual(["SIGTERM", "SIGKILL"]);
+
+      const next = session.startTurn("explicit retry after failed cleanup");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(first.requests().filter((request) => request.method === "turn/start")).toHaveLength(1);
+      expect(kill.mock.calls.map(([signal]) => signal)).toEqual(["SIGTERM", "SIGKILL", "SIGTERM"]);
+      first.child.emit("exit", null, "SIGTERM");
+      await next;
+      expect(spawn).toHaveBeenCalledTimes(2);
+      expect(second.requests().filter((request) => request.method === "turn/start")).toHaveLength(
+        1,
+      );
+    } finally {
+      kill.mockRestore();
+      vi.useRealTimers();
+      await session.close();
+    }
+  });
+
+  test("a native terminal before turn/start times out preserves the healthy transport", async () => {
+    let starts = 0;
+    const appServer = createFakeCodexAppServer({
+      "turn/start": () => (++starts === 1 ? new Promise(() => {}) : {}),
+    });
+    const kill = vi.spyOn(appServer.child, "kill");
+    const spawn = vi.fn(async () => appServer.child);
+    const session = new CodexAppServerAgentSession(createConfig(), null, createTestLogger(), spawn);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    try {
+      await session.connect();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const started = session.startTurn("finishes before its response");
+      const rejected = expect(started).rejects.toThrow("request timed out for turn/start");
+      await appServer.waitForTurnStart();
+      appServer.startsTurn({ threadId: "thread-1", turnId: "already-finished" });
+      appServer.completeTurn();
+      await vi.advanceTimersByTimeAsync(90_000);
+      await rejected;
+      expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(1);
+      expect(kill).not.toHaveBeenCalled();
+      await session.startTurn("next explicit prompt");
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(starts).toBe(2);
+    } finally {
+      vi.useRealTimers();
+      await session.close();
+      kill.mockRestore();
+    }
+  });
+
+  test("a turn/start RPC error after native activation retires the contradictory live turn", async () => {
+    const reply = deferred<unknown>();
+    const appServer = createFakeCodexAppServer({ "turn/start": () => reply.promise });
+    const kill = vi.spyOn(appServer.child, "kill");
+    const session = new CodexAppServerAgentSession(
+      createConfig(),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+    try {
+      const started = session.startTurn("native turn accepted before an RPC error");
+      const rejected = expect(started).rejects.toThrow("late start error");
+      await appServer.waitForTurnStart();
+      appServer.startsTurn({ threadId: "thread-1", turnId: "contradictory-live-turn" });
+      reply.resolve({ __jsonRpcError: { code: -32603, message: "late start error" } });
+      await rejected;
+      expect(kill).toHaveBeenCalledExactlyOnceWith("SIGTERM");
+    } finally {
+      reply.resolve({});
+      await session.close();
+      kill.mockRestore();
+    }
+  });
+
+  test("a definitive turn/start RPC rejection preserves the healthy transport", async () => {
+    let starts = 0;
+    const appServer = createFakeCodexAppServer({
+      "turn/start": () =>
+        ++starts === 1 ? { __jsonRpcError: { code: -32602, message: "invalid turn input" } } : {},
+    });
+    const kill = vi.spyOn(appServer.child, "kill");
+    const spawn = vi.fn(async () => appServer.child);
+    const session = new CodexAppServerAgentSession(createConfig(), null, createTestLogger(), spawn);
+    try {
+      await expect(session.startTurn("rejected prompt")).rejects.toThrow("invalid turn input");
+      expect(kill).not.toHaveBeenCalled();
+      await session.startTurn("corrected explicit prompt");
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(starts).toBe(2);
+    } finally {
+      await session.close();
+      kill.mockRestore();
     }
   });
 
@@ -6227,6 +6407,7 @@ describe("Codex app-server provider", () => {
 
     session.activeForegroundTurnId = null;
     session.client = createStub<CodexClientLike>({
+      isClosed: false,
       request: async (method) => {
         if (method === "thread/loaded/list") return { data: ["test-thread"] };
         if (method === "turn/start") return {};
@@ -6272,6 +6453,7 @@ describe("Codex app-server provider", () => {
     });
     session.activeForegroundTurnId = null;
     session.client = createStub<CodexClientLike>({
+      isClosed: false,
       request: async (method) => {
         if (method === "thread/loaded/list") {
           markPromptSetupStarted?.();
@@ -6324,6 +6506,7 @@ describe("Codex app-server provider", () => {
     });
     session.activeForegroundTurnId = null;
     session.client = createStub<CodexClientLike>({
+      isClosed: false,
       request: async (method) => {
         if (method === "thread/loaded/list") return { data: ["test-thread"] };
         if (method === "turn/start") {
@@ -6371,6 +6554,7 @@ describe("Codex app-server provider", () => {
 
     session.activeForegroundTurnId = null;
     session.client = createStub<CodexClientLike>({
+      isClosed: false,
       request: async (method) => {
         if (method === "thread/loaded/list") return { data: ["test-thread"] };
         if (method === "turn/start") throw new Error("Prompt rejected");
@@ -7101,7 +7285,7 @@ describe("Codex app-server provider", () => {
     });
 
     session.activeForegroundTurnId = null;
-    session.client = createStub<CodexClientLike>({ request });
+    session.client = createStub<CodexClientLike>({ isClosed: false, request });
 
     const events: AgentStreamEvent[] = [];
     session.subscribe((event) => events.push(event));
