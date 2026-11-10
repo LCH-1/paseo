@@ -21,7 +21,8 @@ import { CheckoutPrStatusResponseSchema } from "@getpaseo/protocol/messages";
 
 const EXPECTED_GITHUB_FAST_POLL_MS = 20_000;
 const EXPECTED_GITHUB_SLOW_POLL_MS = 120_000;
-const EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS = 300_000;
+const EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS = 3_600_000;
+const RATE_LIMIT_RESET_AT_MS = 300_000;
 const CURRENT_PR_STATUS_BASE_FIELDS =
   "number,url,title,state,isDraft,baseRefName,headRefName,headRefOid,mergedAt,reviewDecision,mergeable,headRepositoryOwner";
 const CURRENT_PR_STATUS_FIELDS = `${CURRENT_PR_STATUS_BASE_FIELDS},statusCheckRollup`;
@@ -752,6 +753,27 @@ describe("ForgeService", () => {
     ]);
   });
 
+  it("runs gh through its resolved path for both github.com and enterprise hosts", async () => {
+    const ghPath = "C:\\Program Files\\GitHub CLI\\gh.exe";
+    const launches: Array<Pick<GitHubCommandRunnerOptions, "executablePath" | "envOverlay">> = [];
+    const service = createGitHubService({
+      runner: async (_args, options) => {
+        launches.push({ executablePath: options.executablePath, envOverlay: options.envOverlay });
+        return { stdout: "[]", stderr: "" };
+      },
+      resolveGhPath: async () => ghPath,
+      resolveRepoHost: async (cwd) => (cwd === "/ghe" ? "github.acme.internal" : null),
+    });
+
+    await service.listPullRequests({ cwd: "/repo" });
+    await service.listPullRequests({ cwd: "/ghe" });
+
+    expect(launches).toEqual([
+      { executablePath: ghPath, envOverlay: undefined },
+      { executablePath: ghPath, envOverlay: { GH_HOST: "github.acme.internal" } },
+    ]);
+  });
+
   it("computes fast cadence for pending and slow cadence for stable PR states", () => {
     const pendingStatus = createCurrentPullRequestStatus({ checksStatus: "pending" });
     const runningCheckStatus = createCurrentPullRequestStatus({
@@ -771,8 +793,50 @@ describe("ForgeService", () => {
 
     expect(computeGithubNextInterval(stableStatus, 1)).toBe(EXPECTED_GITHUB_SLOW_POLL_MS);
     expect(computeGithubNextInterval(stableStatus, 2)).toBe(240_000);
-    expect(computeGithubNextInterval(stableStatus, 3)).toBe(EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS);
-    expect(computeGithubNextInterval(stableStatus, 4)).toBe(EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS);
+    expect(computeGithubNextInterval(stableStatus, 3)).toBe(480_000);
+    expect(computeGithubNextInterval(stableStatus, 5)).toBe(1_920_000);
+    expect(computeGithubNextInterval(stableStatus, 6)).toBe(EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS);
+    expect(computeGithubNextInterval(stableStatus, 5_000)).toBe(
+      EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS,
+    );
+  });
+
+  it("stretches a persistently failing poll to one run per hour and resumes the normal cadence after recovery", async () => {
+    vi.setSystemTime(0);
+    const recoversAtMs = 10_000_000;
+    const runStartedAtSeconds: number[] = [];
+    const service = createGitHubService({
+      ttlMs: 0,
+      runner: async () => {
+        runStartedAtSeconds.push(Date.now() / 1_000);
+        if (Date.now() < recoversAtMs) {
+          throw new Error('gh: Expected NAME, actual: (none) ("") at [1, 35]');
+        }
+        return { stdout: batchPollStatusJson({ t0: batchPollRepositoryJson([]) }), stderr: "" };
+      },
+      resolveGhPath: async () => "/usr/bin/gh",
+      resolveRepoHost: async () => null,
+      resolveRepoSlug: async () => "acme/widgets",
+    });
+    const errors: unknown[] = [];
+    const statuses: Array<CurrentPullRequestStatus | null> = [];
+
+    const subscription = service.retainCurrentPullRequestStatusPoll?.({
+      cwd: "/ws-a",
+      headRef: "feat-a",
+      onError: (error) => errors.push(error),
+      onStatus: (status) => statuses.push(status),
+    });
+    await vi.advanceTimersByTimeAsync(11_040_000);
+    await flushMicrotasks();
+
+    // 2 → 4 → 8 → 16 → 32 minutes, then hourly; the last gap is the normal 2 minutes again.
+    expect(runStartedAtSeconds).toEqual([0, 120, 360, 840, 1_800, 3_720, 7_320, 10_920, 11_040]);
+    expect(errors).toHaveLength(7);
+    expect(statuses).toEqual([null, null]);
+
+    subscription?.unsubscribe();
+    service.dispose?.();
   });
 
   it("loads pull request checkout target details through GraphQL", async () => {
@@ -1554,7 +1618,7 @@ describe("ForgeService", () => {
 
   it("pauses a host until reset when a batch reaches the GraphQL reserve", async () => {
     let now = 0;
-    const resetAt = new Date(EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS).toISOString();
+    const resetAt = new Date(RATE_LIMIT_RESET_AT_MS).toISOString();
     const runner = createScriptedRunner([
       batchPollStatusWithRateLimitJson({
         aliases: { t0: batchPollRepositoryJson([batchPollPrNodeJson()]) },
@@ -1586,8 +1650,8 @@ describe("ForgeService", () => {
     expect(runner.calls[0]?.args[3]).toContain("rateLimit");
     expect(errors).toHaveLength(1);
 
-    now = EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS;
-    await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS);
+    now = RATE_LIMIT_RESET_AT_MS;
+    await vi.advanceTimersByTimeAsync(RATE_LIMIT_RESET_AT_MS);
     await flushMicrotasks();
     expect(runner.calls).toHaveLength(1);
 
@@ -1632,8 +1696,8 @@ describe("ForgeService", () => {
       ["api", "rate_limit"],
     ]);
 
-    now = EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS;
-    await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS);
+    now = RATE_LIMIT_RESET_AT_MS;
+    await vi.advanceTimersByTimeAsync(RATE_LIMIT_RESET_AT_MS);
     await flushMicrotasks();
     expect(runner.calls).toHaveLength(2);
 

@@ -3,7 +3,13 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { createGitHubService } from "../services/github-service.js";
+import { ForgeCliMissingError } from "../services/forge-cli-command.js";
+import {
+  createGitHubService,
+  GitHubAuthenticationError,
+  GitHubCliMissingError,
+  GitHubCommandError,
+} from "../services/github-service.js";
 import type { CurrentPullRequestStatus, ForgeService } from "../services/forge-service.js";
 import { defaultForgeRegistry } from "../services/forge-registry.js";
 import {
@@ -36,6 +42,30 @@ function createLogger() {
     warn: vi.fn(),
   };
   return logger;
+}
+
+type RetainPullRequestStatusPoll = NonNullable<ForgeService["retainCurrentPullRequestStatusPoll"]>;
+
+interface SelfHealFailureLogEntry {
+  level: "warn" | "debug";
+  fields: Record<string, unknown>;
+}
+
+function createSelfHealFailureLog() {
+  const selfHealFailures: SelfHealFailureLogEntry[] = [];
+  const record =
+    (level: SelfHealFailureLogEntry["level"]) =>
+    (fields: Record<string, unknown>, message: string) => {
+      if (message === "Failed to run forge PR status self-heal refresh") {
+        selfHealFailures.push({ level, fields });
+      }
+    };
+  const logger = {
+    child: () => logger,
+    debug: vi.fn(record("debug")),
+    warn: vi.fn(record("warn")),
+  };
+  return { logger, selfHealFailures };
 }
 
 function createDeferred<T>() {
@@ -1445,6 +1475,163 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
       await flushPromises();
 
       expect(forge.getCurrentPullRequestStatus).not.toHaveBeenCalled();
+    } finally {
+      service.dispose();
+      unregister();
+    }
+  });
+
+  test("logs a failed GitHub self-heal poll as one compact entry instead of the full gh command line", async () => {
+    const retainCurrentPullRequestStatusPoll = vi.fn<RetainPullRequestStatusPoll>(() => ({
+      unsubscribe: vi.fn(),
+    }));
+    const { logger, selfHealFailures } = createSelfHealFailureLog();
+    const service = new WorkspaceGitServiceImpl({
+      logger: logger as never,
+      paseoHome: "/tmp/paseo-test",
+      deps: buildServiceDeps({
+        github: { ...createGitHubServiceStub(), retainCurrentPullRequestStatusPoll },
+      }),
+    });
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(retainCurrentPullRequestStatusPoll).toHaveBeenCalledTimes(1);
+    });
+    const poll = retainCurrentPullRequestStatusPoll.mock.calls[0]?.[0];
+
+    const query = `query PaseoBatchPullRequestStatus {\n${"  field\n".repeat(500)}}`;
+    poll?.onError?.(
+      new GitHubCommandError({
+        args: ["api", "graphql", "-f", `query=${query}`],
+        cwd: REPO_CWD,
+        exitCode: 1,
+        stderr: 'gh: Expected NAME, actual: (none) ("") at [1, 35]\n',
+        stdout: '{"errors":[{"message":"Expected NAME"}]}',
+      }),
+    );
+
+    const flatMessage = `GitHub CLI command failed: gh api graphql -f query=query PaseoBatchPullRequestStatus {${" field".repeat(500)} }`;
+    expect(selfHealFailures).toEqual([
+      {
+        level: "warn",
+        fields: {
+          error: {
+            type: "GitHubCommandError",
+            message: `${flatMessage.slice(0, 300)}…`,
+            exitCode: 1,
+            stderr: 'gh: Expected NAME, actual: (none) ("") at [1, 35]',
+          },
+          cwd: REPO_CWD,
+          forge: "github",
+          headRef: "main",
+          reason: "self-heal-forge-pr-status",
+        },
+      },
+    ]);
+
+    subscription.unsubscribe();
+    service.dispose();
+  });
+
+  test("warns once while the GitHub CLI stays missing or signed out and again after a poll succeeds", async () => {
+    const retainCurrentPullRequestStatusPoll = vi.fn<RetainPullRequestStatusPoll>(() => ({
+      unsubscribe: vi.fn(),
+    }));
+    const { logger, selfHealFailures } = createSelfHealFailureLog();
+    const service = new WorkspaceGitServiceImpl({
+      logger: logger as never,
+      paseoHome: "/tmp/paseo-test",
+      deps: buildServiceDeps({
+        github: { ...createGitHubServiceStub(), retainCurrentPullRequestStatusPoll },
+      }),
+    });
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(retainCurrentPullRequestStatusPoll).toHaveBeenCalledTimes(1);
+    });
+    const poll = retainCurrentPullRequestStatusPoll.mock.calls[0]?.[0];
+    const signedOut = () => new GitHubAuthenticationError({ stderr: "run gh auth login" });
+
+    poll?.onError?.(new GitHubCliMissingError());
+    poll?.onError?.(new GitHubCliMissingError());
+    poll?.onError?.(signedOut());
+    poll?.onError?.(signedOut());
+    poll?.onStatus?.(null);
+    poll?.onError?.(signedOut());
+
+    expect(
+      selfHealFailures.map((entry) => [entry.level, (entry.fields.error as { type: string }).type]),
+    ).toEqual([
+      ["warn", "GitHubCliMissingError"],
+      ["debug", "GitHubCliMissingError"],
+      ["warn", "GitHubAuthenticationError"],
+      ["debug", "GitHubAuthenticationError"],
+      ["warn", "GitHubAuthenticationError"],
+    ]);
+
+    subscription.unsubscribe();
+    service.dispose();
+  });
+
+  test("generic forge self-heal warns once while its CLI stays missing and again after a recovery", async () => {
+    const missingCli = () => new ForgeCliMissingError("glab is not installed");
+    const forge = {
+      ...createGitHubServiceStub(),
+      retainCurrentPullRequestStatusPoll: undefined,
+      getCurrentPullRequestStatus: vi
+        .fn<ForgeService["getCurrentPullRequestStatus"]>()
+        .mockRejectedValueOnce(missingCli())
+        .mockRejectedValueOnce(missingCli())
+        .mockResolvedValueOnce(createCurrentPullRequestStatus())
+        .mockRejectedValueOnce(missingCli()),
+    };
+    const unregister = defaultForgeRegistry.register("forge-missing-cli-test", {
+      createService: () => forge,
+      matchesHost: (host) => host === "forge-missing-cli.test",
+    });
+    const { logger, selfHealFailures } = createSelfHealFailureLog();
+    const service = new WorkspaceGitServiceImpl({
+      logger: logger as never,
+      paseoHome: "/tmp/paseo-test",
+      deps: buildServiceDeps({
+        getCheckoutSnapshotFacts: vi.fn(async (cwd: string) =>
+          createCheckoutFacts(cwd, {
+            currentBranch: "feature",
+            remoteUrl: "https://forge-missing-cli.test/acme/repo.git",
+            pullRequestLookupTarget: { headRef: "feature" },
+          }),
+        ),
+        getCheckoutStatus: vi.fn(async (cwd: string) =>
+          createCheckoutStatus(cwd, {
+            currentBranch: "feature",
+            remoteUrl: "https://forge-missing-cli.test/acme/repo.git",
+          }),
+        ),
+      }),
+    });
+
+    try {
+      const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+      await flushPromises();
+
+      // Two failures, then a success, then a failure: 2 min, 2 min, 4 min (backoff), 2 min.
+      for (const delayMs of [120_000, 120_000, 240_000, 120_000]) {
+        await vi.advanceTimersByTimeAsync(delayMs);
+        await flushPromises();
+      }
+
+      expect(forge.getCurrentPullRequestStatus).toHaveBeenCalledTimes(4);
+      expect(selfHealFailures.map((entry) => entry.level)).toEqual(["warn", "debug", "warn"]);
+      expect(selfHealFailures[0]?.fields).toEqual({
+        error: { type: "Error", message: "glab is not installed" },
+        cwd: REPO_CWD,
+        forge: "forge-missing-cli-test",
+        headRef: "feature",
+        reason: "self-heal-forge-pr-status",
+      });
+      subscription.unsubscribe();
     } finally {
       service.dispose();
       unregister();

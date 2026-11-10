@@ -59,6 +59,13 @@ interface ProbeHostViaCliAuthStatusOptions {
 export interface ForgeCliRunnerOptions {
   cwd: string;
   envOverlay?: Record<string, string>;
+  /**
+   * Resolved path of the CLI. A bare binary name is launched through cmd.exe
+   * on Windows, and cmd.exe cuts the command line at the first newline inside
+   * an argument (multi-line GraphQL queries, PR bodies). A resolved `.exe`
+   * path is spawned directly, so its arguments arrive intact.
+   */
+  executablePath?: string;
 }
 
 export interface ForgeCliRunnerResult {
@@ -103,7 +110,7 @@ export interface ForgeCliRunnerFactory {
  */
 export function createForgeCliRunner(options: CreateForgeCliRunnerOptions): ForgeCliRunnerFactory {
   const run: ForgeCliRunner = (args, runOptions) =>
-    execCommand(options.binary, args, {
+    execCommand(runOptions.executablePath ?? options.binary, args, {
       cwd: runOptions.cwd,
       envOverlay: { ...options.envOverlay, ...runOptions.envOverlay },
       maxBuffer: 10 * 1024 * 1024,
@@ -177,6 +184,40 @@ export class ForgeCommandError extends Error {
       this.stdout = params.stdout;
     }
   }
+}
+
+const FORGE_ERROR_LOG_MESSAGE_MAX_CHARS = 300;
+const FORGE_ERROR_LOG_STDERR_MAX_CHARS = 500;
+
+function clampLogText(text: string, maxChars: number): string {
+  const singleLine = text.replace(/\s+/g, " ").trim();
+  return singleLine.length > maxChars ? `${singleLine.slice(0, maxChars)}…` : singleLine;
+}
+
+/**
+ * Log fields for a failed forge call. A CLI error carries its full argv in the
+ * message, the stack and `args`; for a batched GraphQL poll that is a
+ * multi-kilobyte query written three times per log line. CLI errors are
+ * reduced to one clamped message plus stderr. Anything else keeps its stack.
+ */
+export function forgeErrorLogFields(error: unknown): Record<string, unknown> {
+  if (
+    error instanceof ForgeCommandError ||
+    error instanceof ForgeAuthenticationError ||
+    error instanceof ForgeCliMissingError
+  ) {
+    return {
+      error: {
+        type: error.name,
+        message: clampLogText(error.message, FORGE_ERROR_LOG_MESSAGE_MAX_CHARS),
+        ...("exitCode" in error ? { exitCode: error.exitCode } : {}),
+        ...("stderr" in error
+          ? { stderr: clampLogText(error.stderr, FORGE_ERROR_LOG_STDERR_MAX_CHARS) }
+          : {}),
+      },
+    };
+  }
+  return { err: error };
 }
 
 /**

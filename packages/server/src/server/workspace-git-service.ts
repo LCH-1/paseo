@@ -23,6 +23,7 @@ import {
   getPullRequestStatus,
   forgeAuthStateFromError,
   hasOriginRemote,
+  isForgeAuthError,
   listBranchSuggestions,
   resolveRepositoryDefaultBranch,
   resolveBranchCheckout,
@@ -35,6 +36,7 @@ import type {
   PullRequestCheck,
   PullRequestMergeable,
 } from "../services/forge-service.js";
+import { forgeErrorLogFields } from "../services/forge-cli-command.js";
 import { createForgeService } from "../services/forge-registry.js";
 import {
   createForgeResolver,
@@ -84,7 +86,9 @@ const FETCH_METADATA_ECHO_TTL_MS = 5_000;
 export const WORKSPACE_GIT_OBSERVATION_REENSURE_INTERVAL_MS = 60_000;
 const FORGE_PR_STATUS_POLL_FAST_INTERVAL_MS = 20_000;
 const FORGE_PR_STATUS_POLL_SLOW_INTERVAL_MS = 120_000;
-const FORGE_PR_STATUS_POLL_ERROR_BACKOFF_CAP_MS = 300_000;
+// Mirrors GITHUB_POLL_ERROR_BACKOFF_CAP_MS: a failure that outlasts the doubling
+// steps settles at one CLI spawn per hour instead of one every five minutes.
+const FORGE_PR_STATUS_POLL_ERROR_BACKOFF_CAP_MS = 3_600_000;
 const DEGRADED_GIT_POLL_INTERVAL_MS = 5_000;
 // Degraded polling shells out a full Git refresh per tick, and the repositories that defeat the
 // recursive watcher are the ones where that refresh is expensive. At a fixed cadence the daemon
@@ -426,6 +430,8 @@ interface WorkspaceGitTarget {
   observationReensureTimer: NodeJS.Timeout | null;
   forgePrStatusPollSubscription: { unsubscribe: () => void } | null;
   forgePrStatusPollKey: string | null;
+  /** CLI-missing / signed-out state the poll already warned about; null once a poll succeeds. */
+  forgePrStatusPollSetupFailure: ForgeAuthState | null;
   refreshState: WorkspaceGitRefreshState;
   latestGit: WorkspaceGitRuntimeSnapshot["git"] | null;
   latestGitLoadedAtMs: number | null;
@@ -1208,6 +1214,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       observationReensureTimer: null,
       forgePrStatusPollSubscription: null,
       forgePrStatusPollKey: null,
+      forgePrStatusPollSetupFailure: null,
       refreshState: { status: "idle" },
       latestGit: null,
       latestGitLoadedAtMs: null,
@@ -2819,6 +2826,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
           ? { headRepositoryOwner: pollTarget.headRepositoryOwner }
           : {}),
         onStatus: (status) => {
+          target.forgePrStatusPollSetupFailure = null;
           if (!this.isActiveObservedWorkspaceTarget(target)) {
             return;
           }
@@ -2831,17 +2839,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
           );
         },
         onError: (error) => {
-          this.logger.warn(
-            {
-              err: error,
-              cwd: target.cwd,
-              forge: resolution.forge,
-              headRef: pollTarget.headRef,
-              headRepositoryOwner: pollTarget.headRepositoryOwner,
-              reason: "self-heal-forge-pr-status",
-            },
-            "Failed to run forge PR status self-heal refresh",
-          );
+          this.logForgePrStatusPollFailure({
+            target,
+            forge: resolution.forge,
+            pollTarget,
+            error,
+          });
         },
       });
       return;
@@ -2902,23 +2905,14 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         if (!closed && this.isActiveObservedWorkspaceTarget(target)) {
           latestStatus = status;
           consecutiveErrors = 0;
+          target.forgePrStatusPollSetupFailure = null;
           this.rememberForgePrStatusSnapshot(target, buildForgeSnapshotFromStatus(status, forge), {
             notify: true,
           });
         }
       } catch (error) {
         consecutiveErrors += 1;
-        this.logger.warn(
-          {
-            err: error,
-            cwd: target.cwd,
-            forge,
-            headRef: pollTarget.headRef,
-            headRepositoryOwner: pollTarget.headRepositoryOwner,
-            reason: "self-heal-forge-pr-status",
-          },
-          "Failed to run forge PR status self-heal refresh",
-        );
+        this.logForgePrStatusPollFailure({ target, forge, pollTarget, error });
       } finally {
         schedule(computeGenericForgeNextInterval(latestStatus, consecutiveErrors));
       }
@@ -2961,6 +2955,39 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
 
     return { headRef: git.currentBranch };
+  }
+
+  private logForgePrStatusPollFailure({
+    target,
+    forge,
+    pollTarget,
+    error,
+  }: {
+    target: WorkspaceGitTarget;
+    forge: string;
+    pollTarget: WorkspaceForgePrStatusPollTarget;
+    error: unknown;
+  }): void {
+    // A missing or signed-out CLI stays that way until the user acts, so every
+    // retry fails identically. Warn once, then keep the repeats out of the
+    // default log level until the state changes or a poll succeeds.
+    const setupFailure = isForgeAuthError(error) ? forgeAuthStateFromError(error) : null;
+    const isRepeat = setupFailure !== null && target.forgePrStatusPollSetupFailure === setupFailure;
+    target.forgePrStatusPollSetupFailure = setupFailure;
+    const fields = {
+      ...forgeErrorLogFields(error),
+      cwd: target.cwd,
+      forge,
+      headRef: pollTarget.headRef,
+      headRepositoryOwner: pollTarget.headRepositoryOwner,
+      reason: "self-heal-forge-pr-status",
+    };
+    const message = "Failed to run forge PR status self-heal refresh";
+    if (isRepeat) {
+      this.logger.debug(fields, message);
+      return;
+    }
+    this.logger.warn(fields, message);
   }
 
   private stopForgePrStatusPollForTarget(target: WorkspaceGitTarget): void {

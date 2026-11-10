@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createCachedCliPathResolver,
   createForgeCliRunner,
+  ForgeAuthenticationError,
+  ForgeCliMissingError,
+  ForgeCommandError,
+  forgeErrorLogFields,
   probeHostViaCliAuthStatus,
 } from "./forge-cli-command.js";
 import { isPlatform } from "../test-utils/platform.js";
@@ -137,6 +141,127 @@ describe.skipIf(isPlatform("win32"))("createForgeCliRunner", () => {
     const normalized = runner.normalizeError(rawError, { args: ["arg"], cwd: tempDir });
     expect(normalized).toBeInstanceOf(FakeCommandError);
     expect((normalized as FakeCommandError).stderr).toMatch(/timed out after 100ms/);
+  });
+});
+
+describe("createForgeCliRunner argument delivery", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "forge-cli-argv-"));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  // The bare binary name "node" is what a Windows launch routes through
+  // cmd.exe, which cuts the command line at the first newline inside an
+  // argument. The resolved path must bypass that.
+  it("delivers multi-line, quoted and percent arguments verbatim to the resolved executable", async () => {
+    const scriptPath = join(tempDir, "echo-argv.js");
+    writeFileSync(scriptPath, "process.stdout.write(JSON.stringify(process.argv.slice(3)));\n");
+    const runner = createForgeCliRunner({
+      binary: "node",
+      envOverlay: {},
+      timeoutMs: 10_000,
+      isAuthFailureText: () => false,
+      errorClasses: {
+        isAlreadyClassified: () => false,
+        isCommandError: (error): error is ForgeCommandError => error instanceof ForgeCommandError,
+        createAuthError: (stderr) => new Error(`auth: ${stderr}`),
+        createMissingError: () => new Error("missing"),
+        createCommandError: (params) =>
+          new ForgeCommandError({ brand: "Node", binary: "node" }, params),
+      },
+    });
+    const args = [
+      "api",
+      "graphql",
+      "-f",
+      'query=query Batch {\n  t0: repository(owner: "acme", name: "repo") {\n    isFork\n  }\n}',
+      "-f",
+      'body=First line\r\n\r\nSecond "quoted" line at 100%',
+      "--format=%(refname)%09%PATH%",
+    ];
+
+    const { stdout } = await runner.run([scriptPath, "--", ...args], {
+      cwd: tempDir,
+      executablePath: process.execPath,
+    });
+
+    expect(JSON.parse(stdout)).toEqual(args);
+  });
+});
+
+describe("forgeErrorLogFields", () => {
+  class FakeForgeCommandError extends ForgeCommandError {
+    constructor(params: { args: string[]; exitCode: number; stderr: string; stdout?: string }) {
+      super({ brand: "Fake", binary: "fake" }, { cwd: "/repo", ...params });
+      this.name = "FakeForgeCommandError";
+    }
+  }
+
+  it("reduces a CLI command error to one clamped single-line message plus stderr", () => {
+    const query = `query Batch {\n${"  field\n".repeat(500)}}`;
+    const error = new FakeForgeCommandError({
+      args: ["api", "graphql", "-f", `query=${query}`],
+      exitCode: 1,
+      stderr: 'fake: Expected NAME, actual: (none) ("") at [1, 35]\n',
+      stdout: '{"errors":[]}',
+    });
+    const flatMessage = `Fake CLI command failed: fake api graphql -f query=query Batch {${" field".repeat(500)} }`;
+
+    expect(forgeErrorLogFields(error)).toEqual({
+      error: {
+        type: "FakeForgeCommandError",
+        message: `${flatMessage.slice(0, 300)}…`,
+        exitCode: 1,
+        stderr: 'fake: Expected NAME, actual: (none) ("") at [1, 35]',
+      },
+    });
+  });
+
+  it("clamps a long stderr", () => {
+    const error = new FakeForgeCommandError({
+      args: ["pr", "view"],
+      exitCode: 1,
+      stderr: "x".repeat(2_000),
+    });
+
+    expect(forgeErrorLogFields(error)).toEqual({
+      error: {
+        type: "FakeForgeCommandError",
+        message: "Fake CLI command failed: fake pr view",
+        exitCode: 1,
+        stderr: `${"x".repeat(500)}…`,
+      },
+    });
+  });
+
+  it("describes a missing CLI and a signed-out CLI without a stack", () => {
+    expect(forgeErrorLogFields(new ForgeCliMissingError("fake is not installed"))).toEqual({
+      error: { type: "Error", message: "fake is not installed" },
+    });
+    expect(
+      forgeErrorLogFields(
+        new ForgeAuthenticationError("Fake CLI authentication failed", {
+          stderr: "run fake auth login\n",
+        }),
+      ),
+    ).toEqual({
+      error: {
+        type: "Error",
+        message: "Fake CLI authentication failed",
+        stderr: "run fake auth login",
+      },
+    });
+  });
+
+  it("passes any other error through so its stack is still logged", () => {
+    const error = new TypeError("status.checks is not iterable");
+
+    expect(forgeErrorLogFields(error)).toEqual({ err: error });
   });
 });
 

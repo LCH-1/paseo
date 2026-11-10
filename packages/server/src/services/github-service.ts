@@ -110,7 +110,10 @@ const ACTIONS_JOB_PAGE_MAX = 100;
 const FAILED_CHECK_JOB_LIMIT = 5;
 export const GITHUB_POLL_FAST_INTERVAL_MS = 20_000;
 export const GITHUB_POLL_SLOW_INTERVAL_MS = 120_000;
-export const GITHUB_POLL_ERROR_BACKOFF_CAP_MS = 300_000;
+// A failure that survives the doubling steps is not transient (broken auth,
+// a missing CLI, a query gh rejects), so retries settle at one spawn per hour
+// rather than one every five minutes. Any successful read resets the cadence.
+export const GITHUB_POLL_ERROR_BACKOFF_CAP_MS = 3_600_000;
 // The PR status poller batches every due target into aliased GraphQL queries
 // instead of one `gh pr view` + facts query per workspace. Cost scales with the
 // GraphQL point budget (5,000/hour), so the batch size and the shared poll time
@@ -961,6 +964,8 @@ interface GitHubServiceDependencies {
 export interface GitHubCommandRunnerOptions {
   cwd: string;
   envOverlay?: Record<string, string>;
+  /** Resolved gh path; see ForgeCliRunnerOptions.executablePath. */
+  executablePath?: string;
 }
 
 export interface GitHubCommandResult {
@@ -1324,9 +1329,11 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     // which silently queries the wrong server on GitHub Enterprise. GH_HOST is
     // safe even for auto-routing subcommands because it matches the repo's host.
     const host = await resolveRepoHostCached(runOptions.cwd);
-    const effectiveOptions: GitHubCommandRunnerOptions = host
-      ? { ...runOptions, envOverlay: { ...runOptions.envOverlay, GH_HOST: host } }
-      : runOptions;
+    const effectiveOptions: GitHubCommandRunnerOptions = {
+      ...runOptions,
+      executablePath: ghPath,
+      ...(host ? { envOverlay: { ...runOptions.envOverlay, GH_HOST: host } } : {}),
+    };
     try {
       const result = await deps.runner(args, effectiveOptions);
       return result.stdout.trim();
