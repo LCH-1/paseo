@@ -1492,6 +1492,7 @@ interface AgentDirectoryRefreshInput {
 
 export class HostRuntimeStore {
   private controllers = new Map<string, HostRuntimeController>();
+  private connectionDemandByServer = new Map<string, Set<object>>();
   private serverListeners = new Map<string, Set<() => void>>();
   private globalListeners = new Set<() => void>();
   private hostListListeners = new Set<() => void>();
@@ -2279,6 +2280,7 @@ export class HostRuntimeStore {
   syncHosts(
     hosts: HostProfile[],
     options?: {
+      updateExisting?: boolean;
       initialConnectionByServerId?: Map<
         string,
         { connectionId: string; existingClient: DaemonClient }
@@ -2287,11 +2289,18 @@ export class HostRuntimeStore {
   ): void {
     this.replicaCache.setHosts(hosts.map((host) => host.serverId));
     projectIconCache.setHosts(hosts.map((host) => host.serverId));
+    const registeredIds = new Set(hosts.map((host) => host.serverId));
+    for (const serverId of this.connectionDemandByServer.keys()) {
+      if (!registeredIds.has(serverId)) this.connectionDemandByServer.delete(serverId);
+    }
     // Local plugins supply window-wide UI, including when the project host is offline.
-    const connectedHosts = filterProjectWindowHosts(
-      hosts,
-      getProjectWindowScope(),
-      this.localPluginServerId,
+    const scopedIds = new Set(
+      filterProjectWindowHosts(hosts, getProjectWindowScope(), this.localPluginServerId).map(
+        (host) => host.serverId,
+      ),
+    );
+    const connectedHosts = hosts.filter(
+      (host) => scopedIds.has(host.serverId) || this.connectionDemandByServer.has(host.serverId),
     );
     const nextIds = new Set(connectedHosts.map((host) => host.serverId));
     for (const [serverId, controller] of this.controllers) {
@@ -2313,7 +2322,7 @@ export class HostRuntimeStore {
       const initialConnection = options?.initialConnectionByServerId?.get(host.serverId);
       const existing = this.controllers.get(host.serverId);
       if (existing) {
-        void existing.updateHost(host);
+        if (options?.updateExisting !== false) void existing.updateHost(host);
         if (initialConnection) {
           void existing.activateConnection(initialConnection).catch(() => {
             void initialConnection.existingClient.close().catch(() => undefined);
@@ -2627,6 +2636,31 @@ export class HostRuntimeStore {
     return Promise.all(
       Array.from(this.controllers.values(), (controller) => controller.runProbeCycleNow()),
     ).then(() => undefined);
+  }
+
+  acquireConnectionDemand(serverId: string): () => void {
+    if (!this.hosts.some((host) => host.serverId === serverId)) return () => undefined;
+    const existing = this.controllers.get(serverId);
+    const source = {};
+    const sources = this.connectionDemandByServer.get(serverId) ?? new Set<object>();
+    this.connectionDemandByServer.set(serverId, sources);
+    sources.add(source);
+    if (sources.size === 1) {
+      this.syncHosts(this.hosts, { updateExisting: false });
+      if (
+        existing &&
+        ["idle", "offline", "error"].includes(existing.getSnapshot().connectionStatus)
+      ) {
+        existing.ensureConnected({ verify: true });
+        void existing.runProbeCycleNow();
+      }
+    }
+    return () => {
+      const current = this.connectionDemandByServer.get(serverId);
+      if (!current?.delete(source) || current.size > 0) return;
+      this.connectionDemandByServer.delete(serverId);
+      this.syncHosts(this.hosts, { updateExisting: false });
+    };
   }
 
   async refreshAgentDirectory(

@@ -12,6 +12,7 @@ import {
   resolveSessionSettingsHostId,
   selectSessionSettingsHosts,
   saveSessionDefaults,
+  withSessionSettingsHosts,
 } from "@/screens/settings/session/model";
 import { CreateAgentPreferencesService } from "./service";
 import {
@@ -23,6 +24,41 @@ import {
 import { FakeCreateAgentPreferenceStorage } from "./test-utils/fake-preference-storage";
 
 describe("create agent preferences", () => {
+  it("connects scoped-out bulk targets before applying and releases every temporary connection", async () => {
+    const client = new DaemonClient({
+      url: "ws://unused",
+      clientId: "bulk-connection-test",
+      reconnect: { enabled: false },
+    });
+    let connected = false;
+    const listeners = new Set<() => void>();
+    const release = vi.fn();
+    const runtime = {
+      acquireConnectionDemand: vi.fn(() => release),
+      getSnapshot: () => ({ connectionStatus: connected ? "online" : "connecting" }),
+      getClient: () => (connected ? client : null),
+      subscribe: (_id: string, listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+    const apply = vi.fn(async (hosts) => {
+      expect(release).not.toHaveBeenCalled();
+      return hosts;
+    });
+    const result = withSessionSettingsHosts(
+      { hosts: [{ serverId: "remote", label: "Remote" }], runtime },
+      apply,
+    );
+    expect(apply).not.toHaveBeenCalled();
+    expect(runtime.acquireConnectionDemand).toHaveBeenCalledWith("remote");
+    connected = true;
+    for (const listener of listeners) listener();
+    expect(await result).toEqual([{ label: "Remote", client }]);
+    expect(listeners.size).toBe(0);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
   it("uses explicit target host IDs independently of the model catalog host", () => {
     const hosts = [
       { serverId: "work", label: "Work" },
@@ -40,6 +76,108 @@ describe("create agent preferences", () => {
       provider: "",
       selection: EMPTY_SESSION_SETTINGS,
     });
+  });
+
+  it("skips only hosts still unavailable after the connection deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new DaemonClient({
+        url: "ws://unused",
+        clientId: "bulk-deadline-test",
+        reconnect: { enabled: false },
+      });
+      vi.spyOn(client, "fetchAgents").mockResolvedValue({
+        requestId: "empty",
+        entries: [],
+        pageInfo: { nextCursor: null, prevCursor: null, hasMore: false },
+      });
+      const listeners = new Set<() => void>();
+      const release = vi.fn();
+      const apply = vi.fn((hosts) =>
+        applySessionSettings({ hosts, provider: "codex", selection: EMPTY_SESSION_SETTINGS }),
+      );
+      const result = withSessionSettingsHosts(
+        {
+          hosts: [
+            { serverId: "online", label: "Online" },
+            { serverId: "offline", label: "Offline" },
+          ],
+          runtime: {
+            acquireConnectionDemand: () => release,
+            getSnapshot: (id) => ({ connectionStatus: id === "online" ? "online" : "offline" }),
+            getClient: (id) => (id === "online" ? client : null),
+            subscribe: (_id, listener) => {
+              listeners.add(listener);
+              return () => listeners.delete(listener);
+            },
+          },
+        },
+        apply,
+      );
+      await vi.advanceTimersByTimeAsync(9999);
+      expect(apply).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await result).toMatchObject({ applied: 0, failed: 0, skippedHosts: ["Offline"] });
+      expect(client.fetchAgents).toHaveBeenCalledTimes(1);
+      expect(release).toHaveBeenCalledTimes(2);
+      expect(listeners.size).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases temporary connections when applying settings fails", async () => {
+    const client = new DaemonClient({
+      url: "ws://unused",
+      clientId: "bulk-failed-apply-test",
+      reconnect: { enabled: false },
+    });
+    const release = vi.fn();
+    await expect(
+      withSessionSettingsHosts(
+        {
+          hosts: [{ serverId: "remote", label: "Remote" }],
+          runtime: {
+            acquireConnectionDemand: () => release,
+            getSnapshot: () => ({ connectionStatus: "online" }),
+            getClient: () => client,
+            subscribe: vi.fn(),
+          },
+        },
+        async () => {
+          throw new Error("apply failed");
+        },
+      ),
+    ).rejects.toThrow("apply failed");
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases earlier connections when acquiring another target fails", async () => {
+    const release = vi.fn();
+    const apply = vi.fn();
+    await expect(
+      withSessionSettingsHosts(
+        {
+          hosts: [
+            { serverId: "first", label: "First" },
+            { serverId: "second", label: "Second" },
+          ],
+          runtime: {
+            acquireConnectionDemand: (id) => {
+              if (id === "second") throw new Error("connect failed");
+              return release;
+            },
+            getSnapshot: () => null,
+            getClient: () => null,
+            subscribe: vi.fn(),
+          },
+        },
+        apply,
+      ),
+    ).rejects.toThrow("connect failed");
+    expect(apply).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
   it("saves bulk defaults without erasing thinking, features, or other providers", () => {

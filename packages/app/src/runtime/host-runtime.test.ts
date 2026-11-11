@@ -162,6 +162,131 @@ it("connects only the project host while preserving the complete registry", asyn
   }
 });
 
+it("leases an out-of-scope host until the last connection demand is released", async () => {
+  const connection = makeHost().connections[0]!;
+  const selected = makeHost({ serverId: "srv_lease_project", connections: [connection] });
+  const other = makeHost({ serverId: "srv_lease_other", connections: [connection] });
+  const storage = createMemoryHostRuntimeStorage({
+    "@paseo:daemon-registry": JSON.stringify([selected, other]),
+    "@paseo:e2e": "1",
+  });
+  const bridge = vi.spyOn(desktopHost, "getDesktopHost").mockReturnValue({
+    projectWindow: {
+      serverId: selected.serverId,
+      projectId: "project",
+      projectName: "Project",
+      directory: "/project",
+      windowId: "connection-demand-window",
+    },
+  });
+  const connectAttempts: string[] = [];
+  const store = createPairingStore({ storage, connectAttempts });
+  try {
+    await store.boot();
+    await waitForHostOnline(store, selected.serverId);
+    const selectedClient = store.getClient(selected.serverId);
+    const releaseSelected = store.acquireConnectionDemand(selected.serverId);
+    const releaseFirst = store.acquireConnectionDemand(other.serverId);
+    const releaseSecond = store.acquireConnectionDemand(other.serverId);
+    await waitForHostOnline(store, other.serverId);
+    const otherClient = store.getClient(other.serverId) as unknown as FakeDaemonClient;
+    expect(connectAttempts).toHaveLength(2);
+    expect(otherClient.fetchAgentsCalls).toEqual([]);
+    expect(store.getClient(selected.serverId)).toBe(selectedClient);
+
+    releaseFirst();
+    releaseFirst();
+    expect(store.getClient(other.serverId)).toBe(otherClient);
+    expect(otherClient.isDisposed()).toBe(false);
+    releaseSelected();
+    expect(store.getClient(selected.serverId)).toBe(selectedClient);
+    releaseSecond();
+    releaseSecond();
+    expect(store.getSnapshot(other.serverId)).toBeNull();
+    expect(otherClient.isDisposed()).toBe(true);
+    expect(store.getClient(selected.serverId)).toBe(selectedClient);
+    expect(connectAttempts).toHaveLength(2);
+    expect(store.getHosts()).toHaveLength(2);
+  } finally {
+    store.syncHosts([]);
+    bridge.mockRestore();
+  }
+});
+
+it("invalidates connection demand when a host is removed without reviving it", async () => {
+  const connection = makeHost().connections[0]!;
+  const selected = makeHost({ serverId: "srv_lease_kept", connections: [connection] });
+  const other = makeHost({
+    serverId: "srv_lease_removed",
+    connections: [{ id: "direct:other:6767", type: "directTcp", endpoint: "other:6767" }],
+  });
+  const storage = createMemoryHostRuntimeStorage({
+    "@paseo:daemon-registry": JSON.stringify([selected, other]),
+    "@paseo:e2e": "1",
+  });
+  const bridge = vi.spyOn(desktopHost, "getDesktopHost").mockReturnValue({
+    projectWindow: {
+      serverId: selected.serverId,
+      projectId: "project",
+      projectName: "Project",
+      directory: "/project",
+      windowId: "connection-demand-removal-window",
+    },
+  });
+  const pendingProbe = createDeferred<{
+    client: DaemonClient;
+    serverId: string;
+    hostname: string;
+  }>();
+  let deferOther = true;
+  const store = new HostRuntimeStore({
+    storage,
+    revokePushNotifications: async () => undefined,
+    deps: {
+      createClient: () => new FakeDaemonClient() as unknown as DaemonClient,
+      connectToDaemon: async ({ host }) => {
+        if (host.serverId === other.serverId && deferOther) return pendingProbe.promise;
+        return {
+          client: makeConnectedProbeClient(5) as unknown as DaemonClient,
+          serverId: host.serverId,
+          hostname: "connection-demand",
+        };
+      },
+      getClientId: async () => "connection-demand-removal",
+    },
+  });
+  try {
+    await store.boot();
+    const releaseRemoved = store.acquireConnectionDemand(other.serverId);
+    expect(store.getSnapshot(other.serverId)).not.toBeNull();
+    await store.removeHost(other.serverId);
+    const lateClient = makeConnectedProbeClient(5);
+    pendingProbe.resolve({
+      client: lateClient as unknown as DaemonClient,
+      serverId: other.serverId,
+      hostname: "removed",
+    });
+    await vi.waitFor(() => expect(lateClient.isDisposed()).toBe(true));
+    store.acquireConnectionDemand(other.serverId)();
+    expect(store.getSnapshot(other.serverId)).toBeNull();
+
+    deferOther = false;
+    await store.upsertDirectConnection({ serverId: other.serverId, endpoint: "other:6767" });
+    expect(store.getSnapshot(other.serverId)).toBeNull();
+    const releaseNew = store.acquireConnectionDemand(other.serverId);
+    await waitForHostOnline(store, other.serverId);
+    const newClient = store.getClient(other.serverId);
+    releaseRemoved();
+    expect(store.getClient(other.serverId)).toBe(newClient);
+    releaseNew();
+    expect(store.getSnapshot(other.serverId)).toBeNull();
+    expect(store.getSnapshot(selected.serverId)).not.toBeNull();
+  } finally {
+    store.syncHosts([]);
+    bridge.mockRestore();
+  }
+});
+
 it("requests the managed connection credential through desktop main without a web hint", async () => {
   const requests: string[] = [];
   const connection: HostConnection = {

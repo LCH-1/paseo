@@ -137,6 +137,80 @@ export interface SessionSettingsHost {
   client: DaemonClient | null;
 }
 
+interface SessionSettingsRuntime {
+  acquireConnectionDemand(serverId: string): () => void;
+  getSnapshot(serverId: string): { connectionStatus: string } | null;
+  getClient(serverId: string): DaemonClient | null;
+  subscribe(serverId: string, listener: () => void): () => void;
+}
+
+export async function withSessionSettingsHosts<Result>(
+  input: {
+    hosts: readonly (TargetHost & { label: string })[];
+    runtime: SessionSettingsRuntime;
+    timeoutMs?: number;
+  },
+  apply: (hosts: SessionSettingsHost[]) => Promise<Result>,
+): Promise<Result> {
+  const releases: (() => void)[] = [];
+  const stopWaiting: (() => void)[] = [];
+  const { runtime } = input;
+  function connectedClient(serverId: string) {
+    return runtime.getSnapshot(serverId)?.connectionStatus === "online"
+      ? runtime.getClient(serverId)
+      : null;
+  }
+  function waitForClient(serverId: string): Promise<DaemonClient | null> {
+    const initialClient = connectedClient(serverId);
+    if (initialClient) return Promise.resolve(initialClient);
+    return new Promise((resolve, reject) => {
+      let done = false;
+      let unsubscribe = () => {};
+      function finish(client: DaemonClient | null, error?: unknown) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        unsubscribe();
+        if (error) reject(error);
+        else resolve(client);
+      }
+      const timer = setTimeout(() => finish(null), input.timeoutMs ?? 10_000);
+      stopWaiting.push(() => finish(null));
+      function check() {
+        try {
+          const client = connectedClient(serverId);
+          if (client) finish(client);
+        } catch (error) {
+          finish(null, error);
+        }
+      }
+      try {
+        unsubscribe = runtime.subscribe(serverId, check);
+        // Subscription may synchronously publish the first ready snapshot.
+        if (done) unsubscribe();
+        else check();
+      } catch (error) {
+        finish(null, error);
+      }
+    });
+  }
+  try {
+    for (const host of input.hosts) {
+      releases.push(runtime.acquireConnectionDemand(host.serverId));
+    }
+    const hosts = await Promise.all(
+      input.hosts.map(async (host) => ({
+        label: host.label,
+        client: await waitForClient(host.serverId),
+      })),
+    );
+    return await apply(hosts);
+  } finally {
+    for (const stop of stopWaiting) stop();
+    for (const release of releases.toReversed()) release();
+  }
+}
+
 export interface SessionSettingsFailure {
   host: string;
   session: string;

@@ -1,4 +1,4 @@
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useFetchQuery } from "@/data/query";
@@ -20,6 +20,7 @@ import {
   resolveSessionSettingsHostId,
   selectSessionSettingsHosts,
   saveSessionDefaults,
+  withSessionSettingsHosts,
   type SessionSettingsSelection,
 } from "./model";
 
@@ -29,6 +30,10 @@ function useSessionCatalog(state: SessionFormState) {
   const { t } = useTranslation("sessionSettings");
   const hosts = useHosts();
   const hostId = resolveSessionSettingsHostId({ ...state, hosts });
+  const registered = hosts.some((host) => host.serverId === hostId);
+  useEffect(() => {
+    if (registered) return getHostRuntimeStore().acquireConnectionDemand(hostId);
+  }, [hostId, registered]);
   const client = useHostRuntimeClient(hostId);
   const connected = useHostRuntimeIsConnected(hostId);
   const catalog = useProvidersSnapshot(hostId || null);
@@ -117,17 +122,9 @@ async function executeSettingsAction({
   }
   const targetHosts = selectSessionSettingsHosts({ target: state.target, hosts });
   const runtime = getHostRuntimeStore();
-  const result = await applySessionSettings({
-    provider,
-    selection: state.selection,
-    hosts: targetHosts.map((host) => ({
-      label: host.label,
-      client:
-        runtime.getSnapshot(host.serverId)?.connectionStatus === "online"
-          ? runtime.getClient(host.serverId)
-          : null,
-    })),
-  });
+  const result = await withSessionSettingsHosts({ hosts: targetHosts, runtime }, (connectedHosts) =>
+    applySessionSettings({ provider, selection: state.selection, hosts: connectedHosts }),
+  );
   return {
     message: t("result", {
       applied: result.applied,
