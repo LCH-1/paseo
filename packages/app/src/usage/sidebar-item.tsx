@@ -9,31 +9,33 @@ import { useUsageHostId } from "./hosts";
 import { useUsageHostReports } from "./queries";
 import { UsageSourceIcon } from "./source-icon";
 import { UsageMeter } from "./meter";
-import {
-  resolveProviderPinnedUsage,
-  type PinnedUsageProvider,
-  type PinnedUsageSource,
-} from "./pinned";
+import { resolveProviderPinnedUsage, type PinnedUsageSource } from "./pinned";
 import { PINNED_USAGE_DETAILS_MAX_WIDTH, PinnedUsageDetails } from "./pinned-details";
-import type { UsageDisplayAs } from "./preferences";
+import type { UsagePreferences } from "./preferences";
+import type { UsageReportEntry } from "./types";
 import { UsageModal } from "./usage-modal";
 
-/**
- * Each summary window with data on the usage host, under its provider; empty while none has.
- * Reset times count from `now`, or from when the reports or preferences last changed.
- */
-function useUsageSummary(now?: number): readonly PinnedUsageProvider[] {
+interface UsageSummary {
+  reports: readonly UsageReportEntry[];
+  preferences: UsagePreferences;
+  /** Each summary window with data on the usage host, under its provider; empty while none has. */
+  sources: readonly PinnedUsageSource[];
+}
+
+/** The usage host's reports, the usage preferences, and the summary they make. */
+function useUsageSummary(): UsageSummary {
   const { preferences } = useUsagePreferences();
   const reports = useUsageHostReports(useUsageHostId());
-  return useMemo(
-    () => resolveProviderPinnedUsage(reports, preferences, now),
-    [now, preferences, reports],
+  const sources = useMemo(
+    () => resolveProviderPinnedUsage(reports, preferences),
+    [preferences, reports],
   );
+  return { reports, preferences, sources };
 }
 
 /** Whether the sidebar Usage item has anything to show. */
 export function useHasUsageSummary(): boolean {
-  return useUsageSummary().length > 0;
+  return useUsageSummary().sources.length > 0;
 }
 
 /**
@@ -45,9 +47,9 @@ export function UsageSidebarItem() {
   const { t } = useTranslation();
   const label = t(builtinSidebarNavLabelKey("usage"));
   const openUsage = useOpenSidebarUsage();
-  const sources = useUsageSummary();
-  if (sources.length === 0) return null;
-  return <PinnedUsageTrigger label={label} sources={sources} onPress={openUsage} />;
+  const summary = useUsageSummary();
+  if (summary.sources.length === 0) return null;
+  return <PinnedUsageTrigger label={label} summary={summary} onPress={openUsage} />;
 }
 
 const OpenSidebarUsageContext = createContext<(() => void) | null>(null);
@@ -94,14 +96,14 @@ function triggerStyle({ hovered }: PressableStateCallbackType & { hovered?: bool
 /** Provider icons and separate account meters only; details live in the hover card. */
 function PinnedUsageTrigger({
   label,
-  sources,
+  summary,
   onPress,
 }: {
   label: string;
-  sources: readonly PinnedUsageSource[];
+  summary: UsageSummary;
   onPress: () => void;
 }) {
-  const { preferences } = useUsagePreferences();
+  const { sources, preferences } = summary;
   return (
     <Tooltip delayDuration={250}>
       <TooltipTrigger asChild>
@@ -146,7 +148,7 @@ function PinnedUsageTrigger({
         style={styles.detailsCard}
         testID="sidebar-usage-details"
       >
-        <PinnedUsageHoverCard displayAs={preferences.displayAs} />
+        <PinnedUsageHoverCard reports={summary.reports} preferences={preferences} />
       </TooltipContent>
     </Tooltip>
   );
@@ -154,11 +156,22 @@ function PinnedUsageTrigger({
 
 /**
  * The hover card, mounted each time it opens, so the time left to each reset counts from then.
+ * It reads the reports the item already holds: a reports query of its own would refetch them on
+ * every hover.
  */
-function PinnedUsageHoverCard({ displayAs }: { displayAs: UsageDisplayAs }) {
+function PinnedUsageHoverCard({
+  reports,
+  preferences,
+}: {
+  reports: readonly UsageReportEntry[];
+  preferences: UsagePreferences;
+}) {
   const [openedAt] = useState(Date.now);
-  const providers = useUsageSummary(openedAt);
-  return <PinnedUsageDetails providers={providers} displayAs={displayAs} />;
+  const providers = useMemo(
+    () => resolveProviderPinnedUsage(reports, preferences, openedAt),
+    [openedAt, preferences, reports],
+  );
+  return <PinnedUsageDetails providers={providers} displayAs={preferences.displayAs} />;
 }
 
 const styles = StyleSheet.create((theme) => ({
