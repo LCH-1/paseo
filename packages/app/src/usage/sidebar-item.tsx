@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
+import { Pressable, View, type PressableStateCallbackType } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { builtinSidebarNavLabelKey } from "@/sidebar-nav/model";
@@ -9,14 +9,26 @@ import { useUsageHostId } from "./hosts";
 import { useUsageHostReports } from "./queries";
 import { UsageSourceIcon } from "./source-icon";
 import { UsageMeter } from "./meter";
-import { resolveProviderPinnedUsage, type PinnedUsageSource } from "./pinned";
+import {
+  resolveProviderPinnedUsage,
+  type PinnedUsageProvider,
+  type PinnedUsageSource,
+} from "./pinned";
+import { PINNED_USAGE_DETAILS_MAX_WIDTH, PinnedUsageDetails } from "./pinned-details";
+import type { UsageDisplayAs } from "./preferences";
 import { UsageModal } from "./usage-modal";
 
-/** Each summary window with data on the usage host, under its source; empty while none has. */
-function useUsageSummary(): readonly PinnedUsageSource[] {
+/**
+ * Each summary window with data on the usage host, under its provider; empty while none has.
+ * Reset times count from `now`, or from when the reports or preferences last changed.
+ */
+function useUsageSummary(now?: number): readonly PinnedUsageProvider[] {
   const { preferences } = useUsagePreferences();
   const reports = useUsageHostReports(useUsageHostId());
-  return useMemo(() => resolveProviderPinnedUsage(reports, preferences), [preferences, reports]);
+  return useMemo(
+    () => resolveProviderPinnedUsage(reports, preferences, now),
+    [now, preferences, reports],
+  );
 }
 
 /** Whether the sidebar Usage item has anything to show. */
@@ -126,25 +138,27 @@ function PinnedUsageTrigger({
           </View>
         </Pressable>
       </TooltipTrigger>
-      <TooltipContent side="top" align="end" offset={8} testID="sidebar-usage-details">
-        <View style={styles.details}>
-          <View style={styles.legend}>
-            <View style={[styles.swatch, styles.used]} />
-            <Text style={styles.detail}>사용량</Text>
-            <View style={[styles.swatch, styles.remaining]} />
-            <Text style={styles.detail}>남은 양</Text>
-          </View>
-          {sources.flatMap((source) =>
-            source.windows.map((window) => (
-              <Text key={window.key} style={styles.detail}>
-                {window.label}
-              </Text>
-            )),
-          )}
-        </View>
+      <TooltipContent
+        side="top"
+        align="end"
+        offset={8}
+        maxWidth={PINNED_USAGE_DETAILS_MAX_WIDTH}
+        style={styles.detailsCard}
+        testID="sidebar-usage-details"
+      >
+        <PinnedUsageHoverCard displayAs={preferences.displayAs} />
       </TooltipContent>
     </Tooltip>
   );
+}
+
+/**
+ * The hover card, mounted each time it opens, so the time left to each reset counts from then.
+ */
+function PinnedUsageHoverCard({ displayAs }: { displayAs: UsageDisplayAs }) {
+  const [openedAt] = useState(Date.now);
+  const providers = useUsageSummary(openedAt);
+  return <PinnedUsageDetails providers={providers} displayAs={displayAs} />;
 }
 
 const styles = StyleSheet.create((theme) => ({
@@ -185,16 +199,8 @@ const styles = StyleSheet.create((theme) => ({
     height: 6,
     borderRadius: 3,
   },
-  details: {
-    maxWidth: 360,
-    gap: theme.spacing[1.5],
+  detailsCard: {
+    paddingVertical: theme.spacing[2],
+    paddingHorizontal: theme.spacing[3],
   },
-  detail: {
-    color: theme.colors.popoverForeground,
-    fontSize: theme.fontSize.sm,
-  },
-  legend: { flexDirection: "row", alignItems: "center", gap: theme.spacing[1.5] },
-  swatch: { width: 8, height: 8, borderRadius: 2 },
-  used: { backgroundColor: theme.colors.surface3 },
-  remaining: { backgroundColor: "#91b89c" },
 }));

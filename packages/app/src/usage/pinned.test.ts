@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { UsagePreferences } from "./preferences";
 import {
   choosePinnedUsageLayout,
+  pinnedUsageWindowName,
   resolvePinnedUsage,
   resolveProviderPinnedUsage,
+  type PinnedUsageProvider,
   type PinnedUsageSource,
   type PinnedUsageWindow,
 } from "./pinned";
@@ -322,4 +324,169 @@ it("keeps unavailable and error reports out of the sidebar summary even with ret
     report: { status: "error", error: "Store deleted" },
   };
   expect(resolvePinnedUsage([expired, failed], preferences(null))).toEqual([]);
+});
+
+describe("resolveProviderPinnedUsage hover card", () => {
+  // Clock times follow the machine's 12/24-hour preference, so each expectation names both.
+  const twelveHour = ["h11", "h12"].includes(
+    new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions().hourCycle ?? "",
+  );
+  const clock = (twelve: string, twentyFour: string) => (twelveHour ? twelve : twentyFour);
+  const local = (month: number, day: number, hour: number, minute: number, second = 0) =>
+    new Date(2026, month - 1, day, hour, minute, second).toISOString();
+  const now = new Date(2026, 10, 11, 11, 0).getTime();
+
+  const firstClaude = report({
+    sourceId: "claude",
+    sourceLabel: "Claude",
+    account: "claudecodelover@gmail.com",
+    icon: "<svg/>",
+    windows: [
+      {
+        id: "five_hour",
+        label: "Session",
+        shortLabel: "5h",
+        usedPct: 12,
+        resetsAt: local(11, 11, 15, 30),
+      },
+      {
+        id: "weekly",
+        label: "Weekly",
+        shortLabel: "wk",
+        usedPct: 75,
+        resetsAt: local(11, 14, 13, 0),
+      },
+      {
+        id: "weekly_model_fable",
+        label: "Weekly · Fable",
+        shortLabel: "wk Fable",
+        usedPct: 95,
+        resetsAt: new Date(2027, 0, 2, 9, 5).toISOString(),
+      },
+    ],
+  });
+  const secondClaude = report({
+    sourceId: "claude",
+    sourceLabel: "Claude",
+    account: "claudecodelover2@gmail.com",
+    windows: [{ id: "weekly", label: "Weekly", usedPct: 60, resetsAt: local(11, 17, 15, 0) }],
+  });
+  const codexAccount = report({
+    sourceId: "codex",
+    sourceLabel: "Codex",
+    windows: [
+      { id: "weekly", label: "Weekly", remainingPct: 52, resetsAt: local(11, 15, 10, 36, 39) },
+      { id: "code_review:weekly", label: "Code review · Weekly", usedPct: 10 },
+    ],
+  });
+  const pins: UsagePreferences["pins"] = [
+    { sourceId: "claude", windowId: "five_hour" },
+    { sourceId: "claude", windowId: "weekly" },
+    { sourceId: "claude", windowId: "weekly_model_fable" },
+    { sourceId: "codex", windowId: "weekly" },
+    { sourceId: "codex", windowId: "code_review:weekly" },
+  ];
+  const reports = [firstClaude, codexAccount, secondClaude];
+
+  const rows = (provider: PinnedUsageProvider) =>
+    provider.accounts.map((account) => [
+      account.label,
+      account.windows.map((window) => [
+        window.detail.name,
+        window.detail.percentLabel,
+        window.tone,
+        window.detail.reset,
+      ]),
+    ]);
+
+  it("groups each provider's accounts under its name, a row per window", () => {
+    const providers = resolveProviderPinnedUsage(reports, preferences(pins), now);
+
+    expect(providers.map((provider) => [provider.key, provider.label, provider.icon])).toEqual([
+      ["claude", "Claude", "<svg/>"],
+      ["codex", "Codex", null],
+    ]);
+    expect(rows(providers[0])).toEqual([
+      [
+        "claudecodelover@gmail.com",
+        [
+          [
+            "5시간",
+            "12% 사용",
+            "default",
+            `11. 11. (수) ${clock("오후 03:30", "15:30")} · 4시간 후`,
+          ],
+          ["주간", "75% 사용", "warning", `11. 14. (토) ${clock("오후 01:00", "13:00")} · 3일 후`],
+          [
+            "주간 · Fable",
+            "95% 사용",
+            "danger",
+            `2027. 1. 2. (토) ${clock("오전 09:05", "09:05")} · 51일 후`,
+          ],
+        ],
+      ],
+      [
+        "claudecodelover2@gmail.com",
+        [["주간", "60% 사용", "default", `11. 17. (화) ${clock("오후 03:00", "15:00")} · 6일 후`]],
+      ],
+    ]);
+    expect(rows(providers[1])).toEqual([
+      [
+        null,
+        [
+          ["주간", "48% 사용", "default", `11. 15. (일) ${clock("오전 10:36", "10:36")} · 3일 후`],
+          ["Code review · Weekly", "10% 사용", "default", null],
+        ],
+      ],
+    ]);
+  });
+
+  it("keeps the meters' flat window list in the same order as the card's rows", () => {
+    const [claudeProvider] = resolveProviderPinnedUsage(reports, preferences(pins), now);
+
+    expect(claudeProvider.windows).toEqual(
+      claudeProvider.accounts.flatMap((account) => account.windows),
+    );
+  });
+
+  it("reads the share left when the user reads usage as remaining", () => {
+    const [claudeProvider, codexProvider] = resolveProviderPinnedUsage(
+      reports,
+      preferences(pins, "remaining"),
+      now,
+    );
+
+    expect(claudeProvider.windows.map((window) => window.detail.percentLabel)).toEqual([
+      "88% 남음",
+      "25% 남음",
+      "5% 남음",
+      "40% 남음",
+    ]);
+    expect(codexProvider.windows.map((window) => window.detail.percentLabel)).toEqual([
+      "52% 남음",
+      "90% 남음",
+    ]);
+  });
+
+  it("names the reset time without seconds in each window's accessible label", () => {
+    const [, codexProvider] = resolveProviderPinnedUsage(reports, preferences(pins), now);
+
+    expect(codexProvider.windows.map((window) => window.label)).toEqual([
+      `Codex Weekly 48% used · 초기화 11. 15. (일) ${clock("오전 10:36", "10:36")}`,
+      "Codex Code review · Weekly 10% used",
+    ]);
+  });
+});
+
+describe("pinnedUsageWindowName", () => {
+  it.each([
+    [{ id: "five_hour", label: "Session" }, "5시간"],
+    [{ id: "weekly", label: "Weekly" }, "주간"],
+    [{ id: "weekly_model_fable", label: "Weekly · Fable" }, "주간 · Fable"],
+    [{ id: "weekly_surface_code", label: "Weekly · Code" }, "주간 · Code"],
+    [{ id: "weekly_model_opus", label: "Opus" }, "Opus"],
+    [{ id: "monthly", label: "Monthly" }, "Monthly"],
+  ])("names %o %s", (window, expected) => {
+    expect(pinnedUsageWindowName(window)).toBe(expected);
+  });
 });
