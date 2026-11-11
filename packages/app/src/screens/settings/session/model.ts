@@ -14,14 +14,14 @@ export interface SessionSettingsSelection {
   model: string;
   mode: string;
   thinking: string;
-  fast: "keep" | "on" | "off";
+  speed: string;
 }
 
 export const EMPTY_SESSION_SETTINGS: SessionSettingsSelection = {
   model: "",
   mode: "",
   thinking: "",
-  fast: "keep",
+  speed: "",
 };
 
 export function openSessionSettings() {
@@ -46,7 +46,7 @@ export function openSessionSettings() {
       publish({ ...state, provider, selection: EMPTY_SESSION_SETTINGS });
     },
     setModel(model: string) {
-      publish({ ...state, selection: { ...state.selection, model, thinking: "", fast: "keep" } });
+      publish({ ...state, selection: { ...state.selection, model, thinking: "", speed: "" } });
     },
     setTarget(target: string) {
       publish({ ...state, target, provider: "", selection: EMPTY_SESSION_SETTINGS });
@@ -80,26 +80,26 @@ export function selectSessionSettingsHosts<Host extends TargetHost>(input: {
 }
 
 export function hasSessionSettings(selection: SessionSettingsSelection) {
-  return Boolean(
-    selection.model || selection.mode || selection.thinking || selection.fast !== "keep",
+  return Boolean(selection.model || selection.mode || selection.thinking || selection.speed);
+}
+
+export function resolveSpeedFeature(features: readonly AgentFeature[]) {
+  return (
+    features.find((feature) => feature.id === SPEED_FEATURE_ID && feature.type === "select") ??
+    features.find((feature) => feature.id === FAST_MODE_FEATURE_ID && feature.type === "toggle")
   );
 }
 
-export function resolveFastSetting(features: readonly AgentFeature[], enabled: boolean) {
-  const toggle = features.find(
-    (feature) => feature.id === FAST_MODE_FEATURE_ID && feature.type === "toggle",
-  );
-  if (toggle) return { id: toggle.id, value: enabled };
-  const speed = features.find(
-    (feature) => feature.id === SPEED_FEATURE_ID && feature.type === "select",
-  );
-  if (!speed || speed.type !== "select") return null;
-  const fast =
-    speed.options.find((option) => option.id === "fast") ??
-    speed.options.find((option) => option.id !== "default");
-  const normal = speed.options.find((option) => option.id === "default");
-  const option = enabled ? fast : normal;
-  return option ? { id: speed.id, value: option.id } : null;
+export function resolveSpeedSetting(features: readonly AgentFeature[], value: string) {
+  const feature = resolveSpeedFeature(features);
+  if (!feature) return null;
+  if (feature.type === "select") {
+    return feature.options.some((option) => option.id === value) ? { id: feature.id, value } : null;
+  }
+  if (feature.type === "toggle" && (value === "on" || value === "off")) {
+    return { id: feature.id, value: value === "on" };
+  }
+  return null;
 }
 
 export function saveSessionDefaults(input: {
@@ -116,8 +116,9 @@ export function saveSessionDefaults(input: {
     input.preferences.providerPreferences?.[input.provider]?.model;
   if (selection.thinking && !thinkingModelId)
     throw new Error("Select a model before saving thinking preferences");
-  const fast = resolveFastSetting(input.features, selection.fast === "on");
-  if (selection.fast !== "keep" && !fast) throw new Error("Fast is unavailable for this model");
+  const speed = resolveSpeedSetting(input.features, selection.speed);
+  if (selection.speed && !speed)
+    throw new Error(`Speed '${selection.speed}' is unavailable for this account or model`);
   return mergeProviderPreferences({
     preferences: input.preferences,
     provider: input.provider,
@@ -127,7 +128,7 @@ export function saveSessionDefaults(input: {
       ...(selection.thinking && thinkingModelId
         ? { thinkingByModel: { [thinkingModelId]: selection.thinking } }
         : {}),
-      ...(selection.fast !== "keep" && fast ? { featureValues: { [fast.id]: fast.value } } : {}),
+      ...(selection.speed && speed ? { featureValues: { [speed.id]: speed.value } } : {}),
     },
   });
 }
@@ -242,7 +243,7 @@ async function applySession(input: {
     const notice = await client.setAgentThinkingOption(agentId, selection.thinking);
     if (notice) notices.push(notice.message);
   }
-  if (selection.fast !== "keep") {
+  if (selection.speed) {
     const snapshot = await client.fetchAgent(agentId);
     if (!snapshot) throw new Error("Session no longer exists");
     const agent = snapshot.agent;
@@ -252,9 +253,10 @@ async function applySession(input: {
     if (agent.thinkingOptionId) config.thinkingOptionId = agent.thinkingOptionId;
     const payload = await client.listProviderFeatures(config);
     if (payload.error) throw new Error(payload.error);
-    const fast = resolveFastSetting(payload.features ?? [], selection.fast === "on");
-    if (!fast) throw new Error("Fast is unavailable for this model");
-    await client.setAgentFeature(agentId, fast.id, fast.value);
+    const speed = resolveSpeedSetting(payload.features ?? [], selection.speed);
+    if (!speed)
+      throw new Error(`Speed '${selection.speed}' is unavailable for this account or model`);
+    await client.setAgentFeature(agentId, speed.id, speed.value);
   }
   return notices;
 }

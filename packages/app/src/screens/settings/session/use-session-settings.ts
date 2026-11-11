@@ -16,7 +16,8 @@ import {
   applySessionSettings,
   hasSessionSettings,
   openSessionSettings,
-  resolveFastSetting,
+  resolveSpeedFeature,
+  resolveSpeedSetting,
   resolveSessionSettingsHostId,
   selectSessionSettingsHosts,
   saveSessionDefaults,
@@ -59,17 +60,21 @@ function resolveSessionModel(catalog: SessionCatalog, selection: SessionSettings
   return { models, model };
 }
 
-function useSessionFeatures(catalog: SessionCatalog, selection: SessionSettingsSelection) {
+function useSessionFeatures(
+  catalog: SessionCatalog,
+  selection: SessionSettingsSelection,
+  modelId: string | undefined,
+) {
   const { client, connected, hostId, defaults, entry, t } = catalog;
   const provider = entry?.provider ?? "";
   const saved = defaults.preferences.providerPreferences?.[provider];
-  const model = selection.model || saved?.model;
+  const model = modelId;
   const mode = selection.mode || saved?.mode;
   const thinkingOptionId = selection.thinking || undefined;
   return useFetchQuery({
     queryKey: ["session-settings-features", hostId, provider, model, mode, thinkingOptionId],
     dataShape: "value",
-    staleTimeMs: 300_000,
+    staleTimeMs: 0,
     enabled: Boolean(client && connected && provider),
     queryFn: async () => {
       if (!client) throw new Error(t("offline"));
@@ -151,16 +156,23 @@ export function useSessionSettings() {
   const state = useSyncExternalStore(form.subscribe, form.getState, form.getState);
   const catalog = useSessionCatalog(state);
   const { models, model } = resolveSessionModel(catalog, state.selection);
-  const features = useSessionFeatures(catalog, state.selection);
+  const features = useSessionFeatures(catalog, state.selection, model?.id);
   const mutation = useMutation({
-    mutationFn: (action: SettingsActionInput["action"]) =>
-      executeSettingsAction({
+    mutationFn: async (action: SettingsActionInput["action"]) => {
+      let currentFeatures = features.data ?? [];
+      if (action === "defaults" && state.selection.speed) {
+        const refreshed = await features.refetch();
+        if (refreshed.error) throw refreshed.error;
+        currentFeatures = refreshed.data ?? [];
+      }
+      return executeSettingsAction({
         action,
         catalog,
         state,
-        features: features.data ?? [],
+        features: currentFeatures,
         modelId: model?.id,
-      }),
+      });
+    },
     onSuccess: (result) => {
       if (result.skippedHosts.length)
         toast.show(catalog.t("skippedHosts", { hosts: result.skippedHosts.join(", ") }), {
@@ -195,14 +207,14 @@ export function useSessionSettings() {
   const selectMode = useCallback(
     (value: string) => {
       reset();
-      form.select({ mode: value, fast: "keep" });
+      form.select({ mode: value, speed: "" });
     },
     [form, reset],
   );
-  const selectFast = useCallback(
-    (value: SessionSettingsSelection["fast"]) => {
+  const selectSpeed = useCallback(
+    (value: string) => {
       reset();
-      form.select({ fast: value });
+      form.select({ speed: value });
     },
     [form, reset],
   );
@@ -222,17 +234,19 @@ export function useSessionSettings() {
   );
   const apply = useCallback(() => mutate("apply"), [mutate]);
   const save = useCallback(() => mutate("defaults"), [mutate]);
-  const fastSupported = Boolean(
-    resolveFastSetting(features.data ?? [], true) && resolveFastSetting(features.data ?? [], false),
+  const speedFeature = resolveSpeedFeature(features.data ?? []);
+  const speedUnavailable = Boolean(
+    state.selection.speed && !resolveSpeedSetting(features.data ?? [], state.selection.speed),
   );
-  const waitingForFast = state.selection.fast !== "keep" && features.isFetching;
+  const waitingForSpeed = Boolean(state.selection.speed && features.isFetching);
   const disabled =
     busy ||
     catalog.defaults.isLoading ||
     !catalog.connected ||
     !catalog.entry ||
     !hasSessionSettings(state.selection) ||
-    waitingForFast;
+    waitingForSpeed ||
+    speedUnavailable;
   return {
     ...catalog,
     state,
@@ -240,14 +254,15 @@ export function useSessionSettings() {
     mutation,
     busy,
     disabled,
-    fastSupported,
+    speedFeature,
+    speedUnavailable,
     models,
     thinkingOptions: model?.thinkingOptions ?? [],
     selectHost,
     selectProvider,
     selectModel,
     selectMode,
-    selectFast,
+    selectSpeed,
     selectThinking,
     selectTarget,
     apply,

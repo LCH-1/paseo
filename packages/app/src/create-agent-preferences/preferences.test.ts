@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type { AgentFeature } from "@getpaseo/protocol/agent-types";
 import {
   AgentSnapshotPayloadSchema,
   FetchAgentsResponseMessageSchema,
@@ -8,7 +9,8 @@ import {
   applySessionSettings,
   EMPTY_SESSION_SETTINGS,
   openSessionSettings,
-  resolveFastSetting,
+  resolveSpeedFeature,
+  resolveSpeedSetting,
   resolveSessionSettingsHostId,
   selectSessionSettingsHosts,
   saveSessionDefaults,
@@ -69,7 +71,7 @@ describe("create agent preferences", () => {
     expect(selectSessionSettingsHosts({ hosts, target: "work" })).toEqual([hosts[0]]);
     expect(selectSessionSettingsHosts({ hosts, target: "all" })).toEqual(hosts);
     const form = openSessionSettings();
-    form.select({ model: "work-model", mode: "full-access", fast: "on" });
+    form.select({ model: "work-model", mode: "full-access", speed: "priority" });
     form.setTarget("home");
     expect(form.getState()).toMatchObject({
       target: "home",
@@ -194,7 +196,7 @@ describe("create agent preferences", () => {
         },
       },
       provider: "codex",
-      selection: { model: "new", mode: "full-access", thinking: "xhigh", fast: "off" },
+      selection: { model: "new", mode: "full-access", thinking: "xhigh", speed: "default" },
       features: [
         {
           type: "select",
@@ -237,24 +239,24 @@ describe("create agent preferences", () => {
       }).providerPreferences?.claude,
     ).toEqual({ model: "opus", mode: "default", featureValues: { fast_mode: true } });
     expect(
-      resolveFastSetting([{ type: "toggle", id: "fast_mode", label: "Fast", value: true }], false),
+      resolveSpeedSetting([{ type: "toggle", id: "fast_mode", label: "Fast", value: true }], "off"),
     ).toEqual({ id: "fast_mode", value: false });
-    expect(resolveFastSetting([], true)).toBeNull();
+    expect(resolveSpeedSetting([], "ultrafast")).toBeNull();
     expect(() =>
       saveSessionDefaults({
         preferences: {},
         provider: "claude",
-        selection: { model: "", mode: "", thinking: "", fast: "on" },
+        selection: { model: "", mode: "", thinking: "", speed: "on" },
         features: [],
       }),
-    ).toThrow("Fast is unavailable");
+    ).toThrow("Speed 'on' is unavailable");
   });
 
   it("resets selections when changing catalog host or provider", () => {
     const form = openSessionSettings();
     const changed = vi.fn();
     const unsubscribe = form.subscribe(changed);
-    form.select({ model: "opus", fast: "on" });
+    form.select({ model: "opus", speed: "on" });
     form.setProvider("codex");
     expect(form.getState().selection).toEqual(EMPTY_SESSION_SETTINGS);
     form.select({ mode: "full-access" });
@@ -266,6 +268,75 @@ describe("create agent preferences", () => {
     });
     expect(changed).toHaveBeenCalledTimes(4);
     unsubscribe();
+  });
+
+  it.each(["priority", "ultrafast", "future-tier"])(
+    "uses advertised speed %s verbatim and rejects it when account or model eligibility changes",
+    (tier) => {
+      const baseOptions = [
+        { id: "default", label: "Normal" },
+        { id: "priority", label: "Fast" },
+      ];
+      const available: AgentFeature = {
+        type: "select",
+        id: "service_tier",
+        label: "Speed",
+        value: "default",
+        options: [...baseOptions.filter((option) => option.id !== tier), { id: tier, label: tier }],
+      };
+      expect(resolveSpeedFeature([available])).toBe(available);
+      expect(resolveSpeedSetting([available], tier)).toEqual({ id: "service_tier", value: tier });
+      const selection = { ...EMPTY_SESSION_SETTINGS, speed: tier };
+      const preferences = {
+        providerPreferences: {
+          codex: { featureValues: { plan_mode: true, service_tier: "default" } },
+          claude: { featureValues: { fast_mode: true } },
+        },
+      };
+      const next = saveSessionDefaults({
+        preferences,
+        provider: "codex",
+        selection,
+        features: [available],
+      });
+      expect(next.providerPreferences?.codex?.featureValues).toEqual({
+        plan_mode: true,
+        service_tier: tier,
+      });
+      expect(next.providerPreferences?.claude).toEqual(preferences.providerPreferences.claude);
+      const downgraded: AgentFeature = {
+        ...available,
+        options: available.options.filter((option) => option.id !== tier),
+      };
+      expect(resolveSpeedSetting([downgraded], tier)).toBeNull();
+      expect(() =>
+        saveSessionDefaults({ preferences, provider: "codex", selection, features: [downgraded] }),
+      ).toThrow(`Speed '${tier}' is unavailable`);
+      expect(preferences.providerPreferences.codex.featureValues.service_tier).toBe("default");
+      expect(
+        resolveSpeedSetting(
+          [{ type: "toggle", id: "fast_mode", label: "Fast", value: false }],
+          tier,
+        ),
+      ).toBeNull();
+    },
+  );
+
+  it("keeps an existing ultrafast preference when only unrelated defaults change", () => {
+    const preferences = {
+      providerPreferences: { codex: { featureValues: { service_tier: "ultrafast" } } },
+    };
+    expect(
+      saveSessionDefaults({
+        preferences,
+        provider: "codex",
+        selection: { ...EMPTY_SESSION_SETTINGS, mode: "full-access" },
+        features: [],
+      }).providerPreferences?.codex,
+    ).toEqual({ mode: "full-access", featureValues: { service_tier: "ultrafast" } });
+    expect(
+      resolveSpeedSetting([{ type: "toggle", id: "fast_mode", label: "Fast", value: false }], "on"),
+    ).toEqual({ id: "fast_mode", value: true });
   });
 
   it("stores thinking against the effective model and clears it when selecting another model", () => {
@@ -280,169 +351,215 @@ describe("create agent preferences", () => {
       thinkingByModel: { "effective-model": "high" },
     });
     const form = openSessionSettings();
-    form.select({ thinking: "high", mode: "full-access", fast: "on" });
+    form.select({ thinking: "high", mode: "full-access", speed: "ultrafast" });
     form.setModel("different-model");
     expect(form.getState().selection).toEqual({
       model: "different-model",
       mode: "full-access",
       thinking: "",
-      fast: "keep",
+      speed: "",
     });
   });
 
-  it("paginates bulk updates, isolates failures, and never changes another provider or archived sessions", async () => {
-    const client = new DaemonClient({
-      url: "ws://unused",
-      clientId: "bulk-settings-test",
-      reconnect: { enabled: false },
-    });
-    const agent = AgentSnapshotPayloadSchema.parse({
-      id: "first",
-      provider: "codex",
-      cwd: "/repo",
-      model: "old",
-      createdAt: "2026-10-26T00:00:00Z",
-      updatedAt: "2026-10-26T00:00:00Z",
-      lastUserMessageAt: null,
-      status: "idle",
-      capabilities: {
-        supportsStreaming: true,
-        supportsSessionPersistence: true,
-        supportsDynamicModes: true,
-        supportsMcpServers: true,
-        supportsReasoningStream: true,
-        supportsToolInvocations: true,
-      },
-      currentModeId: "default",
-      availableModes: [],
-      pendingPermissions: [],
-      persistence: null,
-      title: null,
-    });
-    function page(agents: (typeof agent)[], nextCursor: string | null) {
-      return FetchAgentsResponseMessageSchema.parse({
-        type: "fetch_agents_response",
-        payload: {
-          requestId: "test",
-          entries: agents.map((snapshot) => ({
-            agent: snapshot,
-            project: {
-              projectKey: "/repo",
-              projectName: "repo",
-              checkout: {
-                cwd: "/repo",
-                isGit: false,
-                currentBranch: null,
-                remoteUrl: null,
-                isPaseoOwnedWorktree: false,
-                mainRepoRoot: null,
+  it.each(["priority", "ultrafast"])(
+    "paginates %s updates and isolates failures without changing another provider or archived sessions",
+    async (speed) => {
+      const client = new DaemonClient({
+        url: "ws://unused",
+        clientId: "bulk-settings-test",
+        reconnect: { enabled: false },
+      });
+      const agent = AgentSnapshotPayloadSchema.parse({
+        id: "first",
+        provider: "codex",
+        cwd: "/repo",
+        model: "old",
+        createdAt: "2026-10-26T00:00:00Z",
+        updatedAt: "2026-10-26T00:00:00Z",
+        lastUserMessageAt: null,
+        status: "idle",
+        capabilities: {
+          supportsStreaming: true,
+          supportsSessionPersistence: true,
+          supportsDynamicModes: true,
+          supportsMcpServers: true,
+          supportsReasoningStream: true,
+          supportsToolInvocations: true,
+        },
+        currentModeId: "default",
+        availableModes: [],
+        pendingPermissions: [],
+        persistence: null,
+        title: null,
+      });
+      function page(agents: (typeof agent)[], nextCursor: string | null) {
+        return FetchAgentsResponseMessageSchema.parse({
+          type: "fetch_agents_response",
+          payload: {
+            requestId: "test",
+            entries: agents.map((snapshot) => ({
+              agent: snapshot,
+              project: {
+                projectKey: "/repo",
+                projectName: "repo",
+                checkout: {
+                  cwd: "/repo",
+                  isGit: false,
+                  currentBranch: null,
+                  remoteUrl: null,
+                  isPaseoOwnedWorktree: false,
+                  mainRepoRoot: null,
+                },
               },
-            },
-          })),
-          pageInfo: { nextCursor, prevCursor: null, hasMore: Boolean(nextCursor) },
-        },
-      }).payload;
-    }
-    const fetch = vi
-      .spyOn(client, "fetchAgents")
-      .mockResolvedValueOnce(
-        page(
-          [
-            agent,
-            { ...agent, id: "other-provider", provider: "claude" },
-            { ...agent, id: "archived", archivedAt: "2026-10-25T00:00:00Z" },
-          ],
-          "next",
-        ),
-      )
-      .mockResolvedValueOnce(
-        page(
-          [
-            { ...agent, id: "broken" },
-            { ...agent, id: "missing-directory" },
-            { ...agent, id: "last" },
-          ],
-          null,
-        ),
-      );
-    const calls: string[] = [];
-    vi.spyOn(client, "setAgentModel").mockImplementation(async (id) => {
-      calls.push(`${id}:model`);
-      if (id === "broken") throw new Error("model rejected");
-      if (id === "missing-directory")
-        throw new Error("Working directory does not exist: /missing-project");
-    });
-    vi.spyOn(client, "setAgentMode").mockImplementation(async (id) => {
-      calls.push(`${id}:mode`);
-      return null;
-    });
-    vi.spyOn(client, "setAgentThinkingOption").mockImplementation(async (id, option) => {
-      calls.push(`${id}:thinking:${option}`);
-      return null;
-    });
-    vi.spyOn(client, "fetchAgent").mockImplementation(async () => ({
-      agent: { ...agent, model: "new" },
-      project: null,
-    }));
-    vi.spyOn(client, "listProviderFeatures").mockResolvedValue({
-      requestId: "features-test",
-      fetchedAt: "2026-10-26T00:00:00Z",
-      provider: "codex",
-      features: [
-        {
-          type: "select",
-          id: "service_tier",
-          label: "Speed",
-          value: "default",
-          options: [
-            { id: "default", label: "Normal" },
-            { id: "priority", label: "Fast" },
-          ],
-        },
-      ],
-    });
-    const feature = vi.spyOn(client, "setAgentFeature").mockImplementation(async (id) => {
-      calls.push(`${id}:fast`);
-    });
-    const result = await applySessionSettings({
-      hosts: [
-        { label: "online", client },
-        { label: "offline", client: null },
-      ],
-      provider: "codex",
-      selection: { model: "new", mode: "full-access", thinking: "high", fast: "on" },
-    });
-    expect(result).toMatchObject({
-      applied: 2,
-      failed: 2,
-      skippedHosts: ["offline"],
-      failures: [
-        { host: "online", session: "broken", message: "model rejected" },
-        {
-          host: "online",
-          session: "missing-directory",
-          message: "Working directory does not exist: /missing-project",
-        },
-      ],
-    });
-    expect(fetch).toHaveBeenLastCalledWith({
-      filter: { includeArchived: false },
-      page: { limit: 200, cursor: "next" },
-    });
-    expect(calls).toEqual([
-      "first:model",
-      "first:mode",
-      "first:thinking:high",
-      "first:fast",
-      "broken:model",
-      "missing-directory:model",
-      "last:model",
-      "last:mode",
-      "last:thinking:high",
-      "last:fast",
-    ]);
-    expect(feature).toHaveBeenCalledWith("last", "service_tier", "priority");
-  });
+            })),
+            pageInfo: { nextCursor, prevCursor: null, hasMore: Boolean(nextCursor) },
+          },
+        }).payload;
+      }
+      const fetch = vi
+        .spyOn(client, "fetchAgents")
+        .mockResolvedValueOnce(
+          page(
+            [
+              agent,
+              { ...agent, id: "other-provider", provider: "claude" },
+              { ...agent, id: "archived", archivedAt: "2026-10-25T00:00:00Z" },
+            ],
+            "next",
+          ),
+        )
+        .mockResolvedValueOnce(
+          page(
+            [
+              { ...agent, id: "broken" },
+              { ...agent, id: "missing-directory" },
+              { ...agent, id: "last" },
+            ],
+            null,
+          ),
+        );
+      const calls: string[] = [];
+      vi.spyOn(client, "setAgentModel").mockImplementation(async (id) => {
+        calls.push(`${id}:model`);
+        if (id === "broken") throw new Error("model rejected");
+        if (id === "missing-directory")
+          throw new Error("Working directory does not exist: /missing-project");
+      });
+      vi.spyOn(client, "setAgentMode").mockImplementation(async (id) => {
+        calls.push(`${id}:mode`);
+        return null;
+      });
+      vi.spyOn(client, "setAgentThinkingOption").mockImplementation(async (id, option) => {
+        calls.push(`${id}:thinking:${option}`);
+        return null;
+      });
+      vi.spyOn(client, "fetchAgent").mockImplementation(async () => ({
+        agent: { ...agent, model: "new" },
+        project: null,
+      }));
+      vi.spyOn(client, "listProviderFeatures").mockResolvedValue({
+        requestId: "features-test",
+        fetchedAt: "2026-10-26T00:00:00Z",
+        provider: "codex",
+        features: [
+          {
+            type: "select",
+            id: "service_tier",
+            label: "Speed",
+            value: "default",
+            options: [
+              { id: "default", label: "Normal" },
+              { id: "priority", label: "Fast" },
+              { id: "ultrafast", label: "Ultrafast" },
+            ],
+          },
+        ],
+      });
+      const feature = vi.spyOn(client, "setAgentFeature").mockImplementation(async (id) => {
+        calls.push(`${id}:fast`);
+      });
+      const result = await applySessionSettings({
+        hosts: [
+          { label: "online", client },
+          { label: "offline", client: null },
+        ],
+        provider: "codex",
+        selection: { model: "new", mode: "full-access", thinking: "high", speed },
+      });
+      expect(result).toMatchObject({
+        applied: 2,
+        failed: 2,
+        skippedHosts: ["offline"],
+        failures: [
+          { host: "online", session: "broken", message: "model rejected" },
+          {
+            host: "online",
+            session: "missing-directory",
+            message: "Working directory does not exist: /missing-project",
+          },
+        ],
+      });
+      expect(fetch).toHaveBeenLastCalledWith({
+        filter: { includeArchived: false },
+        page: { limit: 200, cursor: "next" },
+      });
+      expect(calls).toEqual([
+        "first:model",
+        "first:mode",
+        "first:thinking:high",
+        "first:fast",
+        "broken:model",
+        "missing-directory:model",
+        "last:model",
+        "last:mode",
+        "last:thinking:high",
+        "last:fast",
+      ]);
+      expect(feature).toHaveBeenCalledWith("last", "service_tier", speed);
+
+      // A different host/account/model may advertise fewer tiers than the catalog host.
+      fetch.mockReset().mockResolvedValue(page([agent, { ...agent, id: "last" }], null));
+      vi.mocked(client.fetchAgent).mockImplementation(async (id) => ({
+        agent: { ...agent, id, cwd: id === "first" ? "/eligible" : "/restricted" },
+        project: null,
+      }));
+      vi.mocked(client.listProviderFeatures).mockImplementation(async (config) => ({
+        requestId: "eligibility-test",
+        fetchedAt: "2026-10-26T00:00:00Z",
+        provider: "codex",
+        features: [
+          {
+            type: "select",
+            id: "service_tier",
+            label: "Speed",
+            value: "default",
+            options: [
+              { id: "default", label: "Normal" },
+              ...(config.cwd === "/eligible" ? [{ id: speed, label: speed }] : []),
+            ],
+          },
+        ],
+      }));
+      feature.mockClear();
+      const restricted = await applySessionSettings({
+        hosts: [{ label: "mixed account", client }],
+        provider: "codex",
+        selection: { ...EMPTY_SESSION_SETTINGS, speed },
+      });
+      expect(restricted).toMatchObject({
+        applied: 1,
+        failed: 1,
+        failures: [
+          {
+            host: "mixed account",
+            session: "last",
+            message: `Speed '${speed}' is unavailable for this account or model`,
+          },
+        ],
+      });
+      expect(feature).toHaveBeenCalledExactlyOnceWith("first", "service_tier", speed);
+    },
+  );
 
   it("keeps the selected mode after saving model and thinking", async () => {
     const storage = new FakeCreateAgentPreferenceStorage();

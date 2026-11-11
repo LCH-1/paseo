@@ -9,7 +9,9 @@ export const sessionSettingsEn = {
   access: "Access",
   thinking: "Thinking mode",
   warning: "Warning",
-  fast: "Fast",
+  speed: "Speed",
+  speedUnavailable:
+    "This speed is no longer available for the current account or model. Select another option.",
   keep: "Keep current value",
   on: "On",
   off: "Off",
@@ -36,7 +38,7 @@ export const sessionSettingsEn = {
   unavailable: "No available providers on this host.",
   update: "Update this host to load provider settings.",
   working: "Applying…",
-  featuresError: "Could not load Fast settings: {{message}}",
+  featuresError: "Could not load speed settings: {{message}}",
 };
 
 export const sessionSettingsKo = {
@@ -50,7 +52,8 @@ export const sessionSettingsKo = {
   access: "Access 범위",
   thinking: "사고 모드",
   warning: "주의",
-  fast: "Fast",
+  speed: "속도",
+  speedUnavailable: "현재 계정 또는 모델에서 이 속도를 사용할 수 없습니다. 다른 옵션을 선택하세요.",
   keep: "현재 값 유지",
   on: "On",
   off: "Off",
@@ -77,5 +80,5 @@ export const sessionSettingsKo = {
   unavailable: "이 호스트에 사용 가능한 공급자가 없습니다.",
   update: "공급자 설정을 불러오려면 이 호스트를 업데이트하세요.",
   working: "적용 중…",
-  featuresError: "Fast 설정을 불러오지 못했습니다: {{message}}",
+  featuresError: "속도 설정을 불러오지 못했습니다: {{message}}",
 };

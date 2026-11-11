@@ -59,13 +59,14 @@ function SelectionCard({ settings }: SettingsProps) {
     state,
     models,
     features,
-    fastSupported,
+    speedFeature,
+    speedUnavailable,
     busy,
     disabled,
     selectProvider,
     selectModel,
     selectMode,
-    selectFast,
+    selectSpeed,
     thinkingOptions,
     selectThinking,
     apply,
@@ -116,22 +117,29 @@ function SelectionCard({ settings }: SettingsProps) {
           disabled={busy}
         />
       ) : null}
-      {fastSupported ? (
+      {speedFeature ? (
         <SettingsSelect
-          label={t("fast")}
-          value={state.selection.fast}
+          label={t("speed")}
+          value={state.selection.speed}
           options={[
-            { value: "keep", label: t("keep") },
-            { value: "on", label: t("on") },
-            { value: "off", label: t("off") },
+            { value: "", label: t("keep") },
+            ...(speedFeature.type === "select"
+              ? speedFeature.options.map((option) => ({ value: option.id, label: option.label }))
+              : [
+                  { value: "on", label: t("on") },
+                  { value: "off", label: t("off") },
+                ]),
           ]}
-          onValueChange={selectFast}
+          onValueChange={selectSpeed}
           disabled={busy || features.isFetching}
         />
       ) : null}
+      {speedUnavailable && !features.isFetching && !features.error ? (
+        <SettingsRow label={t("speed")} error={t("speedUnavailable")} />
+      ) : null}
       {features.error ? (
         <SettingsRow
-          label={t("fast")}
+          label={t("speed")}
           error={t("featuresError", { message: features.error.message })}
         />
       ) : null}
