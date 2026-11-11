@@ -447,6 +447,7 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
       expect(models.map((m) => m.id)).toEqual([
         "claude-opus-5",
         "claude-mythos-5-1",
+        "claude-fable-5-2",
         "claude-fable-5-1",
         "claude-fable-5",
         "claude-fable-5[1m]",
