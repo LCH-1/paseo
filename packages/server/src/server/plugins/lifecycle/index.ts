@@ -41,6 +41,10 @@ const beforeSchemas = {
       env: z.record(z.string(), z.string()),
       preflight: z.boolean().optional(),
       model: z.string().nullable().optional(),
+      modelChange: z
+        .object({ from: z.string().nullable(), to: z.string().nullable() })
+        .strict()
+        .optional(),
     })
     .strict(),
   "workspace.create": WorkspaceCreateRequestSchema.omit({ type: true, requestId: true }).strict(),
@@ -55,6 +59,11 @@ export interface PluginLifecycle {
     name: Name,
     request: PluginBeforeRequests[Name],
   ): Promise<PluginBeforeRequests[Name]>;
+  /**
+   * Whether a running plugin handles this before hook, so `before` can change or refuse the
+   * request. A lifecycle that cannot tell is read as having none.
+   */
+  hasBefore?(name: keyof PluginBeforeRequests): boolean;
 }
 
 export function validateBeforeRequest<Name extends keyof PluginBeforeRequests>(
@@ -149,14 +158,19 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
       previous.reason !== next.reason ||
       previous.purpose !== next.purpose ||
       previous.preflight !== next.preflight ||
-      (next.model !== undefined && next.model !== previous.model)
+      (next.model !== undefined && next.model !== previous.model) ||
+      (next.modelChange !== undefined &&
+        (next.modelChange.from !== previous.modelChange?.from ||
+          next.modelChange.to !== previous.modelChange?.to))
     ) {
       throw new Error("agent.session_open hooks can only change env");
     }
-    // A hook written before `model` existed may rebuild the request without it.
-    if (next.model === undefined && previous.model !== undefined) {
-      return { ...next, model: previous.model } as PluginBeforeRequests[Name];
-    }
+    // A hook written before `model` or `modelChange` existed may rebuild the request without them.
+    return {
+      ...next,
+      ...(previous.model !== undefined ? { model: previous.model } : {}),
+      ...(previous.modelChange ? { modelChange: previous.modelChange } : {}),
+    } as PluginBeforeRequests[Name];
   }
   if (name === "agent.create") {
     const previous = beforeSchemas["agent.create"].parse(input);

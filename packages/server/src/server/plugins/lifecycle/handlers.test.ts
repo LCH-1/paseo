@@ -151,3 +151,46 @@ test("session-open hooks read the opening model but cannot change it", async () 
     hooks.invoke("operation", "before", "agent.session_open", request, paseo),
   ).rejects.toThrow("agent.session_open hooks can only change env");
 });
+
+test("session-open hooks read a model change but cannot change, add or drop it", async () => {
+  const modelChange = { from: "claude-opus-5", to: "claude-fable-5-2" };
+  const request = {
+    agentId: "agent",
+    workspaceId: "workspace",
+    provider: "claude",
+    cwd: "/project",
+    reason: "refresh" as const,
+    purpose: "interactive" as const,
+    env: {},
+    model: "claude-fable-5-2",
+    modelChange,
+  };
+  const seen: unknown[] = [];
+  const hooks = new PluginHookHandlers(() => {});
+  const remove = hooks.before("agent.session_open", ({ request: input }) => {
+    seen.push(input.modelChange);
+    // A hook written before the field existed rebuilds the request without it.
+    const { modelChange: _modelChange, ...rest } = input;
+    return { ...rest, env: { ACCOUNT: "b" } };
+  });
+  await expect(
+    hooks.invoke("operation", "before", "agent.session_open", request, paseo),
+  ).resolves.toEqual({ ...request, env: { ACCOUNT: "b" } });
+  expect(seen).toEqual([modelChange]);
+  remove();
+
+  const removeRetarget = hooks.before("agent.session_open", ({ request: input }) => ({
+    ...input,
+    modelChange: { from: "claude-opus-5", to: "claude-opus-5" },
+  }));
+  await expect(
+    hooks.invoke("operation", "before", "agent.session_open", request, paseo),
+  ).rejects.toThrow("agent.session_open hooks can only change env");
+  removeRetarget();
+
+  const { modelChange: _modelChange, ...plainRefresh } = request;
+  hooks.before("agent.session_open", ({ request: input }) => ({ ...input, modelChange }));
+  await expect(
+    hooks.invoke("operation", "before", "agent.session_open", plainRefresh, paseo),
+  ).rejects.toThrow("agent.session_open hooks can only change env");
+});

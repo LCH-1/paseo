@@ -252,6 +252,22 @@ describe("PluginService", () => {
     },
   );
 
+  it("answers from its runtime whether a running plugin handles a before hook", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-home-"));
+    roots.push(home);
+    const { runtime } = createPausedRuntime();
+    const hooked = createService(
+      home,
+      {},
+      {
+        runtime: { ...runtime, hasBefore: (name) => name === "agent.session_open" },
+      },
+    );
+    expect(hooked.hasBefore("agent.session_open")).toBe(true);
+    expect(hooked.hasBefore("agent.create")).toBe(false);
+    expect(createService(home, {}, { runtime }).hasBefore("agent.session_open")).toBe(false);
+  });
+
   it("resolves a provider icon path to sanitized inline SVG", async () => {
     const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-home-"));
     roots.push(home);

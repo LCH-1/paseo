@@ -41,6 +41,7 @@ interface PluginRuntimePort {
   emit?: PluginLifecycle["emit"];
   drainEvents?: PluginRuntime["drainEvents"];
   before?: PluginLifecycle["before"];
+  hasBefore?: PluginRuntime["hasBefore"];
   catalog: PluginRuntime["catalog"];
   invoke(pluginId: string, method: string, input: unknown): Promise<unknown>;
   getLogs(pluginId: string): PluginLogEntry[];
@@ -142,6 +143,9 @@ export class PluginService {
     }
     return request;
   };
+
+  readonly hasBefore: NonNullable<PluginLifecycle["hasBefore"]> = (name) =>
+    this.runtime.hasBefore?.(name) ?? false;
 
   subscribeSettings(listener: (pluginId: string, settingsId: string) => void): () => void {
     this.settingsListeners.add(listener);

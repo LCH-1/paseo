@@ -44,6 +44,18 @@ export interface PluginSessionOpenRequest {
    * applies; absent from daemons that predate this field. Hooks read it and cannot change it.
    */
   model?: string | null;
+  /**
+   * Present only when the session reopens to carry out a model change the provider refused on
+   * the current account's limit; `to` equals `model`. A hook can place the session on an account
+   * with room for `to`, or refuse with a reason the model change then fails with, leaving the
+   * session as it was. Hooks read it and cannot change it.
+   */
+  modelChange?: PluginSessionModelChange;
+}
+
+export interface PluginSessionModelChange {
+  from: string | null;
+  to: string | null;
 }
 
 export type PluginTurnOutcome =

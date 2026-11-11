@@ -932,6 +932,22 @@ export default function contribute(server: any) { server.registerProvider(provid
     await runtime.stopAll();
   });
 
+  it("tells whether a running plugin handles a before hook", async () => {
+    const runtime = await startBeforeHookPlugin(
+      createBeforeHookChild("gate", (hook) => ({
+        type: "result",
+        requestId: hook.requestId,
+        output: hook.input,
+      })),
+    );
+
+    expect(runtime.hasBefore("agent.session_open")).toBe(true);
+    expect(runtime.hasBefore("agent.create")).toBe(false);
+    await runtime.stopPluginById("gate");
+    expect(runtime.hasBefore("agent.session_open")).toBe(false);
+    await runtime.stopAll();
+  });
+
   it("frames stdout and stderr, normalizes CRLF, and flushes final fragments once", async () => {
     const directory = await createPlugin(
       "output",

@@ -5722,6 +5722,12 @@ class AccountLimitedModelSession extends ControlledInterruptSession {
   }
 }
 
+type SessionOpenHookPresence =
+  | "registered"
+  | "registered by no plugin"
+  | "unknown to the lifecycle"
+  | "absent with plugins off";
+
 interface AccountLimitedModelFixture {
   manager: AgentManager;
   agentId: string;
@@ -5729,6 +5735,7 @@ interface AccountLimitedModelFixture {
   storage: AgentStorage;
   failure: Error;
   resumedConfigs: Array<Partial<AgentSessionConfig> | undefined>;
+  resumedEnvs: Array<Record<string, string> | undefined>;
   sessionOpens: PluginSessionOpenRequest[];
 }
 
@@ -5739,6 +5746,8 @@ async function withAccountLimitedModelAgent(
     resume?: (config: Partial<AgentSessionConfig> | undefined) => Promise<AgentSession>;
     thinkingOptionId?: string;
     resolveModelSwitchConfig?: AgentClient["resolveModelSwitchConfig"];
+    /** Who answers whether a plugin handles agent.session_open; one does unless a test says not. */
+    sessionOpenHook?: SessionOpenHookPresence;
   },
   run: (fixture: AccountLimitedModelFixture) => Promise<void>,
 ): Promise<void> {
@@ -5752,6 +5761,7 @@ async function withAccountLimitedModelAgent(
   };
   const session = new AccountLimitedModelSession(config, failure);
   const resumedConfigs: Array<Partial<AgentSessionConfig> | undefined> = [];
+  const resumedEnvs: Array<Record<string, string> | undefined> = [];
   class AccountLimitedModelClient extends TestAgentClient {
     readonly resolveModelSwitchConfig = options.resolveModelSwitchConfig;
 
@@ -5762,29 +5772,38 @@ async function withAccountLimitedModelAgent(
     override async resumeSession(
       _handle: AgentPersistenceHandle,
       resumed?: Partial<AgentSessionConfig>,
+      launchContext?: AgentLaunchContext,
     ): Promise<AgentSession> {
       resumedConfigs.push(resumed);
+      resumedEnvs.push(launchContext?.env);
       if (options.resume) return options.resume(resumed);
       return new TestAgentSession({ ...resumed, provider: "codex", cwd: resumed?.cwd ?? workdir });
     }
   }
   const sessionOpens: PluginSessionOpenRequest[] = [];
   const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const hook = options.sessionOpenHook ?? "registered";
   const manager = new AgentManager({
     clients: { codex: new AccountLimitedModelClient() },
     registry: storage,
     logger,
-    pluginLifecycle: {
-      emit: () => {},
-      before: async (name, request) => {
-        if (name === "agent.session_open") {
-          const open = request as PluginSessionOpenRequest;
-          sessionOpens.push(structuredClone(open));
-          options.onSessionOpen?.(open);
-        }
-        return request;
-      },
-    },
+    pluginLifecycle:
+      hook === "absent with plugins off"
+        ? undefined
+        : {
+            emit: () => {},
+            before: async (name, request) => {
+              if (name === "agent.session_open") {
+                const open = request as PluginSessionOpenRequest;
+                sessionOpens.push(structuredClone(open));
+                options.onSessionOpen?.(open);
+              }
+              return request;
+            },
+            ...(hook === "unknown to the lifecycle"
+              ? {}
+              : { hasBefore: (name) => name === "agent.session_open" && hook === "registered" }),
+          },
   });
   try {
     const agent = await manager.createAgent(config, undefined, { workspaceId: "wks_limited" });
@@ -5795,6 +5814,7 @@ async function withAccountLimitedModelAgent(
       storage,
       failure,
       resumedConfigs,
+      resumedEnvs,
       sessionOpens,
     });
   } finally {
@@ -5804,27 +5824,152 @@ async function withAccountLimitedModelAgent(
   }
 }
 
+function describeSessionOpens(opens: readonly PluginSessionOpenRequest[]) {
+  return opens.map(({ reason, model, modelChange }) => ({ reason, model, modelChange }));
+}
+
 test("a model change refused on the account limit reopens the idle session with the new model", async () => {
   await withAccountLimitedModelAgent({}, async (fixture) => {
     const { manager, agentId, session, storage } = fixture;
+    await manager.flush();
+    const updatedBefore = manager.getAgent(agentId)!.updatedAt.getTime();
+    const storedBefore = Date.parse((await storage.get(agentId))!.updatedAt);
+    const states: ManagedAgent[] = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state") states.push(event.agent);
+      },
+      { agentId, replayState: false },
+    );
 
     await manager.setAgentModel(agentId, "gpt-5.4-mini");
     await manager.flush();
+    unsubscribe();
 
     expect(session.requestedModels).toEqual(["gpt-5.4-mini"]);
     expect(fixture.resumedConfigs.map((config) => config?.model)).toEqual(["gpt-5.4-mini"]);
-    // The session-open hooks learn the model, so they can place the session on an account for it.
-    expect(fixture.sessionOpens.map(({ reason, model }) => ({ reason, model }))).toEqual([
-      { reason: "create", model: "gpt-5.4" },
-      { reason: "refresh", model: "gpt-5.4-mini" },
+    // The session-open hooks learn the model, and that this opening carries out a model change.
+    expect(describeSessionOpens(fixture.sessionOpens)).toEqual([
+      { reason: "create", model: "gpt-5.4", modelChange: undefined },
+      {
+        reason: "refresh",
+        model: "gpt-5.4-mini",
+        modelChange: { from: "gpt-5.4", to: "gpt-5.4-mini" },
+      },
     ]);
     const live = manager.getAgent(agentId);
     expect(live?.session).not.toBe(session);
     expect(live?.lifecycle).toBe("idle");
     expect(live?.config.model).toBe("gpt-5.4-mini");
     expect(live?.runtimeInfo?.model).toBe("gpt-5.4-mini");
-    expect((await storage.get(agentId))?.config?.model).toBe("gpt-5.4-mini");
+    // Like a live setModel, the change counts as activity and reaches clients as agent state.
+    expect(live!.updatedAt.getTime()).toBeGreaterThan(updatedBefore);
+    expect(states.at(-1)).toMatchObject({
+      lifecycle: "idle",
+      config: { model: "gpt-5.4-mini" },
+      updatedAt: live!.updatedAt,
+    });
+    const stored = await storage.get(agentId);
+    expect(stored?.config?.model).toBe("gpt-5.4-mini");
+    expect(Date.parse(stored!.updatedAt)).toBeGreaterThan(storedBefore);
   });
+});
+
+test.each([
+  "registered by no plugin",
+  "unknown to the lifecycle",
+  "absent with plugins off",
+] as const)(
+  "a model change refused on the account limit fails at once when the session-open hook is %s",
+  async (sessionOpenHook) => {
+    await withAccountLimitedModelAgent({ sessionOpenHook }, async (fixture) => {
+      const { manager, agentId, session } = fixture;
+      // Reopening would land on the same account, and the next turn would hit the limit instead.
+      await expect(manager.setAgentModel(agentId, "gpt-5.4-mini")).rejects.toBe(fixture.failure);
+      expect(fixture.resumedConfigs).toEqual([]);
+      expect(fixture.sessionOpens.map(({ reason }) => reason)).toEqual(
+        sessionOpenHook === "absent with plugins off" ? [] : ["create"],
+      );
+      expect(manager.getAgent(agentId)?.session).toBe(session);
+      expect(manager.getAgent(agentId)?.config.model).toBe("gpt-5.4");
+    });
+  },
+);
+
+test("only the reopen for a refused model change tells the session-open hooks about it", async () => {
+  await withAccountLimitedModelAgent({}, async (fixture) => {
+    const { manager, agentId, storage } = fixture;
+    await manager.reloadAgentSession(agentId, { model: "gpt-5.4-mini" });
+    await manager.closeAgent(agentId);
+    await manager.flush();
+    const record = await storage.get(agentId);
+    await manager.resumeAgentFromPersistence(record!.persistence!, { cwd: record!.cwd }, agentId);
+
+    expect(fixture.sessionOpens.map(({ reason }) => reason)).toEqual([
+      "create",
+      "refresh",
+      "resume",
+    ]);
+    expect(fixture.sessionOpens[1]?.model).toBe("gpt-5.4-mini");
+    expect(fixture.sessionOpens.filter((open) => "modelChange" in open)).toEqual([]);
+  });
+});
+
+test("a model change refused on the account limit leaves a session that is still starting", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-limited-starting-"));
+  const config: AgentSessionConfig = { provider: "codex", cwd: workdir, model: "gpt-5.4" };
+  const failure = new Error(ACCOUNT_LIMIT_MESSAGE);
+  const startupHeld = deferred<void>();
+  const session = new (class extends AccountLimitedModelSession {
+    override async getRuntimeInfo() {
+      await startupHeld.promise;
+      return super.getRuntimeInfo();
+    }
+  })(config, failure);
+  const opens: string[] = [];
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    registry: new AgentStorage(join(workdir, "agents"), logger),
+    logger,
+    pluginLifecycle: {
+      emit: () => {},
+      before: async (name, request) => {
+        if (name === "agent.session_open") {
+          opens.push((request as PluginSessionOpenRequest).reason);
+        }
+        return request;
+      },
+      hasBefore: () => true,
+    },
+  });
+  const agentId = randomUUID();
+  try {
+    const creating = manager.createAgent(config, agentId, { workspaceId: "wks_starting" });
+    await vi.waitFor(() => expect(manager.getAgent(agentId)?.lifecycle).toBe("initializing"));
+
+    const changing = manager
+      .setAgentModel(agentId, "gpt-5.4-mini")
+      .catch((error: unknown) => error);
+    startupHeld.resolve();
+    await creating;
+
+    expect(await changing).toBe(failure);
+    expect(opens).toEqual(["create"]);
+    expect(session.requestedModels).toEqual(["gpt-5.4-mini"]);
+    expect(manager.getAgent(agentId)?.session).toBe(session);
+    expect(manager.getAgent(agentId)?.lifecycle).toBe("idle");
+    expect(manager.getAgent(agentId)?.config.model).toBe("gpt-5.4");
+  } finally {
+    for (const agent of manager.listAgents()) await manager.closeAgent(agent.id);
+    await manager.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
 });
 
 test.each(["running turn", "waiting permission"] as const)(
@@ -5887,7 +6032,13 @@ test("a reopen the session-open hook refuses reports its reason and keeps the se
     },
     async (fixture) => {
       const { manager, agentId, session } = fixture;
-      await expect(manager.setAgentModel(agentId, "gpt-5.4-mini")).rejects.toBe(refusal);
+      const failure = await manager
+        .setAgentModel(agentId, "gpt-5.4-mini")
+        .catch((error: unknown) => error);
+      // The user reads the plugin's own words, without the daemon's hook wrapper.
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).toMatchObject({ message: "no account has room for this model" });
+      expect((failure as Error).cause).toBe(refusal);
       expect(fixture.resumedConfigs).toEqual([]);
       expect(manager.getAgent(agentId)?.session).toBe(session);
       expect(manager.getAgent(agentId)?.lifecycle).toBe("idle");
@@ -5896,18 +6047,79 @@ test("a reopen the session-open hook refuses reports its reason and keeps the se
   );
 });
 
-test("a reopen the provider fails reports the original account limit error", async () => {
+test("a reopen the provider fails opens the previous model again and reports the cause", async () => {
+  let opens = 0;
   await withAccountLimitedModelAgent(
     {
-      resume: async () => {
-        throw new Error("resume failed");
+      // Every opening asks the hooks for an account, so each may land somewhere else.
+      onSessionOpen: (request) => {
+        opens += 1;
+        request.env = { ...request.env, ACCOUNT: `account-${opens}` };
+      },
+      resume: async (resumed) => {
+        if (resumed?.model === "gpt-5.4-mini") throw new Error("resume failed");
+        return new TestAgentSession({ ...resumed, provider: "codex", cwd: resumed?.cwd ?? "" });
       },
     },
     async (fixture) => {
-      await expect(fixture.manager.setAgentModel(fixture.agentId, "gpt-5.4-mini")).rejects.toBe(
-        fixture.failure,
-      );
-      expect(fixture.resumedConfigs.map((config) => config?.model)).toEqual(["gpt-5.4-mini"]);
+      const { manager, agentId, storage } = fixture;
+      const failure = await manager
+        .setAgentModel(agentId, "gpt-5.4-mini")
+        .catch((error: unknown) => error);
+      await manager.flush();
+
+      expect(failure).toMatchObject({
+        message: "Could not reopen the session to change the model: resume failed",
+      });
+      expect(describeSessionOpens(fixture.sessionOpens)).toEqual([
+        { reason: "create", model: "gpt-5.4", modelChange: undefined },
+        {
+          reason: "refresh",
+          model: "gpt-5.4-mini",
+          modelChange: { from: "gpt-5.4", to: "gpt-5.4-mini" },
+        },
+        // A plain refresh of the previous settings, on the account the hooks pick for it now.
+        { reason: "refresh", model: "gpt-5.4", modelChange: undefined },
+      ]);
+      expect(fixture.resumedConfigs.map((config) => config?.model)).toEqual([
+        "gpt-5.4-mini",
+        "gpt-5.4",
+      ]);
+      expect(fixture.resumedEnvs.map((env) => env?.ACCOUNT)).toEqual(["account-2", "account-3"]);
+      const live = manager.getAgent(agentId);
+      expect(live?.lifecycle).toBe("idle");
+      expect(live?.config.model).toBe("gpt-5.4");
+      expect((await storage.get(agentId))?.config?.model).toBe("gpt-5.4");
+    },
+  );
+});
+
+test("a reopen whose previous model does not open again either closes the agent and says so", async () => {
+  await withAccountLimitedModelAgent(
+    {
+      resume: async (resumed) => {
+        throw new Error(`resume failed on ${resumed?.model}`);
+      },
+    },
+    async (fixture) => {
+      const { manager, agentId, storage } = fixture;
+      const failure = await manager
+        .setAgentModel(agentId, "gpt-5.4-mini")
+        .catch((error: unknown) => error);
+      await manager.flush();
+
+      expect(failure).toMatchObject({
+        message:
+          "Could not reopen the session to change the model: resume failed on gpt-5.4-mini. Opening it again on the previous model failed too, so the agent is closed: resume failed on gpt-5.4",
+      });
+      expect(fixture.resumedConfigs.map((config) => config?.model)).toEqual([
+        "gpt-5.4-mini",
+        "gpt-5.4",
+      ]);
+      expect(manager.getAgent(agentId)).toBeNull();
+      const record = await storage.get(agentId);
+      expect(record?.lastStatus).toBe("closed");
+      expect(record?.config?.model).toBe("gpt-5.4");
     },
   );
 });
@@ -6001,6 +6213,7 @@ test("a Claude model change refused on the account limit keeps the agent when th
         }
         return request;
       },
+      hasBefore: (name) => name === "agent.session_open",
     },
   });
   try {
@@ -11245,6 +11458,62 @@ test("a refused reload keeps the automatic retry of the turn it left running", a
     await manager.flush();
     expect(session.prompts).toEqual(["original work", TURN_RETRY_CONTINUATION]);
   });
+});
+
+test("a model change refused on the account limit leaves a scheduled automatic retry on its session", async () => {
+  vi.useFakeTimers();
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-limited-retry-"));
+  const config = { provider: "codex", cwd: workdir, model: "gpt-5.4" } as const;
+  const failure = new Error(ACCOUNT_LIMIT_MESSAGE);
+  const session = new (class extends CapacityFailureSession {
+    async setModel(): Promise<void> {
+      throw failure;
+    }
+  })(config);
+  const opens: string[] = [];
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+    registry: new AgentStorage(join(workdir, "agents"), logger),
+    pluginLifecycle: {
+      emit: () => {},
+      before: async (name, request) => {
+        if (name === "agent.session_open") {
+          opens.push((request as PluginSessionOpenRequest).reason);
+        }
+        return request;
+      },
+      hasBefore: () => true,
+    },
+  });
+  try {
+    const agent = await manager.createAgent(config, undefined, { workspaceId: undefined });
+    const run = drainAsyncGenerator(manager.streamAgent(agent.id, "original work"));
+    await vi.advanceTimersByTimeAsync(0);
+    await run;
+    expect(manager.getAgent(agent.id)?.lifecycle).toBe("error");
+
+    await expect(manager.setAgentModel(agent.id, "gpt-5.4-mini")).rejects.toBe(failure);
+    expect(opens).toEqual(["create"]);
+
+    await vi.advanceTimersByTimeAsync(30_001);
+    await manager.flush();
+    expect(session.prompts).toEqual(["original work", TURN_RETRY_CONTINUATION]);
+    expect(manager.getAgent(agent.id)?.session).toBe(session);
+    expect(manager.getAgent(agent.id)?.config.model).toBe("gpt-5.4");
+  } finally {
+    manager.prepareForShutdown();
+    await vi.advanceTimersByTimeAsync(0);
+    await manager.flush();
+    vi.useRealTimers();
+    rmSync(workdir, { recursive: true, force: true });
+  }
 });
 
 test.each(["stop", "close", "archive", "reload", "shutdown", "new prompt"] as const)(
