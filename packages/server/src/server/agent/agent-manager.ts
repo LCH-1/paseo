@@ -700,6 +700,18 @@ class ModelChangeBusyError extends Error {
   }
 }
 
+const MODEL_CHANGE_LIMIT_LOG = "Model change hit an account limit";
+
+/**
+ * Held while an agent's session reopens for a refused model change. Reopens of one agent can
+ * overlap, and `settled` resolves once the last of them ended, however it ended.
+ */
+interface ModelChangeReopenHold {
+  reopens: number;
+  settled: Promise<void>;
+  release: () => void;
+}
+
 /** The words a session-open failure gives the user: a plugin's own reason when it refused. */
 function describeReopenFailure(error: unknown): string {
   if (error instanceof PluginHookRefusalError) return error.reason;
@@ -912,6 +924,8 @@ export class AgentManager {
   private readonly inFlightAgentCloses = new Map<string, Promise<void>>();
   private readonly sessionCloses = new WeakMap<AgentSession, Promise<void>>();
   private readonly lifecycleMutationTails = new Map<string, Promise<void>>();
+  /** By agent, the reopens under way that carry out a model change the provider refused. */
+  private readonly modelChangeReopens = new Map<string, ModelChangeReopenHold>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
@@ -2637,7 +2651,7 @@ export class AgentManager {
    * new model lets the session-open hooks place it on an account that still has room for it.
    * Without such a hook it would open on the same account and fail on the next turn instead, so
    * the refusal stands. Work that still runs on the session keeps the refusal too, instead of
-   * being cut off by the reopen.
+   * being cut off by the reopen. Turns asked for while the session reopens wait for it.
    */
   private async reopenSessionWithModel(
     agent: ActiveManagedAgent,
@@ -2645,7 +2659,7 @@ export class AgentManager {
     limitError: unknown,
   ): Promise<void> {
     const fields = { agentId: agent.id, fromModel: agent.config.model ?? null, toModel: model };
-    const message = "Model change hit an account limit";
+    const message = MODEL_CHANGE_LIMIT_LOG;
     if (!this.pluginLifecycle?.hasBefore?.("agent.session_open")) {
       this.logger.info({ ...fields, result: "no_session_open_hook" }, message);
       throw limitError;
@@ -2655,6 +2669,21 @@ export class AgentManager {
       this.logger.info({ ...fields, result: "kept_busy_session", busy }, message);
       throw limitError;
     }
+    const hold = this.holdTurnsForModelChangeReopen(agent.id);
+    try {
+      await this.reopenIdleSessionWithModel(agent, model, limitError, fields);
+    } finally {
+      this.releaseModelChangeReopen(agent.id, hold);
+    }
+  }
+
+  private async reopenIdleSessionWithModel(
+    agent: ActiveManagedAgent,
+    model: string | null,
+    limitError: unknown,
+    fields: { agentId: string; fromModel: string | null; toModel: string | null },
+  ): Promise<void> {
+    const message = MODEL_CHANGE_LIMIT_LOG;
     try {
       await this.queueReload(
         agent.id,
@@ -2695,6 +2724,40 @@ export class AgentManager {
       this.emitState(reopened);
     }
     this.logger.info({ ...fields, result: "reopened" }, message);
+  }
+
+  /**
+   * The reopen that carries out a refused model change, while one is under way for the agent.
+   *
+   * Its session-open hooks place the agent before the old session closes. A turn that began
+   * meanwhile would call the reopen off and keep the old session, on an account the hooks no
+   * longer count it on. Whoever starts a turn waits for this promise instead and then starts it
+   * on the session left standing: the new model's when the reopen succeeded, the previous one's
+   * when it failed or was called off. It never rejects, and nothing waits when it is undefined.
+   */
+  getModelChangeReopen(agentId: string): Promise<void> | undefined {
+    return this.modelChangeReopens.get(agentId)?.settled;
+  }
+
+  private holdTurnsForModelChangeReopen(agentId: string): ModelChangeReopenHold {
+    let hold = this.modelChangeReopens.get(agentId);
+    if (!hold) {
+      let release = () => {};
+      const settled = new Promise<void>((settle) => {
+        release = settle;
+      });
+      hold = { reopens: 0, settled, release };
+      this.modelChangeReopens.set(agentId, hold);
+    }
+    hold.reopens += 1;
+    return hold;
+  }
+
+  private releaseModelChangeReopen(agentId: string, hold: ModelChangeReopenHold): void {
+    hold.reopens -= 1;
+    if (hold.reopens > 0) return;
+    if (this.modelChangeReopens.get(agentId) === hold) this.modelChangeReopens.delete(agentId);
+    hold.release();
   }
 
   /** What still runs on the agent's session and a reopen would cut off, or null when nothing does. */
@@ -3144,6 +3207,14 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): Promise<AgentRunResult> {
+    // Checked in the tick the run begins in, so no reopen can begin between the two.
+    for (
+      let reopen = this.getModelChangeReopen(agentId);
+      reopen;
+      reopen = this.getModelChangeReopen(agentId)
+    ) {
+      await reopen;
+    }
     const events = this.streamAgent(agentId, prompt, options);
     const timeline: AgentTimelineItem[] = [];
     let finalText = "";

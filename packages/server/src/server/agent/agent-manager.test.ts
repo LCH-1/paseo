@@ -24,7 +24,7 @@ import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
-import { startAgentRun } from "./agent-prompt.js";
+import { sendPromptToAgent, startAgentRun } from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import { ClaudeAgentClient } from "./providers/claude/agent.js";
 import type { Query } from "@anthropic-ai/claude-agent-sdk";
@@ -5708,6 +5708,8 @@ const ACCOUNT_LIMIT_MESSAGE =
 
 class AccountLimitedModelSession extends ControlledInterruptSession {
   readonly requestedModels: Array<string | null> = [];
+  /** The prompts whose turns began on this session; each turn stays open until a test ends it. */
+  readonly prompts: AgentPromptInput[] = [];
   runningBackgroundWorkIds: string[] = [];
 
   constructor(
@@ -5715,6 +5717,11 @@ class AccountLimitedModelSession extends ControlledInterruptSession {
     private readonly failure: Error,
   ) {
     super(config, "account-limited-turn", async () => undefined);
+  }
+
+  override async startTurn(prompt?: AgentPromptInput): Promise<{ turnId: string }> {
+    if (prompt !== undefined) this.prompts.push(prompt);
+    return super.startTurn();
   }
 
   async setModel(model: string | null): Promise<void> {
@@ -6487,6 +6494,8 @@ test("a model change refused on the account limit leaves a turn that starts whil
         .catch((error: unknown) => error);
       await hookEntered.promise;
 
+      // A prompt would wait for the reopen. This turn begins on the session without asking, as
+      // one the provider starts by itself does.
       const run = drainAsyncGenerator(manager.streamAgent(agentId, "work that must survive"));
       await manager.waitForAgentRunStart(agentId);
       hookHeld.resolve();
@@ -6500,6 +6509,320 @@ test("a model change refused on the account limit leaves a turn that starts whil
       await run;
     },
   );
+});
+
+/** A session a test opens in place of the account-limited one; its turns complete by themselves. */
+class PromptRecordingSession extends TestAgentSession {
+  readonly prompts: AgentPromptInput[] = [];
+
+  constructor(readonly openedWith: Partial<AgentSessionConfig> | undefined) {
+    super({ ...openedWith, provider: "codex", cwd: openedWith?.cwd ?? "" });
+  }
+
+  override async startTurn(prompt?: AgentPromptInput): Promise<{ turnId: string }> {
+    if (prompt !== undefined) this.prompts.push(prompt);
+    return super.startTurn();
+  }
+}
+
+/** Holds the session-open hooks of the reopen for a refused model change until a test lets go. */
+function holdModelChangeHooks(settle: () => void = () => {}) {
+  const entered = deferred<void>();
+  const held = deferred<void>();
+  return {
+    entered: entered.promise,
+    release: () => held.resolve(),
+    onSessionOpen: async (request: PluginSessionOpenRequest): Promise<void> => {
+      if (!request.modelChange) return;
+      entered.resolve();
+      await held.promise;
+      settle();
+    },
+  };
+}
+
+const PROMPT_DURING_REOPEN = "sent while the session reopens";
+
+/** Resolves once a turn that has yet to start on the agent ran and left the agent idle again. */
+async function turnRunsToItsEnd(manager: AgentManager, agentId: string): Promise<void> {
+  await waitForAgentLifecycle(manager, agentId, "running");
+  await vi.waitFor(() => expect(manager.getAgent(agentId)?.lifecycle).toBe("idle"));
+}
+
+/** Ends the turn the account-limited session holds open, once the manager has started it. */
+async function endHeldTurn(
+  manager: AgentManager,
+  agentId: string,
+  session: AccountLimitedModelSession,
+): Promise<void> {
+  await manager.waitForAgentRunStart(agentId);
+  // The session reports the start on a timer; its completion must not overtake that.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  session.pushEvent({ type: "turn_completed", provider: "codex", turnId: session.turnId });
+  await vi.waitFor(() => expect(manager.getAgent(agentId)?.lifecycle).toBe("idle"));
+}
+
+test.each(["a prompt sent", "a run awaited to its end"] as const)(
+  "%s while a refused model change reopens the session runs once on the new model's session",
+  async (entry) => {
+    const hooks = holdModelChangeHooks();
+    const reopened: PromptRecordingSession[] = [];
+    await withAccountLimitedModelAgent(
+      {
+        onSessionOpen: hooks.onSessionOpen,
+        resume: async (resumed) => {
+          reopened.push(new PromptRecordingSession(resumed));
+          return reopened.at(-1)!;
+        },
+      },
+      async (fixture) => {
+        const { manager, agentId, session } = fixture;
+        const changing = manager.setAgentModel(agentId, "gpt-5.4-mini");
+        await hooks.entered;
+
+        const prompted =
+          entry === "a prompt sent"
+            ? startAgentRun(manager, agentId, PROMPT_DURING_REOPEN, logger)
+            : manager.runAgent(agentId, PROMPT_DURING_REOPEN);
+        await new Promise((resolve) => setImmediate(resolve));
+        // The turn waits for the reopen instead of starting on the session about to close.
+        expect(session.prompts).toEqual([]);
+        expect(manager.isTurnInProgress(agentId)).toBe(false);
+
+        const ran = turnRunsToItsEnd(manager, agentId);
+        hooks.release();
+        // The prompt did not call the model change off: the session reopened on the new model.
+        await changing;
+        await prompted;
+        await ran;
+
+        expect(fixture.sessionOpens.map(({ reason }) => reason)).toEqual(["create", "refresh"]);
+        expect(session.prompts).toEqual([]);
+        expect(reopened.map((opened) => [opened.openedWith?.model, opened.prompts])).toEqual([
+          ["gpt-5.4-mini", [PROMPT_DURING_REOPEN]],
+        ]);
+        expect(manager.getAgent(agentId)?.config.model).toBe("gpt-5.4-mini");
+        expect(manager.getModelChangeReopen(agentId)).toBeUndefined();
+      },
+    );
+  },
+);
+
+test("two prompts sent while a refused model change reopens the session reach the new session in order", async () => {
+  const hooks = holdModelChangeHooks();
+  const reopened: PromptRecordingSession[] = [];
+  await withAccountLimitedModelAgent(
+    {
+      onSessionOpen: hooks.onSessionOpen,
+      resume: async (resumed) => {
+        reopened.push(new PromptRecordingSession(resumed));
+        return reopened.at(-1)!;
+      },
+    },
+    async (fixture) => {
+      const { manager, agentId, session } = fixture;
+      const changing = manager.setAgentModel(agentId, "gpt-5.4-mini");
+      await hooks.entered;
+
+      const first = startAgentRun(manager, agentId, "first", logger, { replaceRunning: true });
+      const second = startAgentRun(manager, agentId, "second", logger, { replaceRunning: true });
+      const ran = turnRunsToItsEnd(manager, agentId);
+      hooks.release();
+      await changing;
+      await Promise.all([first, second]);
+      await ran;
+
+      // As on a session that is not reopening, the later prompt replaces the earlier one's turn.
+      expect(session.prompts).toEqual([]);
+      expect(reopened.map((opened) => opened.prompts)).toEqual([["first", "second"]]);
+    },
+  );
+});
+
+test("a prompt sent while a refused model change fails to reopen runs once on the previous model's session", async () => {
+  const hooks = holdModelChangeHooks();
+  const reopened: PromptRecordingSession[] = [];
+  await withAccountLimitedModelAgent(
+    {
+      onSessionOpen: hooks.onSessionOpen,
+      resume: async (resumed) => {
+        if (resumed?.model === "gpt-5.4-mini") throw new Error("resume failed");
+        reopened.push(new PromptRecordingSession(resumed));
+        return reopened.at(-1)!;
+      },
+    },
+    async (fixture) => {
+      const { manager, agentId, session } = fixture;
+      const changing = manager
+        .setAgentModel(agentId, "gpt-5.4-mini")
+        .catch((error: unknown) => error);
+      await hooks.entered;
+
+      const prompted = startAgentRun(manager, agentId, PROMPT_DURING_REOPEN, logger);
+      const ran = turnRunsToItsEnd(manager, agentId);
+      hooks.release();
+
+      expect(await changing).toMatchObject({
+        message: "Could not reopen the session to change the model: resume failed",
+      });
+      await prompted;
+      await ran;
+
+      // The old session closed for the reopen, so the turn runs on the one opened in its place.
+      expect(session.prompts).toEqual([]);
+      expect(reopened.map((opened) => [opened.openedWith?.model, opened.prompts])).toEqual([
+        ["gpt-5.4", [PROMPT_DURING_REOPEN]],
+      ]);
+      expect(manager.getAgent(agentId)?.config.model).toBe("gpt-5.4");
+      expect(manager.getModelChangeReopen(agentId)).toBeUndefined();
+    },
+  );
+});
+
+test.each([
+  "the hooks refuse",
+  "the hooks time out",
+  "work begins on the session meanwhile",
+] as const)(
+  "a prompt sent while a refused model change reopens the session runs once on the kept session when %s",
+  async (ending) => {
+    const refusal = new PluginHookRefusalError(
+      "aster",
+      "agent.session_open",
+      "no account has room for this model",
+      {},
+    );
+    const timeout = new Error("Plugin aster before agent.session_open timed out");
+    const hooks = holdModelChangeHooks(() => {
+      if (ending === "the hooks refuse") throw refusal;
+      if (ending === "the hooks time out") throw timeout;
+    });
+    await withAccountLimitedModelAgent({ onSessionOpen: hooks.onSessionOpen }, async (fixture) => {
+      const { manager, agentId, session } = fixture;
+      const changing = manager
+        .setAgentModel(agentId, "gpt-5.4-mini")
+        .catch((error: unknown) => error);
+      await hooks.entered;
+
+      const prompted = startAgentRun(manager, agentId, PROMPT_DURING_REOPEN, logger);
+      await new Promise((resolve) => setImmediate(resolve));
+      // The turn waits until the reopen ends, even though the session then turns out to be kept.
+      expect(session.prompts).toEqual([]);
+      // Background work is not a turn, so nothing holds it back and it calls the reopen off.
+      if (ending === "work begins on the session meanwhile") {
+        session.runningBackgroundWorkIds = ["background-task"];
+      }
+      hooks.release();
+
+      const failure = await changing;
+      if (ending === "the hooks refuse") {
+        expect(failure).toMatchObject({ message: "no account has room for this model" });
+      } else if (ending === "the hooks time out") {
+        expect(failure).toMatchObject({
+          message: `Could not reopen the session to change the model: ${timeout.message}`,
+        });
+      } else {
+        expect(failure).toBe(fixture.failure);
+      }
+      await prompted;
+      await endHeldTurn(manager, agentId, session);
+
+      // No ending closed the session, and the prompt that waited was not dropped.
+      expect(fixture.resumedConfigs).toEqual([]);
+      expect(manager.getAgent(agentId)?.session).toBe(session);
+      expect(manager.getAgent(agentId)?.config.model).toBe("gpt-5.4");
+      expect(session.prompts).toEqual([PROMPT_DURING_REOPEN]);
+      expect(manager.getModelChangeReopen(agentId)).toBeUndefined();
+    });
+  },
+);
+
+test("a prompt sent while a refused model change leaves the agent closed loads it again and runs once", async () => {
+  const hooks = holdModelChangeHooks();
+  const reopened: PromptRecordingSession[] = [];
+  let resumes = 0;
+  await withAccountLimitedModelAgent(
+    {
+      onSessionOpen: hooks.onSessionOpen,
+      // Neither the new model nor the previous one opens; a later load of the agent does.
+      resume: async (resumed) => {
+        resumes += 1;
+        if (resumes <= 2) throw new Error(`resume failed on ${resumed?.model}`);
+        reopened.push(new PromptRecordingSession(resumed));
+        return reopened.at(-1)!;
+      },
+    },
+    async (fixture) => {
+      const { manager, agentId, session, storage } = fixture;
+      // The send has loaded the agent and is looking up the prompt's sender when the reopen begins.
+      const senderLookedUp = deferred<void>();
+      const senderHeld = deferred<void>();
+      const readRecord = storage.get.bind(storage);
+      vi.spyOn(storage, "get").mockImplementation(async (id) => {
+        if (id !== "sender-agent") return readRecord(id);
+        senderLookedUp.resolve();
+        await senderHeld.promise;
+        return null;
+      });
+      const sent = sendPromptToAgent({
+        agentManager: manager,
+        agentStorage: storage,
+        agentId,
+        prompt: PROMPT_DURING_REOPEN,
+        source: { kind: "agent-message", agentId: "sender-agent" },
+        logger,
+      });
+      await senderLookedUp.promise;
+      const changing = manager
+        .setAgentModel(agentId, "gpt-5.4-mini")
+        .catch((error: unknown) => error);
+      await hooks.entered;
+      senderHeld.resolve();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(session.prompts).toEqual([]);
+
+      const ran = turnRunsToItsEnd(manager, agentId);
+      hooks.release();
+      expect(await changing).toMatchObject({
+        message: expect.stringContaining("so the agent is closed"),
+      });
+      await expect(sent).resolves.toEqual({ disposition: "turn_started" });
+      await ran;
+
+      expect(fixture.sessionOpens.map(({ reason }) => reason)).toEqual([
+        "create",
+        "refresh",
+        "refresh",
+        "resume",
+      ]);
+      expect(session.prompts).toEqual([]);
+      expect(reopened.map((opened) => opened.prompts.length)).toEqual([1]);
+      expect(manager.getAgent(agentId)?.config.model).toBe("gpt-5.4");
+    },
+  );
+});
+
+test("a prompt starts without waiting when no refused model change reopens the session", async () => {
+  await withAccountLimitedModelAgent({}, async (fixture) => {
+    const { manager, agentId, session, storage } = fixture;
+    // Other lifecycle work holds the agent's lane; a prompt never waited for that and still does not.
+    const laneHeld = deferred<void>();
+    const applySnapshot = storage.applySnapshot.bind(storage);
+    vi.spyOn(storage, "applySnapshot").mockImplementationOnce(async (agent, options) => {
+      await laneHeld.promise;
+      await applySnapshot(agent, options);
+    });
+    const labeling = manager.setLabels(agentId, { note: "held" });
+    expect(manager.getModelChangeReopen(agentId)).toBeUndefined();
+
+    await startAgentRun(manager, agentId, "no reopen under way", logger);
+    await manager.waitForAgentRunStart(agentId);
+
+    expect(session.prompts).toEqual(["no reopen under way"]);
+    laneHeld.resolve();
+    await labeling;
+    await endHeldTurn(manager, agentId, session);
+  });
 });
 
 test("a reopen onto a model that lacks the thinking option opens with the provider's fallback", async () => {

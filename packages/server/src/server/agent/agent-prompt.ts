@@ -23,9 +23,10 @@ export type AgentRunController = Pick<
   | "replaceAgentRun"
   | "steerOrReplaceActiveTurn"
   | "streamAgent"
-> & {
-  reloadAgentSession(agentId: string): Promise<unknown>;
-};
+> &
+  Partial<Pick<AgentManager, "getModelChangeReopen">> & {
+    reloadAgentSession(agentId: string): Promise<unknown>;
+  };
 
 export interface StartAgentRunOptions {
   /** Called after selecting the run, before consuming its events. */
@@ -68,6 +69,32 @@ async function steerOrReplaceActiveRun(
   return null;
 }
 
+/**
+ * The reopen that carries out a model change the provider refused, while it holds the agent's
+ * session. A turn that began meanwhile would keep the old session after the session-open hooks
+ * placed the agent elsewhere, so a prompt waits for it and starts on the session it leaves
+ * standing, however it ends. Undefined when no such reopen is under way; nothing waits then.
+ */
+function modelChangeReopenOf(
+  agentManager: Pick<AgentRunController, "getModelChangeReopen">,
+  agentId: string,
+): Promise<void> | undefined {
+  return agentManager.getModelChangeReopen?.(agentId);
+}
+
+async function waitForModelChangeReopen(
+  agentManager: Pick<AgentRunController, "getModelChangeReopen">,
+  agentId: string,
+): Promise<void> {
+  for (
+    let reopen = modelChangeReopenOf(agentManager, agentId);
+    reopen;
+    reopen = modelChangeReopenOf(agentManager, agentId)
+  ) {
+    await reopen;
+  }
+}
+
 async function startOrReplaceRun(
   agentManager: AgentRunController,
   agentId: string,
@@ -77,6 +104,14 @@ async function startOrReplaceRun(
   iterator: AsyncGenerator<import("./agent-sdk-types.js").AgentStreamEvent>;
   replaced: boolean;
 }> {
+  // Checked again in the tick the run begins in, so no reopen can begin between the two.
+  for (
+    let reopen = modelChangeReopenOf(agentManager, agentId);
+    reopen;
+    reopen = modelChangeReopenOf(agentManager, agentId)
+  ) {
+    await reopen;
+  }
   const replaced = Boolean(options?.replaceRunning && agentManager.hasInFlightRun(agentId));
   const iterator = replaced
     ? await agentManager.replaceAgentRun(agentId, prompt, options?.runOptions)
@@ -99,6 +134,10 @@ export async function startAgentRun(
   logger: Logger,
   options?: StartAgentRunOptions,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
+  // Out-of-band commands and steering go to the reopened session too.
+  if (modelChangeReopenOf(agentManager, agentId)) {
+    await waitForModelChangeReopen(agentManager, agentId);
+  }
   const snapshot = agentManager.getAgent(agentId);
   logger.trace(
     {
@@ -326,20 +365,23 @@ export async function sendPromptToAgent(
     }
   }
 
-  try {
-    await ensureAgentLoaded(params.agentId, {
-      agentManager: params.agentManager,
-      agentStorage: params.agentStorage,
-      logger: params.logger,
-    });
-  } catch (error) {
-    // A send that could not load the agent leaves it where it was: still archived.
-    // Concurrent sends share this load, so none of them holds a live session.
-    if (archivedAtToRestore) {
-      await params.agentManager.archiveSnapshot(params.agentId, archivedAtToRestore);
+  const loadAgent = async (): Promise<void> => {
+    try {
+      await ensureAgentLoaded(params.agentId, {
+        agentManager: params.agentManager,
+        agentStorage: params.agentStorage,
+        logger: params.logger,
+      });
+    } catch (error) {
+      // A send that could not load the agent leaves it where it was: still archived.
+      // Concurrent sends share this load, so none of them holds a live session.
+      if (archivedAtToRestore) {
+        await params.agentManager.archiveSnapshot(params.agentId, archivedAtToRestore);
+      }
+      throw error;
     }
-    throw error;
-  }
+  };
+  await loadAgent();
 
   if (params.sessionMode) {
     await params.agentManager.setAgentMode(params.agentId, params.sessionMode);
@@ -350,6 +392,13 @@ export async function sendPromptToAgent(
   const runOptions = delivery.messageId
     ? { ...params.runOptions, clientMessageId: delivery.messageId }
     : params.runOptions;
+
+  // A reopen that began since the load can end with the agent closed, when neither the new model
+  // nor the previous one opened. The prompt loads the agent again then instead of being dropped.
+  if (modelChangeReopenOf(params.agentManager, params.agentId)) {
+    await waitForModelChangeReopen(params.agentManager, params.agentId);
+    await loadAgent();
+  }
 
   return await startAgentRun(params.agentManager, params.agentId, delivery.prompt, params.logger, {
     replaceRunning: true,
