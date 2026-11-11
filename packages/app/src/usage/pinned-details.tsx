@@ -1,15 +1,26 @@
 import { useCallback, useMemo, useState } from "react";
 import { Text, View, type LayoutChangeEvent } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
-import { UsageMeter } from "./meter";
-import type { DetailedPinnedUsageWindow, PinnedUsageAccount, PinnedUsageProvider } from "./pinned";
+import { ICON_SIZE } from "@/styles/theme";
+import { USAGE_REMAINING_COLOR, UsageMeter } from "./meter";
+import type {
+  DetailedPinnedUsageWindow,
+  PinnedUsageAccount,
+  PinnedUsageProvider,
+  PinnedUsageReset,
+} from "./pinned";
 import type { UsageDisplayAs } from "./preferences";
 import { UsageSourceIcon } from "./source-icon";
 import type { UsageTone } from "./types";
 
-/** Room for a row's name, meter, percent and reset time; past it only an account's name gives way. */
-export const PINNED_USAGE_DETAILS_MAX_WIDTH = 480;
-const ICON_SIZE = 14;
+/**
+ * Room for a row's widest name, meter, percent and reset time ("2027. 1. 2. (토) 오전 09:05 ·
+ * 51일 후 초기화"); past it only an account's name gives way.
+ */
+export const PINNED_USAGE_DETAILS_MAX_WIDTH = 528;
+// A long window name ("5시간 · GPT-5.3-Codex-Spark") gives way here, keeping its period, so the
+// name column it widens for every row never takes the reset time's room.
+const WINDOW_NAME_MAX_WIDTH = 104;
 
 interface DetailColumn {
   style: { minWidth: number };
@@ -97,19 +108,21 @@ function ProviderDetails({
       testID="sidebar-usage-detail-provider"
     >
       <View style={styles.providerHeader}>
-        <UsageSourceIcon svg={provider.icon} size={ICON_SIZE} />
+        <UsageSourceIcon svg={provider.icon} size={ICON_SIZE.sm} />
         <Text style={styles.providerName} numberOfLines={1}>
           {provider.label}
         </Text>
       </View>
-      {provider.accounts.map((account) => (
-        <AccountDetails
-          key={account.key}
-          account={account}
-          columns={columns}
-          displayAs={displayAs}
-        />
-      ))}
+      <View style={styles.accounts}>
+        {provider.accounts.map((account) => (
+          <AccountDetails
+            key={account.key}
+            account={account}
+            columns={columns}
+            displayAs={displayAs}
+          />
+        ))}
+      </View>
     </View>
   );
 }
@@ -172,13 +185,25 @@ function WindowDetailRow({
         style={[styles.percent, percentToneStyle(window.tone), columns.percent.style]}
         onLayout={columns.percent.onLayout}
       >
-        {detail.percentLabel}
+        {window.percentText}
+        <Text style={styles.percentMeaning}>{` ${detail.percentMeaning}`}</Text>
       </Text>
-      {detail.reset ? (
-        <Text style={styles.reset} numberOfLines={1}>
-          {detail.reset}
-        </Text>
-      ) : null}
+      {detail.reset ? <ResetDetail reset={detail.reset} /> : null}
+    </View>
+  );
+}
+
+/** The reset's date and time, which give way first, then how far off it is, which never does. */
+function ResetDetail({ reset }: { reset: PinnedUsageReset }) {
+  return (
+    <View style={styles.reset} testID="sidebar-usage-detail-reset">
+      <Text style={styles.resetAt} numberOfLines={1}>
+        {reset.at}
+      </Text>
+      <Text style={styles.resetSeparator}>·</Text>
+      <Text style={styles.resetRelative} numberOfLines={1}>
+        {reset.relative}
+      </Text>
     </View>
   );
 }
@@ -189,15 +214,14 @@ const styles = StyleSheet.create((theme) => ({
   },
   legend: { flexDirection: "row", alignItems: "center", gap: theme.spacing[3] },
   legendItem: { flexDirection: "row", alignItems: "center", gap: theme.spacing[1] },
-  // A step under the card's text: the legend explains the meters and is not itself a row.
   legendText: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm - 1,
+    fontSize: theme.fontSize.sm,
   },
   swatch: { width: 6, height: 6, borderRadius: 1 },
   // The sidebar meters' colours.
   used: { backgroundColor: theme.colors.surface3 },
-  remaining: { backgroundColor: "#91b89c" },
+  remaining: { backgroundColor: USAGE_REMAINING_COLOR },
   provider: {
     gap: theme.spacing[1.5],
   },
@@ -218,10 +242,14 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.semibold,
   },
+  // Accounts sit further apart than an account's own rows, so each reads as one group.
+  accounts: {
+    gap: theme.spacing[3],
+  },
   // Accounts start on the provider name's rail, past its icon.
   account: {
     gap: theme.spacing[1],
-    paddingLeft: ICON_SIZE + theme.spacing[1.5],
+    paddingLeft: theme.iconSize.sm + theme.spacing[1.5],
   },
   accountName: {
     color: theme.colors.foregroundMuted,
@@ -232,9 +260,11 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     gap: theme.spacing[2],
   },
+  // Names are the rows' context; the percent and the time to reset carry the values.
   windowName: {
     flexShrink: 0,
-    color: theme.colors.popoverForeground,
+    maxWidth: WINDOW_NAME_MAX_WIDTH,
+    color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
   },
   meter: {
@@ -252,10 +282,33 @@ const styles = StyleSheet.create((theme) => ({
   },
   percentWarning: { color: theme.colors.statusWarning },
   percentDanger: { color: theme.colors.statusDanger },
+  // Only the number is bold; what it means reads as its unit.
+  percentMeaning: {
+    color: theme.colors.foregroundMuted,
+    fontWeight: theme.fontWeight.normal,
+  },
   reset: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexShrink: 1,
+    minWidth: 0,
+    gap: theme.spacing[1],
+  },
+  resetAt: {
     flexShrink: 1,
     minWidth: 0,
     color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    fontVariant: ["tabular-nums"],
+  },
+  resetSeparator: {
+    flexShrink: 0,
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+  },
+  resetRelative: {
+    flexShrink: 0,
+    color: theme.colors.popoverForeground,
     fontSize: theme.fontSize.sm,
   },
 }));

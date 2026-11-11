@@ -79,9 +79,16 @@ export function formatResetAt(
   return resetFormatter(date.getFullYear() !== new Date(now).getFullYear()).format(date);
 }
 
+/** A span ahead in its largest whole unit: "3일", "5시간", "12분" (never less than a minute). */
+function aheadSpan(ms: number): string {
+  if (ms < HOUR_MS) return `${Math.max(1, Math.floor(ms / MINUTE_MS))}분`;
+  if (ms < DAY_MS) return `${Math.floor(ms / HOUR_MS)}시간`;
+  return `${Math.floor(ms / DAY_MS)}일`;
+}
+
 /**
- * How far off a reset is, in its largest whole unit: "3일 후", "5시간 후", "12분 후" (never less
- * than a minute), or "초기화 시각 지남" once it has passed. Null for a missing or unreadable time.
+ * How far off a reset is, in its largest whole unit: "3일 후 초기화", "5시간 후 초기화",
+ * "12분 후 초기화", or "초기화 시각 지남" once it has passed. Null for a missing or unreadable time.
  */
 export function formatResetIn(
   iso: string | null | undefined,
@@ -90,20 +97,7 @@ export function formatResetIn(
   const at = parseInstant(iso);
   if (at === null) return null;
   const remainingMs = at - now;
-  if (remainingMs <= 0) return "초기화 시각 지남";
-  if (remainingMs < HOUR_MS) return `${Math.max(1, Math.floor(remainingMs / MINUTE_MS))}분 후`;
-  if (remainingMs < DAY_MS) return `${Math.floor(remainingMs / HOUR_MS)}시간 후`;
-  return `${Math.floor(remainingMs / DAY_MS)}일 후`;
-}
-
-/** Both at once, the way the sidebar usage card shows them: "11. 14. (토) 오후 01:00 · 3일 후". */
-export function formatResetDetail(
-  iso: string | null | undefined,
-  now: number = Date.now(),
-): string | null {
-  const at = formatResetAt(iso, now);
-  const remaining = formatResetIn(iso, now);
-  return at && remaining ? `${at} · ${remaining}` : null;
+  return remainingMs > 0 ? `${aheadSpan(remainingMs)} 후 초기화` : "초기화 시각 지남";
 }
 
 /** A balance amount as the app's language writes it: "$1,234.50", "12,345". */

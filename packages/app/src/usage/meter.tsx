@@ -5,6 +5,9 @@ import { clampPct } from "./format";
 import type { UsageDisplayAs } from "./preferences";
 import type { UsageTone } from "./types";
 
+/** The sidebar meters' fill for the share left, over a `surface3` track for the share used. */
+export const USAGE_REMAINING_COLOR = "#91b89c";
+
 function fillToneStyle(tone: UsageTone) {
   switch (tone) {
     case "ok":
@@ -67,7 +70,7 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface4,
   },
   used: { backgroundColor: theme.colors.surface3 },
-  remaining: { backgroundColor: "#91b89c" },
+  remaining: { backgroundColor: USAGE_REMAINING_COLOR },
   fillDefault: {
     backgroundColor: theme.colors.foregroundMuted,
   },

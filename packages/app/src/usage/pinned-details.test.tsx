@@ -11,7 +11,8 @@ const { theme } = vi.hoisted(() => ({
   theme: {
     spacing: { 1: 4, 1.5: 6, 2: 8, 3: 12 },
     fontSize: { sm: 12 },
-    fontWeight: { semibold: "600" },
+    fontWeight: { normal: "normal", semibold: "600" },
+    iconSize: { sm: 14 },
     borderWidth: { 1: 1 },
     borderRadius: { full: 9999 },
     colors: {
@@ -76,6 +77,12 @@ const reports = [
     account: "claudecodelover2@gmail.com",
     windows: [{ id: "weekly", label: "Weekly", usedPct: 95, resetsAt: local(11, 17, 15, 0) }],
   }),
+  // A login the source could not name, among the provider's named ones.
+  report({
+    sourceId: "claude",
+    sourceLabel: "Claude",
+    windows: [{ id: "weekly", label: "Weekly", usedPct: 5, resetsAt: local(11, 11, 9, 0) }],
+  }),
   report({
     sourceId: "codex",
     sourceLabel: "Codex",
@@ -133,6 +140,10 @@ function cells(row: HTMLElement): string[] {
   return [...row.children].map((cell) => cell.textContent ?? "");
 }
 
+function child(element: Element, index: number): HTMLElement {
+  return element.children[index] as HTMLElement;
+}
+
 describe("PinnedUsageDetails", () => {
   it("lays out providers, then accounts, then a row per window", () => {
     render();
@@ -149,10 +160,11 @@ describe("PinnedUsageDetails", () => {
     expect(claudeAccounts.map((account) => account.firstElementChild?.textContent)).toEqual([
       "claudecodelover@gmail.com",
       "claudecodelover2@gmail.com",
+      "이름을 알 수 없는 계정",
     ]);
     expect(
       claudeAccounts.map((account) => byTestId(account, "sidebar-usage-detail-row").length),
-    ).toEqual([2, 1]);
+    ).toEqual([2, 1, 1]);
     const claudeRows = claudeAccounts.flatMap((account) =>
       byTestId(account, "sidebar-usage-detail-row"),
     );
@@ -160,8 +172,45 @@ describe("PinnedUsageDetails", () => {
       ["5시간", "", "12% 사용"],
       ["주간", "", "75% 사용"],
       ["주간", "", "95% 사용"],
+      ["주간", "", "5% 사용"],
     ]);
-    expect(cells(claudeRows[1])[3]).toMatch(/^11\. 14\. \(토\) (오후 01:00|13:00) · 3일 후$/);
+  });
+
+  it("reads each reset as its date and time, then how far off it is", () => {
+    render();
+    const [claude] = byTestId(container!, "sidebar-usage-detail-provider");
+    const resets = byTestId(claude, "sidebar-usage-detail-reset").map(cells);
+
+    expect(resets[1]).toEqual([
+      expect.stringMatching(/^11\. 14\. \(토\) (오후 01:00|13:00)$/),
+      "·",
+      "3일 후 초기화",
+    ]);
+    expect(resets[3]).toEqual([
+      expect.stringMatching(/^11\. 11\. \(수\) (오전 09:00|09:00)$/),
+      "·",
+      "초기화 시각 지남",
+    ]);
+  });
+
+  it("keeps the values forward: a bold percent, its meaning and the date muted", () => {
+    render();
+    const [row] = byTestId(container!, "sidebar-usage-detail-row");
+    const [name, , percent] = [...row.children] as HTMLElement[];
+    const [at, , relative] = [...byTestId(row, "sidebar-usage-detail-reset")[0].children].map(
+      (part) => (part as HTMLElement).style,
+    );
+
+    expect(name.style.color).toBe("rgb(102, 102, 102)");
+    // A long name gives way before it widens the name column into the reset time's room.
+    expect(name.style.maxWidth).toBe("104px");
+    expect(percent.style.fontWeight).toBe("600");
+    expect(child(percent, 0).textContent).toBe(" 사용");
+    expect(child(percent, 0).style.color).toBe("rgb(102, 102, 102)");
+    expect(child(percent, 0).style.fontWeight).toBe("normal");
+    expect(at.color).toBe("rgb(102, 102, 102)");
+    expect(relative.color).toBe("rgb(34, 34, 34)");
+    expect([at.flexShrink, relative.flexShrink]).toEqual(["1", "0"]);
   });
 
   it("leaves out the account line and reset column a source has nothing for", () => {
@@ -180,7 +229,12 @@ describe("PinnedUsageDetails", () => {
     const percent = (row: HTMLElement) => (row.children[2] as HTMLElement).style.color;
     const rows = byTestId(claude, "sidebar-usage-detail-row");
 
-    expect(rows.map(percent)).toEqual(["rgb(34, 34, 34)", "rgb(217, 119, 6)", "rgb(185, 28, 28)"]);
+    expect(rows.map(percent)).toEqual([
+      "rgb(34, 34, 34)",
+      "rgb(217, 119, 6)",
+      "rgb(185, 28, 28)",
+      "rgb(34, 34, 34)",
+    ]);
     expect(claude.style.borderTopWidth).toBe("");
     expect(codex.style.borderTopWidth).toBe("1px");
   });

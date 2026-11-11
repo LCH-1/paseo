@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  formatAmount,
-  formatResetAt,
-  formatResetDetail,
-  formatResetIn,
-  formatResetLabel,
-} from "./format";
+import { formatAmount, formatResetAt, formatResetIn, formatResetLabel } from "./format";
 
 describe("formatAmount", () => {
   it("groups thousands in the app's language", () => {
@@ -70,7 +64,6 @@ describe("formatResetAt", () => {
     for (const value of [null, undefined, "", "not a date"]) {
       expect(formatResetAt(value, now)).toBeNull();
       expect(formatResetIn(value, now)).toBeNull();
-      expect(formatResetDetail(value, now)).toBeNull();
     }
   });
 });
@@ -79,14 +72,14 @@ describe("formatResetIn", () => {
   const ahead = (ms: number) => new Date(now + ms).toISOString();
 
   it.each([
-    [30_000, "1분 후"],
-    [59 * MINUTE, "59분 후"],
-    [HOUR - 1000, "59분 후"],
-    [HOUR, "1시간 후"],
-    [23 * HOUR, "23시간 후"],
-    [DAY - MINUTE, "23시간 후"],
-    [DAY, "1일 후"],
-    [3 * DAY + 2 * HOUR, "3일 후"],
+    [30_000, "1분 후 초기화"],
+    [59 * MINUTE, "59분 후 초기화"],
+    [HOUR - 1000, "59분 후 초기화"],
+    [HOUR, "1시간 후 초기화"],
+    [23 * HOUR, "23시간 후 초기화"],
+    [DAY - MINUTE, "23시간 후 초기화"],
+    [DAY, "1일 후 초기화"],
+    [3 * DAY + 2 * HOUR, "3일 후 초기화"],
   ])("reads %i ms ahead as %s, in its largest whole unit", (ms, expected) => {
     expect(formatResetIn(ahead(ms), now)).toBe(expected);
   });
@@ -95,13 +88,4 @@ describe("formatResetIn", () => {
     expect(formatResetIn(ahead(0), now)).toBe("초기화 시각 지남");
     expect(formatResetIn(ahead(-5 * MINUTE), now)).toBe("초기화 시각 지남");
   });
-});
-
-it("formatResetDetail reads the reset time and how far off it is", () => {
-  expect(formatResetDetail(local(2026, 11, 14, 13, 0), now)).toBe(
-    `11. 14. (토) ${clock("오후 01:00", "13:00")} · 3일 후`,
-  );
-  expect(formatResetDetail(local(2026, 11, 11, 9, 0), now)).toBe(
-    `11. 11. (수) ${clock("오전 09:00", "09:00")} · 초기화 시각 지남`,
-  );
 });

@@ -393,9 +393,9 @@ describe("resolveProviderPinnedUsage hover card", () => {
       account.label,
       account.windows.map((window) => [
         window.detail.name,
-        window.detail.percentLabel,
+        `${window.percentText} ${window.detail.percentMeaning}`,
         window.tone,
-        window.detail.reset,
+        window.detail.reset && `${window.detail.reset.at} · ${window.detail.reset.relative}`,
       ]),
     ]);
 
@@ -414,31 +414,82 @@ describe("resolveProviderPinnedUsage hover card", () => {
             "5시간",
             "12% 사용",
             "default",
-            `11. 11. (수) ${clock("오후 03:30", "15:30")} · 4시간 후`,
+            `11. 11. (수) ${clock("오후 03:30", "15:30")} · 4시간 후 초기화`,
           ],
-          ["주간", "75% 사용", "warning", `11. 14. (토) ${clock("오후 01:00", "13:00")} · 3일 후`],
+          [
+            "주간",
+            "75% 사용",
+            "warning",
+            `11. 14. (토) ${clock("오후 01:00", "13:00")} · 3일 후 초기화`,
+          ],
           [
             "주간 · Fable",
             "95% 사용",
             "danger",
-            `2027. 1. 2. (토) ${clock("오전 09:05", "09:05")} · 51일 후`,
+            `2027. 1. 2. (토) ${clock("오전 09:05", "09:05")} · 51일 후 초기화`,
           ],
         ],
       ],
       [
         "claudecodelover2@gmail.com",
-        [["주간", "60% 사용", "default", `11. 17. (화) ${clock("오후 03:00", "15:00")} · 6일 후`]],
+        [
+          [
+            "주간",
+            "60% 사용",
+            "default",
+            `11. 17. (화) ${clock("오후 03:00", "15:00")} · 6일 후 초기화`,
+          ],
+        ],
       ],
     ]);
     expect(rows(providers[1])).toEqual([
       [
         null,
         [
-          ["주간", "48% 사용", "default", `11. 15. (일) ${clock("오전 10:36", "10:36")} · 3일 후`],
-          ["Code review · Weekly", "10% 사용", "default", null],
+          [
+            "주간",
+            "48% 사용",
+            "default",
+            `11. 15. (일) ${clock("오전 10:36", "10:36")} · 3일 후 초기화`,
+          ],
+          ["주간 · Code review", "10% 사용", "default", null],
         ],
       ],
     ]);
+  });
+
+  it("names an unnamed account only when its provider lists another account", () => {
+    const unnamedClaude = report({
+      sourceId: "claude",
+      sourceLabel: "Claude",
+      windows: [{ id: "weekly", label: "Weekly", usedPct: 5, resetsAt: local(11, 12, 9, 0) }],
+    });
+    const providers = resolveProviderPinnedUsage(
+      [firstClaude, unnamedClaude, codexAccount],
+      preferences(pins),
+      now,
+    );
+
+    const accountLabels = (provider: PinnedUsageProvider) =>
+      provider.accounts.map((account) => account.label);
+    expect(providers.map(accountLabels)).toEqual([
+      ["claudecodelover@gmail.com", "이름을 알 수 없는 계정"],
+      [null],
+    ]);
+  });
+
+  it("reads a reset that has come as passed", () => {
+    const passed = report({
+      sourceId: "claude",
+      sourceLabel: "Claude",
+      windows: [{ id: "weekly", label: "Weekly", usedPct: 5, resetsAt: local(11, 11, 9, 0) }],
+    });
+    const [provider] = resolveProviderPinnedUsage([passed], preferences(pins), now);
+
+    expect(provider.windows[0].detail.reset).toEqual({
+      at: `11. 11. (수) ${clock("오전 09:00", "09:00")}`,
+      relative: "초기화 시각 지남",
+    });
   });
 
   it("keeps the meters' flat window list in the same order as the card's rows", () => {
@@ -456,16 +507,10 @@ describe("resolveProviderPinnedUsage hover card", () => {
       now,
     );
 
-    expect(claudeProvider.windows.map((window) => window.detail.percentLabel)).toEqual([
-      "88% 남음",
-      "25% 남음",
-      "5% 남음",
-      "40% 남음",
-    ]);
-    expect(codexProvider.windows.map((window) => window.detail.percentLabel)).toEqual([
-      "52% 남음",
-      "90% 남음",
-    ]);
+    const percents = (provider: PinnedUsageProvider) =>
+      provider.windows.map((window) => `${window.percentText} ${window.detail.percentMeaning}`);
+    expect(percents(claudeProvider)).toEqual(["88% 남음", "25% 남음", "5% 남음", "40% 남음"]);
+    expect(percents(codexProvider)).toEqual(["52% 남음", "90% 남음"]);
   });
 
   it("names the reset time without seconds in each window's accessible label", () => {
@@ -485,7 +530,15 @@ describe("pinnedUsageWindowName", () => {
     [{ id: "weekly_model_fable", label: "Weekly · Fable" }, "주간 · Fable"],
     [{ id: "weekly_surface_code", label: "Weekly · Code" }, "주간 · Code"],
     [{ id: "weekly_model_opus", label: "Opus" }, "Opus"],
+    [{ id: "code_review:weekly", label: "Code review · Weekly" }, "주간 · Code review"],
+    [
+      { id: "limit:GPT-5.3-Codex-Spark:five_hour", label: "GPT-5.3-Codex-Spark · 5-hour" },
+      "5시간 · GPT-5.3-Codex-Spark",
+    ],
+    [{ id: "code_review:86400s", label: "Code review · 1-day" }, "Code review · 1-day"],
+    [{ id: "code_review:weekly", label: "Code review" }, "Code review"],
     [{ id: "monthly", label: "Monthly" }, "Monthly"],
+    [{ id: "constructor", label: "Constructor" }, "Constructor"],
   ])("names %o %s", (window, expected) => {
     expect(pinnedUsageWindowName(window)).toBe(expected);
   });

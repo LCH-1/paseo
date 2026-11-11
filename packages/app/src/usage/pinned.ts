@@ -1,4 +1,4 @@
-import { formatPct, formatResetAt, formatResetDetail } from "./format";
+import { formatPct, formatResetAt, formatResetIn } from "./format";
 import { displayPercent } from "./model";
 import { effectiveUsagePins, type UsageDisplayAs, type UsagePreferences } from "./preferences";
 import { windowTone } from "./tone";
@@ -22,12 +22,20 @@ export interface PinnedUsageWindow {
 
 /** What the hover card's row for a window reads, column by column. */
 export interface PinnedUsageWindowDetail {
-  /** "5시간", "주간", "주간 · Fable", or the source's label for any other window. */
+  /** "5시간", "주간", "주간 · Fable", "주간 · Code review", or the source's label otherwise. */
   name: string;
-  /** The share and what it means under the user's preference: "60% 사용", "40% 남음". */
-  percentLabel: string;
-  /** "11. 14. (토) 오후 01:00 · 3일 후", or null when the source gives no reset time. */
-  reset: string | null;
+  /** What `percentText` means under the user's preference: "사용" (used) or "남음" (left). */
+  percentMeaning: string;
+  /** When the window resets, or null when the source gives no reset time. */
+  reset: PinnedUsageReset | null;
+}
+
+/** A window's next reset, as the hover card reads it. */
+export interface PinnedUsageReset {
+  /** "11. 14. (토) 오후 01:00", with the year in front when it falls in another year. */
+  at: string;
+  /** "3일 후 초기화", or "초기화 시각 지남" once it has passed. */
+  relative: string;
 }
 
 export interface DetailedPinnedUsageWindow extends PinnedUsageWindow {
@@ -41,9 +49,13 @@ export interface PinnedUsageSource {
   windows: PinnedUsageWindow[];
 }
 
-/** One account in the hover card: its name, when the source has one, above its windows. */
+/** One account in the hover card: the line above its windows, then the windows. */
 export interface PinnedUsageAccount {
   key: string;
+  /**
+   * The account's name, or a stand-in when its provider lists other accounts too, so its windows
+   * never read as the account above's; null for a provider's only account when it has no name.
+   */
   label: string | null;
   windows: DetailedPinnedUsageWindow[];
 }
@@ -134,26 +146,45 @@ export function resolvePinnedUsage(
   });
 }
 
+const SCOPE_SEPARATOR = " · ";
+// The periods every Claude and Codex account has, by window id.
+const PERIOD_NAMES: ReadonlyMap<string, string> = new Map([
+  ["five_hour", "5시간"],
+  ["weekly", "주간"],
+]);
+// Claude's weekly windows scoped to one model or surface, labelled "Weekly · <scope>".
 const SCOPED_WEEKLY_WINDOW = /^weekly_(model|surface)_/;
 
 /**
- * A window's name in the hover card. The windows every Claude and Codex account has are named in
- * Korean, a weekly window scoped to a model or surface keeps its scope ("Weekly · Fable" →
- * "주간 · Fable"), and any other window keeps the source's label.
+ * A window's name in the hover card. The periods every Claude and Codex account has are named in
+ * Korean, a window scoped to a model, surface or feature reads as its period, then its scope
+ * ("Weekly · Fable" → "주간 · Fable", Codex's "Code review · Weekly" → "주간 · Code review"), so a
+ * name cut short keeps its period, and any other window keeps the source's label.
  */
 export function pinnedUsageWindowName(window: Pick<UsageWindow, "id" | "label">): string {
-  if (window.id === "five_hour") return "5시간";
-  if (window.id === "weekly") return "주간";
-  const scope = window.label.indexOf(" · ");
-  if (SCOPED_WEEKLY_WINDOW.test(window.id) && scope >= 0) {
-    return `주간 · ${window.label.slice(scope + " · ".length)}`;
+  const period = PERIOD_NAMES.get(window.id);
+  if (period) return period;
+  const { id, label } = window;
+  if (SCOPED_WEEKLY_WINDOW.test(id) && label.includes(SCOPE_SEPARATOR)) {
+    return `주간 · ${label.slice(label.indexOf(SCOPE_SEPARATOR) + SCOPE_SEPARATOR.length)}`;
   }
-  return window.label;
+  // Codex scopes a period as "<scope id>:<period id>", labelled "<scope> · <period>".
+  const scopedPeriod = id.includes(":")
+    ? PERIOD_NAMES.get(id.slice(id.lastIndexOf(":") + 1))
+    : null;
+  if (scopedPeriod && label.includes(SCOPE_SEPARATOR)) {
+    return `${scopedPeriod} · ${label.slice(0, label.lastIndexOf(SCOPE_SEPARATOR))}`;
+  }
+  return label;
 }
 
-/** "60% 사용" of the window, or "40% 남음" of it. */
-function pinnedUsagePercentLabel(percent: number, displayAs: UsageDisplayAs): string {
-  return `${formatPct(percent)} ${displayAs === "remaining" ? "남음" : "사용"}`;
+// Stands in for an account its source could not name, among others of its provider.
+const UNNAMED_ACCOUNT = "이름을 알 수 없는 계정";
+
+function pinnedUsageReset(iso: string | null | undefined, now: number): PinnedUsageReset | null {
+  const at = formatResetAt(iso, now);
+  const relative = formatResetIn(iso, now);
+  return at && relative ? { at, relative } : null;
 }
 
 function detailPinnedWindow(
@@ -168,8 +199,8 @@ function detailPinnedWindow(
     label: resetAt ? `${window.label} · 초기화 ${resetAt}` : window.label,
     detail: {
       name: raw ? pinnedUsageWindowName(raw) : window.shortLabel,
-      percentLabel: pinnedUsagePercentLabel(window.percent, displayAs),
-      reset: formatResetDetail(raw?.resetsAt, now),
+      percentMeaning: displayAs === "remaining" ? "남음" : "사용",
+      reset: pinnedUsageReset(raw?.resetsAt, now),
     },
   };
 }
@@ -212,5 +243,10 @@ export function resolveProviderPinnedUsage(
     source.windows.push(...windows);
     source.accounts.push({ key: account.key, label: entry.account.label ?? null, windows });
   }
-  return [...sources.values()];
+  const providers = [...sources.values()];
+  for (const provider of providers) {
+    if (provider.accounts.length < 2) continue;
+    for (const account of provider.accounts) account.label ??= UNNAMED_ACCOUNT;
+  }
+  return providers;
 }
