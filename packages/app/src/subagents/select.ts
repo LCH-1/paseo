@@ -1,10 +1,51 @@
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { usePendingArchiveAgentIds } from "@/hooks/use-archive-agent";
 import equal from "fast-deep-equal";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { useSessionStore, type Agent } from "@/stores/session-store";
 import { refreshProviderSubagents, useProviderSubagentStore } from "./provider-store";
 import type { ProviderSubagentDescriptorPayload } from "@getpaseo/protocol/messages";
+import { getRunningAgentFamilies } from "./activity";
+
+/** Parent turns can finish before background provider tasks; tabs follow both stores. */
+export function useAgentFamilyRunning(serverId: string, parentAgentId: string): boolean {
+  const read = useCallback(
+    () =>
+      getRunningAgentFamilies(
+        useSessionStore.getState().sessions[serverId]?.agents,
+        useProviderSubagentStore.getState().descriptors,
+        serverId,
+      ).has(parentAgentId),
+    [serverId, parentAgentId],
+  );
+  const subscribe = useCallback((listener: () => void) => {
+    const session = useSessionStore.subscribe(listener);
+    const provider = useProviderSubagentStore.subscribe(listener);
+    return () => {
+      session();
+      provider();
+    };
+  }, []);
+  const running = useSyncExternalStore(subscribe, read, read);
+  const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
+  const needsProviderList = useSessionStore((state) => {
+    const session = state.sessions[serverId];
+    const agent = session?.agents.get(parentAgentId);
+    return (
+      session?.serverInfo?.features?.providerSubagents === true &&
+      !!agent &&
+      !agent.archivedAt &&
+      agent.turn.phase !== "open" &&
+      !!agent.workspaceId &&
+      session.workspaces.get(agent.workspaceId)?.status === "running"
+    );
+  });
+  useEffect(() => {
+    if (!client || !needsProviderList) return;
+    void refreshProviderSubagents(client, serverId, parentAgentId).catch(() => undefined);
+  }, [client, needsProviderList, serverId, parentAgentId]);
+  return running;
+}
 
 export interface PaseoSubagentRow {
   kind: "paseo";

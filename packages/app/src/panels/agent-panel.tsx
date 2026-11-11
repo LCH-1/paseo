@@ -97,6 +97,7 @@ import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 import { openWorkspaceChanges } from "@/workspace-tabs/open-supporting-view";
 import { useSettings } from "@/hooks/use-settings";
+import { useAgentFamilyRunning } from "@/subagents/select";
 import type { Theme } from "@/styles/theme";
 import type { PendingPermission } from "@/types/shared";
 import type { StreamItem, TodoEntry } from "@/types/stream";
@@ -357,6 +358,13 @@ function useAgentPanelDescriptor(
     }),
   );
   const provider = descriptorState.provider;
+  const familyRunning = useAgentFamilyRunning(context.serverId, target.agentId);
+  let effectiveStatus = descriptorState.status;
+  if (effectiveStatus !== "error" && (descriptorState.isTurnActive || familyRunning)) {
+    effectiveStatus = "running";
+  } else if (effectiveStatus === "running") {
+    effectiveStatus = "idle";
+  }
   const defaultLabel = resolveWorkspaceAgentTabLabel(descriptorState.title);
   const resolvedLabel = useAgentTabTitle({
     serverId: context.serverId,
@@ -373,9 +381,9 @@ function useAgentPanelDescriptor(
       tooltip: defaultLabel ?? `${formatProviderLabel(provider)} agent`,
       titleState: defaultLabel ? "ready" : "loading",
       icon,
-      statusBucket: descriptorState.status
+      statusBucket: effectiveStatus
         ? deriveSidebarStateBucket({
-            status: descriptorState.isTurnActive ? "running" : descriptorState.status,
+            status: effectiveStatus,
             pendingPermissionCount: descriptorState.pendingPermissionCount,
             requiresAttention: descriptorState.requiresAttention,
             attentionReason: descriptorState.attentionReason,

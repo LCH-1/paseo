@@ -8,6 +8,7 @@ import {
 import { createWorkspaceAgentVisibilitySelector } from "@/workspace-tabs/agent-visibility";
 import { useProviderSubagentStore } from "./provider-store";
 import { useSessionStore, type Agent } from "@/stores/session-store";
+import { getRunningAgentFamilies } from "./activity";
 
 const SERVER_ID = "server-1";
 const AGENT_TIMESTAMP = new Date("2026-03-08T10:00:00.000Z");
@@ -62,6 +63,121 @@ function setAgents(agents: Agent[]): void {
     .getState()
     .setAgents(SERVER_ID, new Map(agents.map((agent) => [agent.id, agent])));
 }
+
+describe("running agent families", () => {
+  const open: Agent["turn"] = {
+    phase: "open",
+    turnId: "t",
+    startedAt: null,
+    cancellationRequestId: null,
+  };
+  it("keeps idle parents running for native tasks, including nested provider children", () => {
+    const agents = new Map([
+      ["parent", makeAgent({ id: "parent" })],
+      ["sibling", makeAgent({ id: "sibling" })],
+    ]);
+    const store = useProviderSubagentStore.getState();
+    store.applyUpdate(SERVER_ID, {
+      kind: "upsert",
+      subagent: {
+        id: "nested",
+        parentAgentId: "parent",
+        parentSubagentId: "finished-parent-task",
+        provider: "claude",
+        title: "Review",
+        description: null,
+        status: "running",
+        createdAt: AGENT_TIMESTAMP.toISOString(),
+        updatedAt: AGENT_TIMESTAMP.toISOString(),
+        toolCallId: null,
+      },
+    });
+    const descriptors = useProviderSubagentStore.getState().descriptors;
+    const running = getRunningAgentFamilies(agents, descriptors, SERVER_ID);
+    expect(running.has("parent")).toBe(true);
+    expect(running.has("sibling")).toBe(false);
+    expect(getRunningAgentFamilies(agents, descriptors, SERVER_ID)).toBe(running);
+    expect(getRunningAgentFamilies(agents, descriptors, "other-host").size).toBe(0);
+    store.applyUpdate(SERVER_ID, {
+      kind: "upsert",
+      subagent: { ...descriptors.values().next().value!, status: "completed" },
+    });
+    expect(
+      getRunningAgentFamilies(
+        agents,
+        useProviderSubagentStore.getState().descriptors,
+        SERVER_ID,
+      ).has("parent"),
+    ).toBe(false);
+  });
+  it("follows managed descendants but not archived or independent-workspace branches", () => {
+    const agents = new Map([
+      ["root", makeAgent({ id: "root", workspaceId: "one" })],
+      ["child", makeAgent({ id: "child", parentAgentId: "root", workspaceId: "one" })],
+      [
+        "nested",
+        makeAgent({ id: "nested", parentAgentId: "child", workspaceId: "one", turn: open }),
+      ],
+      ["other-root", makeAgent({ id: "other-root", workspaceId: "two" })],
+      [
+        "separate",
+        makeAgent({
+          id: "separate",
+          parentAgentId: "other-root",
+          workspaceId: "three",
+          turn: open,
+        }),
+      ],
+      ["archived", makeAgent({ id: "archived", turn: open, archivedAt: AGENT_TIMESTAMP })],
+    ]);
+    const descriptors = useProviderSubagentStore.getState().descriptors;
+    const running = getRunningAgentFamilies(agents, descriptors, SERVER_ID);
+    expect([...running].sort()).toEqual(["child", "nested", "root", "separate"]);
+    const ended = new Map(agents);
+    ended.set(
+      "nested",
+      makeAgent({
+        ...agents.get("nested")!,
+        turn: { phase: "idle", cancellationRequestId: null },
+        status: "running",
+      }),
+    );
+    expect(getRunningAgentFamilies(ended, descriptors, SERVER_ID).has("root")).toBe(false);
+  });
+  it("does not retain running state after provider tasks are removed", () => {
+    const agents = new Map([["parent", makeAgent({ id: "parent" })]]),
+      store = useProviderSubagentStore.getState();
+    store.applyUpdate(SERVER_ID, {
+      kind: "upsert",
+      subagent: {
+        id: "child",
+        parentAgentId: "parent",
+        provider: "codex",
+        title: null,
+        description: null,
+        status: "running",
+        createdAt: AGENT_TIMESTAMP.toISOString(),
+        updatedAt: AGENT_TIMESTAMP.toISOString(),
+        toolCallId: null,
+      },
+    });
+    expect(
+      getRunningAgentFamilies(
+        agents,
+        useProviderSubagentStore.getState().descriptors,
+        SERVER_ID,
+      ).has("parent"),
+    ).toBe(true);
+    store.applyUpdate(SERVER_ID, { kind: "remove", parentAgentId: "parent", subagentId: "child" });
+    expect(
+      getRunningAgentFamilies(
+        agents,
+        useProviderSubagentStore.getState().descriptors,
+        SERVER_ID,
+      ).has("parent"),
+    ).toBe(false);
+  });
+});
 
 afterEach(() => {
   useSessionStore.getState().clearSession(SERVER_ID);

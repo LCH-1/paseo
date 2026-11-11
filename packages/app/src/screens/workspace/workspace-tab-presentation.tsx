@@ -90,14 +90,17 @@ function WorkspaceTabPresentationResolverInner({
     serverId,
     tab.target.kind === "agent" ? tab.target.agentId : null,
   );
+  const displayedCompletedAt = descriptor.statusBucket === "running" ? null : completedAt;
 
   const presentation = useMemo(
     () => ({
       key: tab.key,
       kind: tab.kind,
       label: descriptor.label,
-      titleLines: descriptor.titleLines ? { ...descriptor.titleLines, completedAt } : undefined,
-      completedAt,
+      titleLines: descriptor.titleLines
+        ? { ...descriptor.titleLines, completedAt: displayedCompletedAt }
+        : undefined,
+      completedAt: displayedCompletedAt,
       subtitle: descriptor.subtitle,
       tooltip: descriptor.tooltip,
       modified: attributes.modified,
@@ -110,7 +113,7 @@ function WorkspaceTabPresentationResolverInner({
       descriptor.icon,
       descriptor.label,
       descriptor.titleLines,
-      completedAt,
+      displayedCompletedAt,
       descriptor.tooltip,
       descriptor.statusBucket,
       descriptor.subtitle,
