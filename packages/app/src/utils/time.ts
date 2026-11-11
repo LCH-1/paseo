@@ -90,7 +90,8 @@ export function formatCompactTimeAgo(date: Date, now: Date = new Date()): string
 export function describeCompletionTimeAgo(date: Date, now: Date = new Date()): RelativeTimeLabel {
   const elapsed = Math.max(0, now.getTime() - date.getTime());
   if (elapsed < MINUTE_MS) return { label: `${Math.floor(elapsed / 1000)}s`, resolution: "second" };
-  if (elapsed < HOUR_MS) return { label: `${Math.floor(elapsed / MINUTE_MS)}m`, resolution: "minute" };
+  if (elapsed < HOUR_MS)
+    return { label: `${Math.floor(elapsed / MINUTE_MS)}m`, resolution: "minute" };
   if (elapsed < DAY_MS) return { label: `${Math.floor(elapsed / HOUR_MS)}h`, resolution: "hour" };
   return { label: `${Math.floor(elapsed / DAY_MS)}d`, resolution: "day" };
 }
@@ -115,27 +116,31 @@ function localCalendarDaysBetween(earlier: Date, later: Date): number {
   return Math.round((startOfDay(later).getTime() - startOfDay(earlier).getTime()) / DAY_MS);
 }
 
-// Cached Intl formatter. Explicitly carrying `hourCycle` from the resolved
-// options is what makes the runtime respect the user's OS-level 12h/24h
-// preference rather than the locale's default cycle.
+let cachedHourCycle: Intl.DateTimeFormatOptions["hourCycle"] | null = null;
+
+/**
+ * How a clock time on screen reads: the hour always two digits and no seconds — "01:05 PM",
+ * "오후 01:05", "13:05". Explicitly carrying `hourCycle` from the resolved options is what makes
+ * the runtime respect the user's OS-level 12h/24h preference rather than the locale's default
+ * cycle, including when the caller formats in a locale of its own.
+ */
+export function clockTimeOptions(): Intl.DateTimeFormatOptions {
+  cachedHourCycle ??= new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).resolvedOptions().hourCycle;
+  return { hour: "2-digit", minute: "2-digit", hourCycle: cachedHourCycle ?? undefined };
+}
+
 let cachedTimeFormatter: Intl.DateTimeFormat | null = null;
 function getTimeFormatter(): Intl.DateTimeFormat {
-  if (cachedTimeFormatter) return cachedTimeFormatter;
-  const resolved = new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  }).resolvedOptions();
-  cachedTimeFormatter = new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    hourCycle: resolved.hourCycle,
-  });
+  cachedTimeFormatter ??= new Intl.DateTimeFormat(undefined, clockTimeOptions());
   return cachedTimeFormatter;
 }
 
 /**
  * Format a chat-message timestamp for hover-revealed UI.
- * - Same day: "10:11 PM" or "22:11" depending on user preference
+ * - Same day: "01:05 PM" or "13:05" depending on user preference
  * - The previous 6 calendar days: "Wednesday 10:11 PM"
  * - Older, including today's weekday last week: "14 May 2026, 10:11 PM"
  */

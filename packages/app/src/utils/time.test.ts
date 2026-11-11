@@ -117,12 +117,27 @@ describe("formatDuration", () => {
 });
 
 describe("formatMessageTimestamp", () => {
+  // Weekday and month names are the machine's language; read them the same way.
+  const weekday = (date: Date) => date.toLocaleDateString(undefined, { weekday: "long" });
+  const month = (date: Date) => date.toLocaleDateString(undefined, { month: "short" });
+
   it("shows only time for same-day timestamps", () => {
     const now = new Date(2026, 4, 14, 17, 30);
     const date = new Date(2026, 4, 14, 12, 23);
     const formatted = formatMessageTimestamp(date, now);
     expect(formatted).toMatch(/12:23/);
-    expect(formatted).not.toMatch(/Thursday|Wednesday/);
+    expect(formatted).not.toContain(weekday(date));
+  });
+
+  it("writes the hour in two digits and never the seconds", () => {
+    const now = new Date(2026, 4, 14, 17, 30);
+    expect(formatMessageTimestamp(new Date(2026, 4, 14, 9, 5, 42), now)).toMatch(
+      /(^|\D)09:05(?!:)/,
+    );
+    expect(formatMessageTimestamp(new Date(2026, 4, 14, 13, 5, 42), now)).toMatch(
+      /(^|\D)(01|13):05(?!:)/,
+    );
+    expect(formatMessageTimestamp(new Date(2026, 4, 14, 3, 0), now)).toMatch(/(^|\D)03:00/);
   });
 
   it("includes weekday for timestamps within the last 6 days", () => {
@@ -130,8 +145,8 @@ describe("formatMessageTimestamp", () => {
     const now = new Date(2026, 4, 14, 17, 30);
     const date = new Date(2026, 4, 11, 22, 12);
     const formatted = formatMessageTimestamp(date, now);
-    expect(formatted).toMatch(/Monday/);
-    expect(formatted).toMatch(/10:12 PM|22:12/);
+    expect(formatted).toContain(weekday(date));
+    expect(formatted).toMatch(/10:12|22:12/);
   });
 
   it("shows the full date for last week's same weekday, even under seven days ago", () => {
@@ -140,16 +155,17 @@ describe("formatMessageTimestamp", () => {
     const now = new Date(2026, 8, 25, 11, 47);
     const date = new Date(2026, 8, 18, 12, 2);
     const formatted = formatMessageTimestamp(date, now);
-    expect(formatted).toMatch(/Sep|September/);
+    expect(formatted).toContain(month(date));
     expect(formatted).toMatch(/18/);
-    expect(formatted).not.toMatch(/Friday/);
+    expect(formatted).not.toContain(weekday(date));
   });
 
   it("includes full date for older timestamps", () => {
     const now = new Date(2026, 4, 14, 17, 30);
     const date = new Date(2026, 3, 1, 9, 5);
     const formatted = formatMessageTimestamp(date, now);
-    expect(formatted).toMatch(/Apr|April/);
+    expect(formatted).toContain(month(date));
     expect(formatted).toMatch(/2026/);
+    expect(formatted).toMatch(/(^|\D)09:05/);
   });
 });
