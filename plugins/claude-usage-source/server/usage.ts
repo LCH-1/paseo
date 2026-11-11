@@ -1,5 +1,5 @@
 import { discoverOmp, piAuthPath, readHarness, type StoreLookup } from "./stores.js";
-import { configuredClaudeProviders } from "./claude-provider-config.js";
+import { claudeProviders, configuredClaudeProviders } from "./claude-provider-config.js";
 import { readWindowsCredentials } from "./windows-credentials.js";
 import type { UsageInput } from "../shared/input.js";
 import { execFile } from "node:child_process";
@@ -401,10 +401,12 @@ export async function discover(
       env: scope.env,
       home: scope.env.HOME || scope.env.USERPROFILE || homedir(),
     };
-  const candidates =
-    scope.kind === "global" ? await globalRoutes(lookup) : await sessionRoutes(scope, lookup);
+  const routes =
+    scope.kind === "global"
+      ? await globalRoutes(lookup)
+      : { inputs: await sessionRoutes(scope, lookup), unclaimed: null };
   const accounts: UsageAccount[] = [];
-  for (const input of candidates) {
+  for (const input of routes.inputs) {
     const harness = {
       pi: "Pi",
       omp: "OMP",
@@ -412,16 +414,18 @@ export async function discover(
       keychain: "Claude",
       "windows-credman": "Claude",
     }[input.route.store];
-    const fallback = { key: hashAccountKey(JSON.stringify(input.route)), harness, input };
+    const fallback = { key: hashAccountKey(routeKey(input)), harness, input };
+    // A login no provider signs in through is nobody's account until a login is read from it.
+    const reportsBrokenLogin = routeKey(input) !== routes.unclaimed;
     let credentials;
     try {
       credentials = await resolveClaudeCredentials(input, lookup);
     } catch {
-      accounts.push(fallback);
+      if (reportsBrokenLogin) accounts.push(fallback);
       continue;
     }
     if (!credentials) {
-      if (input.route.store === "windows-credman") accounts.push(fallback);
+      if (reportsBrokenLogin && input.route.store === "windows-credman") accounts.push(fallback);
       continue;
     }
     if (credentials.expires !== undefined && credentials.expires <= (lookup.now ?? Date.now)()) {
@@ -491,24 +495,45 @@ async function claudeRoute(lookup: ClaudeCredentialLookup): Promise<UsageInput> 
     : { route: { store: "claude", path: claudeCredentialPath(lookup) } };
 }
 
-async function globalRoutes(lookup: ClaudeCredentialLookup): Promise<UsageInput[]> {
-  const providers = await configuredClaudeProviders(lookup);
+interface GlobalRoutes {
+  inputs: UsageInput[];
+  /** Key of the daemon's own login when no provider signs in through it. */
+  unclaimed: string | null;
+}
+
+function routeKey(input: UsageInput): string {
+  return JSON.stringify(input.route);
+}
+
+async function globalRoutes(lookup: ClaudeCredentialLookup): Promise<GlobalRoutes> {
+  const { configured, builtinUnconfigured } = await claudeProviders(lookup);
   const env = lookup.env ?? process.env;
+  const daemonLogin = await claudeRoute(lookup);
+  const providerLogins = await Promise.all(
+    configured.map(async (provider) => {
+      const providerEnv = { ...env, ...provider.env };
+      const login = await claudeRoute({
+        ...lookup,
+        env: providerEnv,
+        claudeHome: provider.env.CLAUDE_CONFIG_DIR ?? lookup.claudeHome,
+      });
+      return { login, signsIn: usesClaudeLogin(providerEnv) };
+    }),
+  );
+  const daemonKey = routeKey(daemonLogin);
+  const claimed =
+    (builtinUnconfigured && usesClaudeLogin(env)) ||
+    providerLogins.some(({ login, signsIn }) => signsIn && routeKey(login) === daemonKey);
   const routes: UsageInput[] = [
-    await claudeRoute(lookup),
-    ...(await Promise.all(
-      providers.map((provider) =>
-        claudeRoute({
-          ...lookup,
-          env: { ...env, ...provider.env },
-          claudeHome: provider.env.CLAUDE_CONFIG_DIR ?? lookup.claudeHome,
-        }),
-      ),
-    )),
+    daemonLogin,
+    ...providerLogins.map(({ login }) => login),
     { route: { store: "pi", path: piAuthPath(lookup) } },
     ...discoverOmp(lookup).map((route) => ({ route })),
   ];
-  return [...new Map(routes.map((input) => [JSON.stringify(input.route), input])).values()];
+  return {
+    inputs: [...new Map(routes.map((input) => [routeKey(input), input])).values()],
+    unclaimed: claimed ? null : daemonKey,
+  };
 }
 
 async function sessionRoutes(
@@ -519,18 +544,20 @@ async function sessionRoutes(
     scope.provider === "claude" ||
     (await configuredClaudeProviders(lookup)).some((provider) => provider.id === scope.provider)
   ) {
-    const env = scope.env;
-    const foreign =
-      env.ANTHROPIC_BASE_URL &&
-      env.ANTHROPIC_BASE_URL.replace(/\/+$/, "") !== "https://api.anthropic.com";
-    if (enabled(env.CLAUDE_CODE_USE_BEDROCK) || enabled(env.CLAUDE_CODE_USE_VERTEX) || foreign)
-      return [];
-    return [await claudeRoute(lookup)];
+    return usesClaudeLogin(scope.env) ? [await claudeRoute(lookup)] : [];
   }
   if (!scope.model?.startsWith("anthropic/")) return [];
   if (scope.provider === "pi") return [{ route: { store: "pi", path: piAuthPath(lookup) } }];
   if (scope.provider === "omp") return discoverOmp(lookup).map((route) => ({ route }));
   return [];
+}
+
+/** Bedrock, Vertex and third-party endpoints authenticate without a Claude login. */
+function usesClaudeLogin(env: NodeJS.ProcessEnv): boolean {
+  const foreign =
+    env.ANTHROPIC_BASE_URL &&
+    env.ANTHROPIC_BASE_URL.replace(/\/+$/, "") !== "https://api.anthropic.com";
+  return !(enabled(env.CLAUDE_CODE_USE_BEDROCK) || enabled(env.CLAUDE_CODE_USE_VERTEX) || foreign);
 }
 
 function enabled(value: string | undefined): boolean {

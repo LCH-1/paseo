@@ -10,7 +10,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { hashAccountKey, type UsageScope } from "@getpaseo/plugin/server/usage";
 
-export default function contribute(server: PluginServerContext) {
+export default function contribute(
+  server: Pick<PluginServerContext, "handle" | "registerUsageSource">,
+) {
   server.handle(
     defineRpc({
       name: "claude.profiles.read.request",

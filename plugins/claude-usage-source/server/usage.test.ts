@@ -10,6 +10,7 @@ import { hashAccountKey, type UsageReport } from "@getpaseo/plugin/server/usage"
 
 vi.mock("./windows-credentials.js", () => ({ readWindowsCredentials: vi.fn(async () => null) }));
 vi.mock("./claude-provider-config.js", () => ({
+  claudeProviders: vi.fn(async () => ({ configured: [], builtinUnconfigured: true })),
   configuredClaudeProviders: vi.fn(async () => []),
 }));
 

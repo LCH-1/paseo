@@ -86,7 +86,7 @@ describe("readClaudeKeychainCredentials", () => {
   });
 });
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { discover, fetchUsage } from "./usage.js";
@@ -167,6 +167,63 @@ describe("Claude credential routes", () => {
       expect(fetchApi).not.toHaveBeenCalled();
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /** A home whose only Claude provider signs in through its own config directory. */
+  function homeWithOwnProviderLogin() {
+    const home = mkdtempSync(join(tmpdir(), "claude-daemon-login-"));
+    mkdirSync(join(home, ".paseo"));
+    writeFileSync(
+      join(home, ".paseo", "config.json"),
+      JSON.stringify({
+        agents: { providers: { claude: { env: { CLAUDE_CONFIG_DIR: join(home, "profile") } } } },
+      }),
+    );
+    return home;
+  }
+
+  it("lists the daemon's Keychain login that no provider uses exactly while it holds a login", async () => {
+    const home = homeWithOwnProviderLogin();
+    try {
+      let held: unknown = { claudeAiOauth: { accessToken: "fixture-daemon-keychain" } };
+      const lookup = {
+        home,
+        env: { USER: "fixture" },
+        platform: "darwin" as const,
+        readKeychainCredentials: async (service: string) => (service === SERVICE ? held : null),
+      };
+      const fetchApi = fixtureFetch("fixture-daemon-keychain");
+      const listed = await discover({ kind: "global" }, lookup, fetchApi);
+      expect(listed.map((account) => account.input)).toEqual([
+        { route: { store: "keychain", service: SERVICE, account: "fixture" } },
+      ]);
+      held = null;
+      expect(await discover({ kind: "global" }, lookup, fetchApi)).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("lists the daemon's credential file that no provider uses exactly while it holds a login", async () => {
+    const home = homeWithOwnProviderLogin();
+    try {
+      const file = join(home, ".claude", ".credentials.json");
+      mkdirSync(join(home, ".claude"));
+      writeFileSync(
+        file,
+        JSON.stringify({ claudeAiOauth: { accessToken: "fixture-daemon-file" } }),
+      );
+      const lookup = { home, env: {}, platform: "linux" as const };
+      const fetchApi = fixtureFetch("fixture-daemon-file");
+      const listed = await discover({ kind: "global" }, lookup, fetchApi);
+      expect(listed.map((account) => account.input)).toEqual([
+        { route: { store: "claude", path: file } },
+      ]);
+      rmSync(file);
+      expect(await discover({ kind: "global" }, lookup, fetchApi)).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   });
 });

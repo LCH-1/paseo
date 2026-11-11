@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -384,5 +384,211 @@ describe("Claude Windows credentials", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("the daemon's own Windows login", () => {
+  const DAEMON_LOGIN = "Claude Code-credentials";
+  const FIRST = "C:/fixture/provider-profiles/first";
+  const SECOND = "C:/fixture/provider-profiles/second";
+  // What the CLI keeps next to a login, and all that is left once the login itself is gone.
+  const NO_LOGIN = { mcpOAuth: { "fixture-server": { accessToken: "isolated-mcp-token" } } };
+  const CLEARED = { status: "error", error: "Claude login store no longer exists" };
+  // Both providers sign in through their own config directory, so neither uses the daemon's login.
+  const OWN_LOGINS = {
+    claude: { env: { CLAUDE_CONFIG_DIR: FIRST } },
+    second: { extends: "claude", env: { CLAUDE_CONFIG_DIR: SECOND } },
+  };
+  const homes: string[] = [];
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  });
+
+  function serviceFor(configDir: string) {
+    return `${DAEMON_LOGIN}-${hashAccountKey(configDir.normalize("NFC")).slice(0, 8)}`;
+  }
+
+  function login(accessToken: string) {
+    return { claudeAiOauth: { accessToken, expiresAt: Date.now() + 600_000 } };
+  }
+
+  /** A Windows host: the providers in its Paseo config and what each credential service holds. */
+  function windowsHost(
+    providers: Record<string, unknown> | null,
+    store: Record<string, unknown>,
+    env: Record<string, string> = {},
+  ) {
+    const home = mkdtempSync(join(tmpdir(), "claude-daemon-login-"));
+    homes.push(home);
+    if (providers) {
+      mkdirSync(join(home, ".paseo"));
+      writeFileSync(join(home, ".paseo", "config.json"), JSON.stringify({ agents: { providers } }));
+    }
+    return {
+      home,
+      env: { USERPROFILE: home, ...env },
+      platform: "win32" as const,
+      readWindowsCredentials: async (service: string) => {
+        const held = store[service];
+        if (held instanceof Error) throw held;
+        return held ?? null;
+      },
+    };
+  }
+
+  /** Each fixture token is its own account, labelled by the token. */
+  async function profileApi(_url: RequestInfo | URL, init?: RequestInit) {
+    const token = new Headers(init?.headers).get("Authorization")?.replace("Bearer ", "");
+    return Response.json({
+      account: { uuid: token, email: `${token}@example.test` },
+      organization: { uuid: "org" },
+    });
+  }
+
+  async function listedServices(lookup: ReturnType<typeof windowsHost>) {
+    const accounts = await discover({ kind: "global" }, lookup, profileApi);
+    return accounts.map((account) => {
+      const { route } = inputSchema.parse(account.input);
+      return route.store === "windows-credman" ? route.service : route.store;
+    });
+  }
+
+  it.each([
+    ["every provider has its own config directory", OWN_LOGINS],
+    [
+      "the built-in provider is disabled",
+      {
+        claude: { enabled: false },
+        first: { extends: "claude", env: { CLAUDE_CONFIG_DIR: FIRST } },
+        second: { extends: "claude", env: { CLAUDE_CONFIG_DIR: SECOND } },
+      },
+    ],
+  ])(
+    "is not an account while it is empty and no provider uses it: %s",
+    async (_case, providers) => {
+      const lookup = windowsHost(providers, {
+        [DAEMON_LOGIN]: NO_LOGIN,
+        [serviceFor(FIRST)]: login("isolated-first"),
+        [serviceFor(SECOND)]: login("isolated-second"),
+      });
+      expect(await listedServices(lookup)).toEqual([serviceFor(FIRST), serviceFor(SECOND)]);
+    },
+  );
+
+  it("is not an account while it cannot be read and no provider uses it", async () => {
+    const lookup = windowsHost(OWN_LOGINS, {
+      [DAEMON_LOGIN]: new Error("Incomplete split Claude Windows credentials"),
+      [serviceFor(FIRST)]: login("isolated-first"),
+      [serviceFor(SECOND)]: login("isolated-second"),
+    });
+    expect(await listedServices(lookup)).toEqual([serviceFor(FIRST), serviceFor(SECOND)]);
+  });
+
+  it.each([
+    ["no config file", null, [DAEMON_LOGIN]],
+    [
+      "no entry for the built-in provider",
+      { second: { extends: "claude", env: { CLAUDE_CONFIG_DIR: SECOND } } },
+      [DAEMON_LOGIN, serviceFor(SECOND)],
+    ],
+    [
+      "a built-in provider entry without a config directory",
+      { claude: {}, second: { extends: "claude", env: { CLAUDE_CONFIG_DIR: SECOND } } },
+      [DAEMON_LOGIN, serviceFor(SECOND)],
+    ],
+    [
+      "a derived provider without a config directory",
+      {
+        claude: { enabled: false },
+        work: { extends: "claude" },
+        second: { extends: "claude", env: { CLAUDE_CONFIG_DIR: SECOND } },
+      },
+      [DAEMON_LOGIN, serviceFor(SECOND)],
+    ],
+    [
+      "a provider whose secure storage stays on the daemon's login",
+      { claude: { env: { CLAUDE_CONFIG_DIR: FIRST, CLAUDE_SECURESTORAGE_CONFIG_DIR: "" } } },
+      [DAEMON_LOGIN],
+    ],
+  ])(
+    "stays a reported account while a provider signs in through it: %s",
+    async (_case, providers, listed) => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const lookup = windowsHost(providers, {
+        [DAEMON_LOGIN]: NO_LOGIN,
+        [serviceFor(SECOND)]: login("isolated-second"),
+      });
+      expect(await listedServices(lookup)).toEqual(listed);
+      expect(
+        await fetchUsage(
+          { route: { store: "windows-credman", service: DAEMON_LOGIN } },
+          profileApi,
+          lookup,
+        ),
+      ).toEqual(CLEARED);
+    },
+  );
+
+  it.each([
+    ["a login", login("isolated-daemon")],
+    ["an expired login", { claudeAiOauth: { accessToken: "isolated-expired", expiresAt: 0 } }],
+  ])("is an account while it holds %s, even when no provider uses it", async (_case, held) => {
+    const lookup = windowsHost(OWN_LOGINS, {
+      [DAEMON_LOGIN]: held,
+      [serviceFor(FIRST)]: login("isolated-first"),
+      [serviceFor(SECOND)]: login("isolated-second"),
+    });
+    expect(await listedServices(lookup)).toEqual([
+      DAEMON_LOGIN,
+      serviceFor(FIRST),
+      serviceFor(SECOND),
+    ]);
+  });
+
+  it("keeps reporting a provider's cleared login", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const lookup = windowsHost(OWN_LOGINS, {
+      [DAEMON_LOGIN]: NO_LOGIN,
+      [serviceFor(FIRST)]: login("isolated-first"),
+      [serviceFor(SECOND)]: { claudeAiOauth: { accessToken: "", refreshToken: "", expiresAt: 0 } },
+    });
+    expect(await listedServices(lookup)).toEqual([serviceFor(FIRST), serviceFor(SECOND)]);
+    expect(
+      await fetchUsage(
+        { route: { store: "windows-credman", service: serviceFor(SECOND) } },
+        profileApi,
+        lookup,
+      ),
+    ).toEqual(CLEARED);
+  });
+
+  it.each([
+    { ANTHROPIC_BASE_URL: "https://gateway.example.test/anthropic" },
+    { CLAUDE_CODE_USE_BEDROCK: "1" },
+    { CLAUDE_CODE_USE_VERTEX: "1" },
+  ])(
+    "is not kept listed by a provider that authenticates without a Claude login: %o",
+    async (env) => {
+      const lookup = windowsHost(
+        {
+          claude: { enabled: false },
+          gateway: { extends: "claude", env },
+          second: { extends: "claude", env: { CLAUDE_CONFIG_DIR: SECOND } },
+        },
+        { [DAEMON_LOGIN]: NO_LOGIN, [serviceFor(SECOND)]: login("isolated-second") },
+      );
+      expect(await listedServices(lookup)).toEqual([serviceFor(SECOND)]);
+    },
+  );
+
+  it("is not kept listed by a daemon that authenticates without a Claude login", async () => {
+    const lookup = windowsHost(
+      null,
+      { [DAEMON_LOGIN]: NO_LOGIN },
+      { ANTHROPIC_BASE_URL: "https://gateway.example.test/anthropic" },
+    );
+    expect(await listedServices(lookup)).toEqual([]);
   });
 });
