@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { getTransientTurnRetryDelay } from "./transient-turn-retry.js";
+import { getTransientTurnRetryDelay, isAccountLimitError } from "./transient-turn-retry.js";
 
 test.each([
   "Selected model is at capacity. Please try a different model.",
@@ -78,4 +78,44 @@ test.each([
       0,
     ),
   ).toBe(delay);
+});
+
+test.each([
+  "API error: 429 This request would exceed your account's rate limit. Please try again later · model not changed",
+  "rate_limit_error",
+  "Too many requests",
+  "You've hit your usage limit. Please try again later.",
+  "You've hit your limit · resets 3pm",
+  "You've reached your Fable limit · resets Nov 17, 3pm",
+  "You've reached your Opus 4.1 limit",
+  "Claude AI usage limit reached|1763359200",
+  "Weekly limit reached",
+  "insufficient_quota",
+])("recognises an account limit another account could avoid: %s", (message) => {
+  expect(isAccountLimitError(new Error(message))).toBe(true);
+});
+
+test("recognises an account limit from structured status and code fields", () => {
+  expect(isAccountLimitError(Object.assign(new Error("Request failed"), { status: 429 }))).toBe(
+    true,
+  );
+  expect(isAccountLimitError(Object.assign(new Error("Request failed"), { code: "429" }))).toBe(
+    true,
+  );
+  expect(
+    isAccountLimitError(new Error("Model change failed", { cause: new Error("rate_limit_error") })),
+  ).toBe(true);
+});
+
+test.each([
+  "Model not found: claude-fable-5-2",
+  "Selected model is at capacity. Please try a different model.",
+  "Network error",
+  "Unexpected token at position 429",
+  "context_length_exceeded",
+  "You've reached the context window limit",
+  "Authentication failed: rate limit check unavailable",
+  "Permission denied",
+])("leaves failures another account would not fix alone: %s", (message) => {
+  expect(isAccountLimitError(new Error(message))).toBe(false);
 });

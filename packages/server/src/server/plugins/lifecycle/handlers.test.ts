@@ -121,3 +121,33 @@ test("session-open hooks reject changes to session identity instead of silently 
     ),
   ).rejects.toThrow("agent.session_open hooks can only change env");
 });
+
+test("session-open hooks read the opening model but cannot change it", async () => {
+  const request = {
+    agentId: "agent",
+    workspaceId: "workspace",
+    provider: "claude",
+    cwd: "/project",
+    reason: "refresh" as const,
+    purpose: "interactive" as const,
+    env: {},
+    model: "claude-fable-5-2",
+  };
+  const seen: unknown[] = [];
+  const hooks = new PluginHookHandlers(() => {});
+  const remove = hooks.before("agent.session_open", ({ request: input }) => {
+    seen.push(input.model);
+    // A hook written before the field existed rebuilds the request without it.
+    const { model: _model, ...rest } = input;
+    return { ...rest, env: { ACCOUNT: "b" } };
+  });
+  await expect(
+    hooks.invoke("operation", "before", "agent.session_open", request, paseo),
+  ).resolves.toEqual({ ...request, env: { ACCOUNT: "b" } });
+  expect(seen).toEqual(["claude-fable-5-2"]);
+  remove();
+  hooks.before("agent.session_open", ({ request: input }) => ({ ...input, model: "other" }));
+  await expect(
+    hooks.invoke("operation", "before", "agent.session_open", request, paseo),
+  ).rejects.toThrow("agent.session_open hooks can only change env");
+});

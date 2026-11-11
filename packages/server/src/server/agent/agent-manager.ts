@@ -1,6 +1,7 @@
 import { projectTimelineRows } from "./timeline-projection.js";
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
+import { PluginHookRefusalError } from "../plugins/hook-refusal.js";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
@@ -84,6 +85,7 @@ import { parseAgentMessage, projectAgentMessage } from "./agent-messages/index.j
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import {
   getTransientTurnRetryDelay,
+  isAccountLimitError,
   TURN_RETRY_CONTINUATION,
   TURN_RETRY_LIMIT,
 } from "./transient-turn-retry.js";
@@ -1484,7 +1486,12 @@ export class AgentManager {
       config.cwd,
       { enabled: false },
       undefined,
-      { reason: "resume", purpose: "history", workspaceId: record.workspaceId ?? null },
+      {
+        reason: "resume",
+        purpose: "history",
+        workspaceId: record.workspaceId ?? null,
+        model: config.model ?? null,
+      },
     );
     const session = await client.resumeSession(handle, config, launchContext, {
       purpose: "history",
@@ -1638,7 +1645,12 @@ export class AgentManager {
       storedConfig.cwd,
       paseoToolPolicy,
       options?.env,
-      { reason: "create", purpose: "interactive", workspaceId: options.workspaceId ?? null },
+      {
+        reason: "create",
+        purpose: "interactive",
+        workspaceId: options.workspaceId ?? null,
+        model: storedConfig.model ?? null,
+      },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const createOptions = this.buildCreateSessionOptions(options);
@@ -1761,6 +1773,7 @@ export class AgentManager {
         reason: "resume",
         purpose,
         workspaceId: options?.workspaceId ?? null,
+        model: storedConfig.model ?? null,
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -1818,7 +1831,12 @@ export class AgentManager {
       storedConfig.cwd,
       paseoToolPolicy,
       undefined,
-      { reason: "import", purpose: "interactive", workspaceId: input.workspaceId },
+      {
+        reason: "import",
+        purpose: "interactive",
+        workspaceId: input.workspaceId,
+        model: storedConfig.model ?? null,
+      },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const imported = await client.importSession(
@@ -1915,7 +1933,12 @@ export class AgentManager {
       storedConfig.cwd,
       paseoToolPolicy,
       undefined,
-      { reason: "refresh", purpose: "interactive", workspaceId: existing.workspaceId },
+      {
+        reason: "refresh",
+        purpose: "interactive",
+        workspaceId: existing.workspaceId,
+        model: storedConfig.model ?? null,
+      },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     if (
@@ -2404,7 +2427,13 @@ export class AgentManager {
       typeof modelId === "string" && modelId.trim().length > 0 ? modelId : null;
 
     if (agent.session.setModel) {
-      await agent.session.setModel(normalizedModelId);
+      try {
+        await agent.session.setModel(normalizedModelId);
+      } catch (error) {
+        if (!isAccountLimitError(error)) throw error;
+        await this.reopenSessionWithModel(agent, normalizedModelId, error);
+        return;
+      }
     }
     await this.drainSessionEvents(agentId);
 
@@ -2415,6 +2444,45 @@ export class AgentManager {
     this.refreshSessionPersistence(agent);
     this.touchUpdatedAt(agent);
     this.emitState(agent);
+  }
+
+  /**
+   * The provider refused the switch on this account's limit. Opening the session again with the
+   * new model lets the session-open hooks place it on an account that still has room for it.
+   * A turn, a permission prompt, a scheduled retry or a startup still owns the session, so those
+   * keep the refusal instead of being cut off.
+   */
+  private async reopenSessionWithModel(
+    agent: ActiveManagedAgent,
+    model: string | null,
+    limitError: unknown,
+  ): Promise<void> {
+    const fields = { agentId: agent.id, fromModel: agent.config.model ?? null, toModel: model };
+    const message = "Model change hit an account limit";
+    if (
+      agent.lifecycle === "initializing" ||
+      this.isTurnInProgress(agent.id) ||
+      this.turnRetries.get(agent.id)?.timer
+    ) {
+      this.logger.info({ ...fields, result: "kept_busy_session" }, message);
+      throw limitError;
+    }
+    try {
+      await this.reloadAgentSession(
+        agent.id,
+        { model: model ?? undefined },
+        { activeTurn: "refuse" },
+      );
+    } catch (reloadError) {
+      const refused = reloadError instanceof PluginHookRefusalError;
+      const reason = reloadError instanceof Error ? reloadError.message : String(reloadError);
+      this.logger.info(
+        { ...fields, result: refused ? "reopen_refused" : "reopen_failed", reason },
+        message,
+      );
+      throw refused ? reloadError : limitError;
+    }
+    this.logger.info({ ...fields, result: "reopened" }, message);
   }
 
   async setAgentThinkingOption(
@@ -6100,6 +6168,7 @@ export class AgentManager {
     provider: string;
     cwd: string;
     workspaceId: string;
+    model?: string | null;
   }): Promise<void> {
     await this.pluginLifecycle?.before("agent.session_open", {
       ...input,
@@ -6108,6 +6177,7 @@ export class AgentManager {
       purpose: "interactive",
       env: {},
       preflight: true,
+      model: input.model ?? null,
     });
   }
 
@@ -6121,6 +6191,7 @@ export class AgentManager {
       reason: PluginSessionOpenRequest["reason"];
       purpose: PluginSessionOpenRequest["purpose"];
       workspaceId?: string | null;
+      model?: string | null;
     },
   ): Promise<AgentLaunchContext> {
     if (this.pluginLifecycle) {
@@ -6132,6 +6203,7 @@ export class AgentManager {
         reason: opening?.reason ?? "resume",
         purpose: opening?.purpose ?? "interactive",
         env: { ...env },
+        model: opening?.model ?? null,
       };
       const transformed = await this.pluginLifecycle.before("agent.session_open", request);
       env = transformed.env;

@@ -39,6 +39,11 @@ export interface PluginSessionOpenRequest {
   env: Record<string, string>;
   /** Asks whether a session could open now. No session follows, so hooks must not reserve anything. */
   preflight?: boolean;
+  /**
+   * The model the session opens with. Null when no model is chosen and the provider's default
+   * applies; absent from daemons that predate this field. Hooks read it and cannot change it.
+   */
+  model?: string | null;
 }
 
 export type PluginTurnOutcome =

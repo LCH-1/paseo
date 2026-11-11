@@ -11,6 +11,26 @@ const TRANSIENT_CODE =
 const TRANSIENT_MESSAGE =
   /(?:model|server|service).{0,60}(?:at capacity|overload|temporarily unavailable)|\boverloaded\b|\btoo many requests\b|\brate limit(?:ed| exceeded| reached| error)\b|\b(?:network|connection) (?:error|failed|reset|closed|timed out)\b|\brequest (?:timed out|timeout)\b|\bfetch failed\b|\bsocket hang up\b|\b(?:bad gateway|gateway timeout|service unavailable|internal server error)\b|\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN)\b/i;
 
+const ACCOUNT_LIMIT =
+  /\b(?:api error|error|status|http)\W{0,3}429\b|\brate[_ -]?limit|\btoo many requests\b|insufficient[_ ]quota|quota.{0,30}(?:exceeded|exhausted)|\b(?:usage|weekly|monthly|daily|hourly|session|model|5-hour|five-hour)[_ -]limit|\b(?:hit|reached) (?:your |the )?(?:[\w.-]+ ){0,3}limit\b/i;
+const NOT_ACCOUNT_LIMIT =
+  /context[_ ](?:length|window)|max(?:imum)?[_ ]tokens|prompt is too long|authentication|unauthori[sz]ed|invalid[_ ]api[_ ]key/i;
+
+/** The provider refused a request on the account's rate or usage limit; another account may have room. */
+export function isAccountLimitError(error: unknown): boolean {
+  const fields =
+    typeof error === "object" && error !== null ? (error as Record<string, unknown>) : {};
+  if ([fields.status, fields.statusCode, fields.code].some((value) => String(value) === "429")) {
+    return true;
+  }
+  const message = [
+    error instanceof Error ? error.message : String(error),
+    typeof fields.code === "string" ? fields.code : "",
+    fields.cause instanceof Error ? fields.cause.message : "",
+  ].join("\n");
+  return ACCOUNT_LIMIT.test(message) && !NOT_ACCOUNT_LIMIT.test(message);
+}
+
 export function getTransientTurnRetryDelay(
   event: Extract<AgentStreamEvent, { type: "turn_failed" }>,
   attempts: number,

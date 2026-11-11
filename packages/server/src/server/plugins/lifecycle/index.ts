@@ -40,6 +40,7 @@ const beforeSchemas = {
       purpose: z.enum(["interactive", "history"]),
       env: z.record(z.string(), z.string()),
       preflight: z.boolean().optional(),
+      model: z.string().nullable().optional(),
     })
     .strict(),
   "workspace.create": WorkspaceCreateRequestSchema.omit({ type: true, requestId: true }).strict(),
@@ -147,9 +148,14 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
       previous.cwd !== next.cwd ||
       previous.reason !== next.reason ||
       previous.purpose !== next.purpose ||
-      previous.preflight !== next.preflight
+      previous.preflight !== next.preflight ||
+      (next.model !== undefined && next.model !== previous.model)
     ) {
       throw new Error("agent.session_open hooks can only change env");
+    }
+    // A hook written before `model` existed may rebuild the request without it.
+    if (next.model === undefined && previous.model !== undefined) {
+      return { ...next, model: previous.model } as PluginBeforeRequests[Name];
     }
   }
   if (name === "agent.create") {
