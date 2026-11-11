@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { Keyboard, ScrollView, StyleSheet as RNStyleSheet, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
-import { useFetchQuery } from "@/data/query";
 import { Button } from "@/components/ui/button";
 import { StyleSheet } from "react-native-unistyles";
 import { ComposerDock } from "@/composer/dock";
@@ -30,10 +29,10 @@ import { useAgentControlCommandCenterActions } from "@/command-center/agent-cont
 import { encodeImages } from "@/utils/encode-images";
 import type { WorkspaceFileOpenRequest } from "@/workspace/file-open";
 import { shouldAutoFocusWorkspaceDraftComposer } from "@/screens/workspace/workspace-draft-pane-focus";
+import { useCreationFailureNotice } from "@/composer/draft/creation-failure-notice";
 import {
   buildDraftCreationKey,
   type CreationFailureNotice,
-  resolveCreationFailureNotice,
   shouldAllowEmptyDraftText,
   validateDraftSubmission,
 } from "@/composer/draft/workspace-tab-core";
@@ -274,37 +273,6 @@ function resolveDraftWorkingDirectory(input: {
     return input.initialSetup.cwd;
   }
   return input.workspaceDirectory;
-}
-
-// The daemon is the only owner of this failure: the draft that hit it may be long gone.
-function useCreationFailureNotice(input: {
-  serverId: string;
-  workspaceId: string;
-  client: DaemonClient | null;
-  isConnected: boolean;
-  provider: string | null;
-  hasPendingCreation: boolean;
-  isSubmitting: boolean;
-  formErrorMessage: string | null | undefined;
-}): CreationFailureNotice | null {
-  const { serverId, workspaceId, client, isConnected, provider, hasPendingCreation } = input;
-  const query = useFetchQuery({
-    queryKey: ["creationFailure", serverId, workspaceId, provider],
-    dataShape: "value",
-    staleTimeMs: 0,
-    enabled: Boolean(client && isConnected && !hasPendingCreation),
-    retry: false,
-    // Only a recorded failure is worth re-evaluating; accounts recover without any app event.
-    refetchInterval: (current) => (current.state.data ? 60_000 : false),
-    refetchOnWindowFocus: true,
-    queryFn: async () =>
-      client ? client.findCreationFailure(workspaceId, provider ?? undefined) : null,
-  });
-  return resolveCreationFailureNotice({
-    failure: query.data,
-    isSubmitting: input.isSubmitting,
-    formErrorMessage: input.formErrorMessage,
-  });
 }
 
 function CreationFailureCard({
@@ -685,6 +653,8 @@ export function WorkspaceDraftAgentTab({
     client,
     isConnected,
     provider: draftProvider,
+    model: composerState.effectiveModelId,
+    isModelLoading: composerState.isModelLoading,
     hasPendingCreation: Boolean(pendingAutoSubmit || pendingCreateAttempt),
     isSubmitting,
     formErrorMessage,

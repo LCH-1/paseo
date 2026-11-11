@@ -815,6 +815,7 @@ interface SessionForTestOptions {
     getProjectSlug?: ReturnType<typeof vi.fn>;
   };
   workspaceRegistry?: { get: ReturnType<typeof vi.fn> };
+  creationService?: SessionOptions["creationService"];
   projectRegistry?: Partial<SessionOptions["projectRegistry"]>;
   terminalManager?: SessionOptions["terminalManager"];
   serviceProxy?: SessionOptions["serviceProxy"];
@@ -874,7 +875,7 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
 
   const sessionOptions: SessionOptions = {
     messageReceipts: createMessageReceiptsStub(),
-    creationService: createTestCreationService(),
+    creationService: options.creationService ?? createTestCreationService(),
     clientId: options.clientId ?? "test-client",
     clientType: options.clientType,
     onMessage: (message) => messages.push(message),
@@ -2440,6 +2441,70 @@ describe("project config RPC authorization", () => {
         },
       },
     ]);
+  });
+});
+
+describe("creation failure lookup", () => {
+  const FABLE_REFUSAL = "Every account has used up its Fable limit";
+
+  async function lookUpCreationFailure(asked: { provider?: string; model?: string }) {
+    const messages: SessionOutboundMessage[] = [];
+    // Stands for a session-open hook that refuses one model and accepts the others.
+    const preflightSessionOpen = vi.fn(async (opening: { model?: string | null }) => {
+      if (opening.model === "claude-fable-5-2") throw new Error(FABLE_REFUSAL);
+    });
+    const session = createSessionForTest({
+      messages,
+      agentManager: { preflightSessionOpen },
+      workspaceRegistry: { get: vi.fn().mockResolvedValue({ cwd: "/repo" }) },
+      creationService: {
+        create: vi.fn(),
+        subscribe: vi.fn(),
+        findFailedForWorkspace: vi.fn().mockResolvedValue({
+          error: `Plugin aster before agent.session_open failed: ${FABLE_REFUSAL}`,
+          outcomeUnknown: false,
+          prompt: "Keep this message",
+        }),
+      },
+    });
+    await session.handleMessage({
+      type: "creation.find_failed.request",
+      requestId: "lookup-1",
+      workspaceId: "wks_blocked",
+      ...asked,
+    });
+    return {
+      preflights: preflightSessionOpen.mock.calls.map(([opening]) => opening),
+      recheck: findByType(messages, "creation.find_failed.response")?.payload.failure?.recheck,
+    };
+  }
+
+  test("re-evaluates a session-open refusal for the model a new session would use", async () => {
+    const refused = await lookUpCreationFailure({ provider: "claude", model: "claude-fable-5-2" });
+    expect(refused.preflights).toEqual([
+      { provider: "claude", cwd: "/repo", workspaceId: "wks_blocked", model: "claude-fable-5-2" },
+    ]);
+    expect(refused.recheck).toEqual({ status: "blocked", error: FABLE_REFUSAL });
+
+    const accepted = await lookUpCreationFailure({ provider: "claude", model: "claude-opus-4-8" });
+    expect(accepted.preflights).toEqual([
+      { provider: "claude", cwd: "/repo", workspaceId: "wks_blocked", model: "claude-opus-4-8" },
+    ]);
+    expect(accepted.recheck).toEqual({ status: "ready" });
+  });
+
+  test("re-evaluates for the provider alone when the app names no model", async () => {
+    const lookup = await lookUpCreationFailure({ provider: "claude" });
+    expect(lookup.preflights).toEqual([
+      { provider: "claude", cwd: "/repo", workspaceId: "wks_blocked", model: null },
+    ]);
+    expect(lookup.recheck).toEqual({ status: "ready" });
+  });
+
+  test("leaves the stored failure as it was when no provider is asked about", async () => {
+    const lookup = await lookUpCreationFailure({ model: "claude-fable-5-2" });
+    expect(lookup.preflights).toEqual([]);
+    expect(lookup.recheck).toBeUndefined();
   });
 });
 

@@ -4060,7 +4060,7 @@ export class Session {
     request: Extract<SessionInboundMessage, { type: "creation.find_failed.request" }>,
     source?: object,
   ): Promise<void> {
-    const { requestId, workspaceId, provider } = request;
+    const { requestId, workspaceId, provider, model } = request;
     try {
       // Any session in the workspace supersedes an earlier failed start.
       const hasSession =
@@ -4073,7 +4073,7 @@ export class Session {
         : await this.creationService.findFailedForWorkspace(workspaceId);
       const recheck =
         stored && provider
-          ? await this.recheckCreationFailure(stored.error, workspaceId, provider)
+          ? await this.recheckCreationFailure(stored.error, workspaceId, provider, model)
           : undefined;
       const failure = stored && (recheck ? { ...stored, recheck } : stored);
       this.emitForSource(
@@ -4095,17 +4095,24 @@ export class Session {
     }
   }
 
-  // Only a session-open hook can be asked again without starting anything.
+  // Only a session-open hook can be asked again without starting anything. It gets the model the
+  // new session would use, as the opening itself does: a hook can refuse one model and not another.
   private async recheckCreationFailure(
     error: string,
     workspaceId: string,
     provider: string,
+    model: string | undefined,
   ): Promise<NonNullable<CreationFailure["recheck"]> | undefined> {
     if (!/^Plugin \S+ before agent\.session_open failed/.test(error)) return undefined;
     const workspace = await this.workspaceRegistry.get(workspaceId);
     if (!workspace) return undefined;
     try {
-      await this.agentManager.preflightSessionOpen({ provider, cwd: workspace.cwd, workspaceId });
+      await this.agentManager.preflightSessionOpen({
+        provider,
+        cwd: workspace.cwd,
+        workspaceId,
+        model: model ?? null,
+      });
       return { status: "ready" };
     } catch (blocked) {
       return {

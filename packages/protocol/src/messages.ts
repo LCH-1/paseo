@@ -1768,6 +1768,8 @@ export const CreationFindFailedRequestSchema = z.object({
   workspaceId: z.string().min(1),
   // Provider a new session would use; asks the host to re-evaluate the stored failure for it.
   provider: z.string().optional(),
+  // Model that session would use; a refusal can hold for one model and not another.
+  model: z.string().optional(),
 });
 
 export const ListProviderModelsRequestMessageSchema = z.object({

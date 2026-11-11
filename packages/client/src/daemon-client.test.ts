@@ -7305,6 +7305,53 @@ test("creation lifecycle sends the keyed agent and initial prompt as one intent"
   expect(transport.sent).toHaveLength(1);
 });
 
+test("a creation failure lookup asks about the provider and model a new session would use", async () => {
+  const transport = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "creation-failure-lookup",
+    transportFactory: () => transport.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connected = client.connect();
+  transport.triggerOpen({ features: { creationFailureLookup: true } });
+  await connected;
+  const failure = {
+    error: "Plugin aster before agent.session_open failed: no account has room",
+    outcomeUnknown: false,
+    recheck: { status: "blocked", error: "no account has room" },
+  };
+
+  const lookup = client.findCreationFailure("wks_0123456789abcdef", "claude", "claude-fable-5-2");
+  void lookup.catch(() => undefined);
+  const request = parseSentFrame(transport.sent[0]);
+  expect(request).toEqual({
+    type: "creation.find_failed.request",
+    requestId: request.requestId,
+    workspaceId: "wks_0123456789abcdef",
+    provider: "claude",
+    model: "claude-fable-5-2",
+  });
+  transport.triggerMessage(
+    wrapSessionMessage({
+      type: "creation.find_failed.response",
+      payload: { requestId: request.requestId, failure, error: null },
+    }),
+  );
+  await expect(lookup).resolves.toEqual(failure);
+
+  // Without a model the request stays as hosts before the field know it.
+  void client.findCreationFailure("wks_0123456789abcdef", "claude").catch(() => undefined);
+  const modelless = parseSentFrame(transport.sent[1]);
+  expect(modelless).toEqual({
+    type: "creation.find_failed.request",
+    requestId: modelless.requestId,
+    workspaceId: "wks_0123456789abcdef",
+    provider: "claude",
+  });
+});
+
 test("creation lifecycle acknowledgement reaches the observer before the final response", async () => {
   const transport = createMockTransport();
   const client = new DaemonClient({

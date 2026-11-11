@@ -343,6 +343,14 @@ test("a failure from a session-open hook is re-evaluated for the provider asked 
     await expect(client.findCreationFailure(workspaceId, "codex")).resolves.toMatchObject({
       recheck: { status: "ready" },
     });
+    // The hooks are asked about the model the new session would use, when the app names one.
+    const preflight = vi.spyOn(daemon.daemon.agentManager, "preflightSessionOpen");
+    await expect(
+      client.findCreationFailure(workspaceId, "codex", "gpt-5.4-mini"),
+    ).resolves.toMatchObject({ recheck: { status: "ready" } });
+    expect(preflight.mock.calls.map(([opening]) => opening)).toEqual([
+      expect.objectContaining({ provider: "codex", workspaceId, model: "gpt-5.4-mini" }),
+    ]);
     const unchecked = await client.findCreationFailure(workspaceId);
     expect(unchecked?.recheck).toBeUndefined();
   } finally {
