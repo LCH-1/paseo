@@ -1323,6 +1323,92 @@ describe("ClaudeAgentSession features", () => {
     await session.close();
   });
 
+  test.each([
+    [
+      "Off on a model that cannot turn it off",
+      "off",
+      undefined,
+      "claude-fable-5-2",
+      { thinkingOptionId: "high" },
+    ],
+    ["Off on a model that keeps it", "off", undefined, "claude-opus-4-8", {}],
+    ["Off on the provider default", "off", undefined, null, { thinkingOptionId: undefined }],
+    [
+      "fast mode on a model without it",
+      "high",
+      { fast_mode: true },
+      "claude-fable-5-2",
+      { featureValues: { fast_mode: false } },
+    ],
+    ["fast mode on a model with it", "high", { fast_mode: true }, "claude-opus-5-5", {}],
+  ] as const)(
+    "resolves what a model switch changes for %s",
+    (_label, thinkingOptionId, featureValues, modelId, expected) => {
+      const client = new ClaudeAgentClient({
+        logger,
+        resolveBinary: async () => "/test/claude/bin",
+      });
+      expect(
+        client.resolveModelSwitchConfig(
+          {
+            provider: "claude",
+            cwd: process.cwd(),
+            model: "claude-opus-5",
+            thinkingOptionId,
+            ...(featureValues ? { featureValues } : {}),
+          },
+          modelId,
+        ),
+      ).toStrictEqual(expected);
+    },
+  );
+
+  test("a session opened on the new model with the switch settings thinks like a live switch", async () => {
+    const config = {
+      provider: "claude",
+      cwd: process.cwd(),
+      model: "claude-opus-5",
+      thinkingOptionId: "off",
+    } as const;
+    const live = createQueryMock();
+    const liveClient = new ClaudeAgentClient({
+      logger,
+      queryFactory: live.queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const liveSession = await liveClient.createSession(config);
+    await liveSession.setModel?.("claude-fable-5-2");
+    await liveSession.startTurn("hello");
+
+    const reopened = createQueryMock();
+    const reopenedClient = new ClaudeAgentClient({
+      logger,
+      queryFactory: reopened.queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    // Off alone is refused on this model; the switch settings make the session open.
+    await expect(
+      reopenedClient.createSession({ ...config, model: "claude-fable-5-2" }),
+    ).rejects.toThrow("Thinking option 'off' is not available for model 'claude-fable-5-2'");
+    const reopenedSession = await reopenedClient.createSession({
+      ...config,
+      model: "claude-fable-5-2",
+      ...reopenedClient.resolveModelSwitchConfig(config, "claude-fable-5-2"),
+    });
+    await reopenedSession.startTurn("hello");
+
+    const launched = (launch: { options: Record<string, unknown> } | undefined) => ({
+      model: launch?.options.model,
+      thinking: launch?.options.thinking,
+      effort: launch?.options.effort,
+    });
+    expect(launched(reopened.launches.at(-1))).toEqual(launched(live.launches.at(-1)));
+    expect(launched(reopened.launches.at(-1))).toMatchObject({ effort: "high" });
+
+    await liveSession.close();
+    await reopenedSession.close();
+  });
+
   test("rejects disabled thinking when the active model does not support it", async () => {
     const { queryFactory } = createQueryMock();
     const client = new ClaudeAgentClient({

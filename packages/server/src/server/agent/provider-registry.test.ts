@@ -120,6 +120,13 @@ vi.mock("./providers/claude/agent.js", async () => {
         return resolveConfiguredClaudeModel(model);
       }
 
+      resolveModelSwitchConfig(
+        config: AgentSessionConfig,
+        model: string | null,
+      ): Partial<AgentSessionConfig> {
+        return { thinkingOptionId: `${config.thinkingOptionId} on ${model}` };
+      }
+
       async isAvailable(): Promise<boolean> {
         const command: { mode?: string; argv?: string[] } | undefined =
           typeof this.runtimeSettings === "object" && this.runtimeSettings !== null
@@ -625,6 +632,22 @@ test("new provider extending claude appears in registry", () => {
   expect(registry.zai.description).toBe("Claude with ZAI defaults");
   expect(registry.zai.createClient(logger).provider).toBe("zai");
 });
+
+test.each(["claude", "zai"])(
+  "the %s client resolves what a model switch changes through the Claude adapter",
+  (provider) => {
+    const registry = buildProviderRegistry(logger, {
+      providerOverrides: { zai: { extends: "claude", label: "ZAI" } },
+    });
+    const client = registry[provider].createClient(logger);
+    expect(
+      client.resolveModelSwitchConfig?.(
+        { provider, cwd: "/repo", thinkingOptionId: "off" },
+        "claude-fable-5-2",
+      ),
+    ).toEqual({ thinkingOptionId: "off on claude-fable-5-2" });
+  },
+);
 
 test("new provider extending codex archives and unarchives its native sessions", async () => {
   const registry = buildProviderRegistry(logger, {

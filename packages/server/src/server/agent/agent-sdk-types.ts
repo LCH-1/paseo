@@ -795,6 +795,15 @@ export interface AgentClient {
   resolveDefaultModeId?(input: ResolveAgentDefaultModeInput): Promise<string | undefined>;
   resolveCreateConfig?(input: ResolveAgentCreateConfigInput): ResolveAgentCreateConfigResult;
   isCreateConfigUnattended?(input: AgentCreateConfigUnattendedInput): boolean;
+  /**
+   * The settings a live session changes on its own when setModel moves it to `model`, such as a
+   * thinking option the new model lacks. A model change made by opening the session again
+   * applies them, so the new session starts where setModel would have left it.
+   */
+  resolveModelSwitchConfig?(
+    config: AgentSessionConfig,
+    model: string | null,
+  ): Partial<AgentSessionConfig>;
   listCommands?(config: AgentSessionConfig): Promise<AgentSlashCommand[]>;
   listFeatures?(config: AgentSessionConfig): Promise<AgentFeature[]>;
   listImportableSessions?(

@@ -26,6 +26,8 @@ import { projectTimelineRows } from "./timeline-projection.js";
 import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import { startAgentRun } from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
+import { ClaudeAgentClient } from "./providers/claude/agent.js";
+import type { Query } from "@anthropic-ai/claude-agent-sdk";
 import { PluginHookRefusalError } from "../plugins/hook-refusal.js";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { TURN_RETRY_CONTINUATION } from "./transient-turn-retry.js";
@@ -5735,15 +5737,24 @@ async function withAccountLimitedModelAgent(
     failure?: Error;
     onSessionOpen?: (request: PluginSessionOpenRequest) => void;
     resume?: (config: Partial<AgentSessionConfig> | undefined) => Promise<AgentSession>;
+    thinkingOptionId?: string;
+    resolveModelSwitchConfig?: AgentClient["resolveModelSwitchConfig"];
   },
   run: (fixture: AccountLimitedModelFixture) => Promise<void>,
 ): Promise<void> {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-account-limited-model-"));
   const failure = options.failure ?? new Error(ACCOUNT_LIMIT_MESSAGE);
-  const config = { provider: "codex", cwd: workdir, model: "gpt-5.4" } as const;
+  const config: AgentSessionConfig = {
+    provider: "codex",
+    cwd: workdir,
+    model: "gpt-5.4",
+    ...(options.thinkingOptionId ? { thinkingOptionId: options.thinkingOptionId } : {}),
+  };
   const session = new AccountLimitedModelSession(config, failure);
   const resumedConfigs: Array<Partial<AgentSessionConfig> | undefined> = [];
   class AccountLimitedModelClient extends TestAgentClient {
+    readonly resolveModelSwitchConfig = options.resolveModelSwitchConfig;
+
     override async createSession(): Promise<AgentSession> {
       return session;
     }
@@ -5899,6 +5910,127 @@ test("a reopen the provider fails reports the original account limit error", asy
       expect(fixture.resumedConfigs.map((config) => config?.model)).toEqual(["gpt-5.4-mini"]);
     },
   );
+});
+
+test("a reopen onto a model that lacks the thinking option opens with the provider's fallback", async () => {
+  const switches: Array<{ thinkingOptionId: string | undefined; model: string | null }> = [];
+  await withAccountLimitedModelAgent(
+    {
+      thinkingOptionId: "off",
+      resolveModelSwitchConfig: (config, model) => {
+        switches.push({ thinkingOptionId: config.thinkingOptionId, model });
+        return { thinkingOptionId: "high" };
+      },
+      // Like Claude, a model that cannot turn thinking off refuses to open with it off.
+      resume: async (resumed) => {
+        if (resumed?.thinkingOptionId === "off") {
+          throw new Error("Thinking option 'off' is not available for model 'gpt-5.4-mini'");
+        }
+        return new TestAgentSession({ ...resumed, provider: "codex", cwd: resumed?.cwd ?? "" });
+      },
+    },
+    async (fixture) => {
+      const { manager, agentId, storage } = fixture;
+
+      await manager.setAgentModel(agentId, "gpt-5.4-mini");
+      await manager.flush();
+
+      expect(switches).toEqual([{ thinkingOptionId: "off", model: "gpt-5.4-mini" }]);
+      expect(
+        fixture.resumedConfigs.map((config) => [config?.model, config?.thinkingOptionId]),
+      ).toEqual([["gpt-5.4-mini", "high"]]);
+      const live = manager.getAgent(agentId);
+      expect(live?.lifecycle).toBe("idle");
+      expect(live?.config).toMatchObject({ model: "gpt-5.4-mini", thinkingOptionId: "high" });
+      expect((await storage.get(agentId))?.config?.thinkingOptionId).toBe("high");
+    },
+  );
+});
+
+test("a Claude model change refused on the account limit keeps the agent when thinking is Off", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-claude-limited-model-"));
+  let endQuery = () => {};
+  const queryEnded = new Promise<void>((resolve) => {
+    endQuery = resolve;
+  });
+  const query = {
+    setModel: vi.fn(async () => {
+      throw new Error(ACCOUNT_LIMIT_MESSAGE);
+    }),
+    applyFlagSettings: vi.fn(async () => undefined),
+    getContextUsage: vi.fn(async () => undefined),
+    close: () => endQuery(),
+    return: async () => {
+      endQuery();
+      return { value: undefined, done: true as const };
+    },
+    [Symbol.asyncIterator]() {
+      return {
+        next: async () => {
+          await queryEnded;
+          return { value: undefined, done: true as const };
+        },
+      };
+    },
+  };
+  class AvailableClaudeClient extends ClaudeAgentClient {
+    override async isAvailable(): Promise<boolean> {
+      return true;
+    }
+  }
+  const opens: PluginSessionOpenRequest[] = [];
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: {
+      claude: new AvailableClaudeClient({
+        logger,
+        queryFactory: () => query as unknown as Query,
+        resolveBinary: async () => "/test/claude/bin",
+      }),
+    },
+    registry: storage,
+    logger,
+    pluginLifecycle: {
+      emit: () => {},
+      before: async (name, request) => {
+        if (name === "agent.session_open") {
+          const open = request as PluginSessionOpenRequest;
+          opens.push(structuredClone(open));
+          // Keep the Claude adapter off this machine's own Claude settings.
+          open.env = { ...open.env, CLAUDE_CONFIG_DIR: join(workdir, "claude") };
+        }
+        return request;
+      },
+    },
+  });
+  try {
+    const agent = await manager.createAgent(
+      { provider: "claude", cwd: workdir, model: "claude-opus-5", thinkingOptionId: "off" },
+      undefined,
+      { workspaceId: "wks_claude_limited" },
+    );
+
+    // Fable 5.2 cannot turn thinking off; the reopened session takes its default effort.
+    await manager.setAgentModel(agent.id, "claude-fable-5-2");
+    await manager.flush();
+
+    expect(query.setModel).toHaveBeenCalledWith("claude-fable-5-2");
+    expect(opens.map(({ reason, model }) => ({ reason, model }))).toEqual([
+      { reason: "create", model: "claude-opus-5" },
+      { reason: "refresh", model: "claude-fable-5-2" },
+    ]);
+    const live = manager.getAgent(agent.id);
+    expect(live?.lifecycle).toBe("idle");
+    expect(live?.config).toMatchObject({ model: "claude-fable-5-2", thinkingOptionId: "high" });
+    expect((await storage.get(agent.id))?.config).toMatchObject({
+      model: "claude-fable-5-2",
+      thinkingOptionId: "high",
+    });
+  } finally {
+    for (const agent of manager.listAgents()) await manager.closeAgent(agent.id);
+    await manager.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
 });
 
 test("a session-open preflight carries the model a new session would use", async () => {

@@ -657,6 +657,22 @@ function attachPersistenceCwd(
   };
 }
 
+/**
+ * A reload closes the old session before the new one opens, so a reload onto another model must
+ * bring the settings that model accepts, as a live setModel would adjust them. Explicit overrides
+ * still win over these.
+ */
+function resolveReloadModelSwitch(
+  client: AgentClient,
+  config: AgentSessionConfig,
+  overrides: Partial<AgentSessionConfig> | undefined,
+): Partial<AgentSessionConfig> | undefined {
+  if (!overrides || !("model" in overrides) || overrides.model === config.model) {
+    return undefined;
+  }
+  return client.resolveModelSwitchConfig?.(config, overrides.model ?? null);
+}
+
 interface SubscriptionRecord {
   callback: AgentSubscriber;
   agentId: string | null;
@@ -1918,6 +1934,7 @@ export class AgentManager {
     const client = this.requireClient(provider);
     const refreshConfig = {
       ...existing.config,
+      ...resolveReloadModelSwitch(client, existing.config, overrides),
       ...overrides,
       provider,
     } as AgentSessionConfig;

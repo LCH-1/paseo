@@ -558,6 +558,7 @@ function wrapClientProvider(
     resolveCreateConfig: inner.resolveCreateConfig?.bind(inner),
     resolveConfiguredModel: inner.resolveConfiguredModel?.bind(inner),
     isCreateConfigUnattended: inner.isCreateConfigUnattended?.bind(inner),
+    resolveModelSwitchConfig: inner.resolveModelSwitchConfig?.bind(inner),
     listFeatures: listFeatures
       ? async (config) =>
           await listFeatures({

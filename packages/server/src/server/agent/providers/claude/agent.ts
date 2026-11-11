@@ -563,6 +563,18 @@ function assertClaudeThinkingOptionSupported(
   );
 }
 
+/** Off gives way to the model's default effort on a model that cannot turn thinking off. */
+function resolveClaudeThinkingForModelSwitch(
+  thinkingOptionId: string | undefined,
+  modelId: string | null | undefined,
+): { thinkingOptionId: string | undefined } | null {
+  if (thinkingOptionId !== CLAUDE_DISABLED_THINKING_OPTION_ID) {
+    return null;
+  }
+  const resolution = resolveClaudeDisabledThinkingForModel(modelId);
+  return resolution.supported ? null : { thinkingOptionId: resolution.fallbackThinkingOptionId };
+}
+
 interface ClaudeOptionsLogSummary {
   cwd: string | null;
   permissionMode: string | null;
@@ -1587,6 +1599,20 @@ export class ClaudeAgentClient implements AgentClient {
 
   resolveConfiguredModel(model: AgentModelDefinition): AgentModelDefinition {
     return resolveConfiguredClaudeModel(model);
+  }
+
+  /** What ClaudeAgentSession.setModel changes alongside the model, without a live session. */
+  resolveModelSwitchConfig(
+    config: AgentSessionConfig,
+    model: string | null,
+  ): Partial<AgentSessionConfig> {
+    const modelId = model?.trim() || null;
+    const dropsFastMode =
+      !!config.featureValues?.fast_mode && !claudeModelSupportsFastMode(modelId);
+    return {
+      ...resolveClaudeThinkingForModelSwitch(config.thinkingOptionId, modelId),
+      ...(dropsFastMode ? { featureValues: { ...config.featureValues, fast_mode: false } } : {}),
+    };
   }
 
   async createSession(
@@ -2675,17 +2701,12 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   private reconcileThinkingOptionForModel(modelId: string | null): void {
-    const thinkingOptionId = this.config.thinkingOptionId;
-    if (thinkingOptionId !== CLAUDE_DISABLED_THINKING_OPTION_ID) {
+    const switched = resolveClaudeThinkingForModelSwitch(this.config.thinkingOptionId, modelId);
+    if (!switched) {
       return;
     }
 
-    const resolution = resolveClaudeDisabledThinkingForModel(modelId);
-    if (resolution.supported) {
-      return;
-    }
-
-    this.config.thinkingOptionId = resolution.fallbackThinkingOptionId;
+    this.config.thinkingOptionId = switched.thinkingOptionId;
     this.queryRestartNeeded = true;
     this.pushEvent({
       type: "thinking_option_changed",
