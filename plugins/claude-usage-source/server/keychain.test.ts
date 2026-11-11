@@ -183,7 +183,7 @@ describe("Claude credential routes", () => {
     return home;
   }
 
-  it("lists the daemon's Keychain login that no provider uses exactly while it holds a login", async () => {
+  it("lists the daemon's Keychain login that no provider uses only while the vendor identifies it", async () => {
     const home = homeWithOwnProviderLogin();
     try {
       let held: unknown = { claudeAiOauth: { accessToken: "fixture-daemon-keychain" } };
@@ -194,10 +194,15 @@ describe("Claude credential routes", () => {
         readKeychainCredentials: async (service: string) => (service === SERVICE ? held : null),
       };
       const fetchApi = fixtureFetch("fixture-daemon-keychain");
-      const listed = await discover({ kind: "global" }, lookup, fetchApi);
-      expect(listed.map((account) => account.input)).toEqual([
-        { route: { store: "keychain", service: SERVICE, account: "fixture" } },
+      expect(await discover({ kind: "global" }, lookup, fetchApi)).toEqual([
+        {
+          key: "fixture-account.fixture-org",
+          harness: "Claude",
+          input: { route: { store: "keychain", service: SERVICE, account: "fixture" } },
+        },
       ]);
+      held = { claudeAiOauth: { accessToken: "fixture-daemon-keychain", expiresAt: 0 } };
+      expect(await discover({ kind: "global" }, lookup, fetchApi)).toEqual([]);
       held = null;
       expect(await discover({ kind: "global" }, lookup, fetchApi)).toEqual([]);
     } finally {
@@ -205,7 +210,7 @@ describe("Claude credential routes", () => {
     }
   });
 
-  it("lists the daemon's credential file that no provider uses exactly while it holds a login", async () => {
+  it("lists the daemon's credential file that no provider uses only while the vendor identifies it", async () => {
     const home = homeWithOwnProviderLogin();
     try {
       const file = join(home, ".claude", ".credentials.json");
@@ -216,10 +221,18 @@ describe("Claude credential routes", () => {
       );
       const lookup = { home, env: {}, platform: "linux" as const };
       const fetchApi = fixtureFetch("fixture-daemon-file");
-      const listed = await discover({ kind: "global" }, lookup, fetchApi);
-      expect(listed.map((account) => account.input)).toEqual([
-        { route: { store: "claude", path: file } },
+      expect(await discover({ kind: "global" }, lookup, fetchApi)).toEqual([
+        {
+          key: "fixture-account.fixture-org",
+          harness: "Claude",
+          input: { route: { store: "claude", path: file } },
+        },
       ]);
+      writeFileSync(
+        file,
+        JSON.stringify({ claudeAiOauth: { accessToken: "fixture-daemon-file", expiresAt: 0 } }),
+      );
+      expect(await discover({ kind: "global" }, lookup, fetchApi)).toEqual([]);
       rmSync(file);
       expect(await discover({ kind: "global" }, lookup, fetchApi)).toEqual([]);
     } finally {

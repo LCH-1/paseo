@@ -2,11 +2,15 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
-export async function compatibilityEnabled() {
-  const rawHome = process.env.PASEO_HOME ?? join(homedir(), ".paseo");
+export async function compatibilityEnabled(
+  lookup: { home?: string; env?: NodeJS.ProcessEnv } = {},
+) {
+  const env = lookup.env ?? process.env;
+  const userHome = lookup.home ?? homedir();
+  const rawHome = env.PASEO_HOME ?? join(userHome, ".paseo");
   let home = resolve(rawHome);
-  if (rawHome === "~") home = homedir();
-  else if (rawHome.startsWith("~/")) home = join(homedir(), rawHome.slice(2));
+  if (rawHome === "~") home = userHome;
+  else if (rawHome.startsWith("~/")) home = join(userHome, rawHome.slice(2));
   let raw: string;
   try {
     raw = await readFile(

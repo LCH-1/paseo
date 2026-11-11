@@ -340,7 +340,7 @@ export async function readClaudeKeychainCredentials(
   return null;
 }
 
-interface ClaudeCredentialLookup extends StoreLookup {
+export interface ClaudeCredentialLookup extends StoreLookup {
   readWindowsCredentials?: (service: string) => Promise<unknown | null>;
   readKeychainCredentials?: (service: string, account: string) => Promise<unknown | null>;
   claudeHome?: string;
@@ -414,22 +414,25 @@ export async function discover(
       keychain: "Claude",
       "windows-credman": "Claude",
     }[input.route.store];
-    const fallback = { key: hashAccountKey(routeKey(input)), harness, input };
-    // A login no provider signs in through is nobody's account until a login is read from it.
-    const reportsBrokenLogin = routeKey(input) !== routes.unclaimed;
+    // The fallback keeps a login that needs attention listed under its route. A login no provider
+    // signs in through gets none: it is an account only once the vendor says whose it is.
+    const fallback: UsageAccount[] =
+      routeKey(input) === routes.unclaimed
+        ? []
+        : [{ key: hashAccountKey(routeKey(input)), harness, input }];
     let credentials;
     try {
       credentials = await resolveClaudeCredentials(input, lookup);
     } catch {
-      if (reportsBrokenLogin) accounts.push(fallback);
+      accounts.push(...fallback);
       continue;
     }
     if (!credentials) {
-      if (reportsBrokenLogin && input.route.store === "windows-credman") accounts.push(fallback);
+      if (input.route.store === "windows-credman") accounts.push(...fallback);
       continue;
     }
     if (credentials.expires !== undefined && credentials.expires <= (lookup.now ?? Date.now)()) {
-      accounts.push(fallback);
+      accounts.push(...fallback);
       continue;
     }
     try {
@@ -438,19 +441,17 @@ export async function discover(
         fetchApi,
         lookup.now ?? Date.now,
       );
-      accounts.push(
-        "status" in profile
-          ? fallback
-          : {
-              key: profile.key,
-              ...(profile.label ? { label: profile.label } : {}),
-              harness,
-              input,
-            },
-      );
+      if ("status" in profile) accounts.push(...fallback);
+      else
+        accounts.push({
+          key: profile.key,
+          ...(profile.label ? { label: profile.label } : {}),
+          harness,
+          input,
+        });
     } catch {
       // Keep the login visible; fetching usage reports the vendor failure.
-      accounts.push(fallback);
+      accounts.push(...fallback);
     }
   }
   return accounts;

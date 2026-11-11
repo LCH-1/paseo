@@ -9,10 +9,13 @@ import { inputSchema, type UsageInput } from "../shared/input.js";
 import { hashAccountKey, type UsageReport } from "@getpaseo/plugin/server/usage";
 
 vi.mock("./windows-credentials.js", () => ({ readWindowsCredentials: vi.fn(async () => null) }));
-vi.mock("./claude-provider-config.js", () => ({
-  claudeProviders: vi.fn(async () => ({ configured: [], builtinUnconfigured: true })),
-  configuredClaudeProviders: vi.fn(async () => []),
-}));
+vi.mock("./claude-provider-config.js", () => {
+  const configured = vi.fn(async () => []);
+  return {
+    configuredClaudeProviders: configured,
+    claudeProviders: async () => ({ configured: await configured(), builtinUnconfigured: true }),
+  };
+});
 
 it("configured profiles share discovery and access metadata without returning credentials or reading arbitrary IDs", async () => {
   const directory = mkdtempSync(join(tmpdir(), "paseo-common-profile-"));
@@ -956,6 +959,7 @@ it("discovers a Pi OAuth login independently of the CLI login", async () => {
     const inputs = await discover(
       { kind: "global" },
       { home: directory, env: {}, platform: "linux" },
+      async () => jsonResponse({ account: { uuid: "pi-account" }, organization: { uuid: "org" } }),
     );
     expect(inputs.map((account) => account.input)).toContainEqual({
       route: { store: "pi", path: join(directory, ".pi", "agent", "auth.json") },

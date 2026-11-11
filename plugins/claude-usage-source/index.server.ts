@@ -1,6 +1,12 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { inputSchema } from "./shared/input.js";
-import { accessProfileSchema, discover, fetchUsage, profilesForProviders } from "./server/usage.js";
+import { inputSchema, type UsageInput } from "./shared/input.js";
+import {
+  accessProfileSchema,
+  discover,
+  fetchUsage,
+  profilesForProviders,
+  type ClaudeCredentialLookup,
+} from "./server/usage.js";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { compatibilityEnabled } from "./server/enabled.js";
@@ -10,8 +16,15 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { hashAccountKey, type UsageScope } from "@getpaseo/plugin/server/usage";
 
+/** Where the sources read logins and reach the vendor. The defaults are this host's own. */
+interface ClaudeUsagePorts {
+  lookup?: ClaudeCredentialLookup;
+  fetchApi?: typeof fetch;
+}
+
 export default function contribute(
   server: Pick<PluginServerContext, "handle" | "registerUsageSource">,
+  { lookup = {}, fetchApi = fetch }: ClaudeUsagePorts = {},
 ) {
   server.handle(
     defineRpc({
@@ -37,7 +50,7 @@ export default function contribute(
     }),
     async ({ providerIds }) => ({
       version: 1 as const,
-      profiles: await profilesForProviders(providerIds),
+      profiles: await profilesForProviders(providerIds, fetchApi, lookup),
     }),
   );
   const pending = new Map<string, ReturnType<typeof discover>>();
@@ -45,7 +58,7 @@ export default function contribute(
     const key = hashAccountKey(JSON.stringify(scope));
     const existing = pending.get(key);
     if (existing) return existing;
-    const request = discover(scope).finally(() => {
+    const request = discover(scope, lookup, fetchApi).finally(() => {
       if (pending.get(key) === request) pending.delete(key);
     });
     pending.set(key, request);
@@ -58,7 +71,7 @@ export default function contribute(
     icon: "icon.svg",
     input: inputSchema,
     discover: sharedDiscover,
-    fetch: fetchUsage,
+    fetch: (input: UsageInput) => fetchUsage(input, fetchApi, lookup),
   });
   // COMPAT(windowsUsageIdentity): preserve existing cards and pinning. The engine,
   // credential reads, profile cache and fetch cache are shared with `claude`.
@@ -69,20 +82,23 @@ export default function contribute(
     icon: "icon.svg",
     input: inputSchema,
     discover: async (scope) => {
-      if (process.platform !== "win32" || !(await compatibilityEnabled())) return [];
+      const onWindows = (lookup.platform ?? process.platform) === "win32";
+      if (!onWindows || !(await compatibilityEnabled(lookup))) return [];
       const [accounts, providers] = await Promise.all([
         sharedDiscover(scope),
-        configuredClaudeProviders(),
+        configuredClaudeProviders(lookup),
       ]);
+      const env = lookup.env ?? process.env;
       return selectWindowsAccounts(
         accounts,
         providers.map((provider) => provider.env.CLAUDE_CONFIG_DIR ?? ""),
-        process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
+        env.CLAUDE_CONFIG_DIR || join(lookup.home ?? homedir(), ".claude"),
       );
     },
     fetch: async (input) => {
-      if (!(await compatibilityEnabled())) throw Error("Windows usage compatibility is disabled");
-      return fetchUsage(inputSchema.parse(input));
+      if (!(await compatibilityEnabled(lookup)))
+        throw Error("Windows usage compatibility is disabled");
+      return fetchUsage(inputSchema.parse(input), fetchApi, lookup);
     },
   });
   return () => {};
