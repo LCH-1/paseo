@@ -29,7 +29,7 @@ import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import { ClaudeAgentClient } from "./providers/claude/agent.js";
 import type { Query } from "@anthropic-ai/claude-agent-sdk";
 import { PluginHookRefusalError } from "../plugins/hook-refusal.js";
-import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
+import type { PluginLifecycleEvents, PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { TURN_RETRY_CONTINUATION } from "./transient-turn-retry.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
 import type { StoredAgentRecord } from "./agent-storage.js";
@@ -5708,6 +5708,7 @@ const ACCOUNT_LIMIT_MESSAGE =
 
 class AccountLimitedModelSession extends ControlledInterruptSession {
   readonly requestedModels: Array<string | null> = [];
+  runningBackgroundWorkIds: string[] = [];
 
   constructor(
     config: AgentSessionConfig,
@@ -5719,6 +5720,10 @@ class AccountLimitedModelSession extends ControlledInterruptSession {
   async setModel(model: string | null): Promise<void> {
     this.requestedModels.push(model);
     throw this.failure;
+  }
+
+  getRunningBackgroundWorkIds(): string[] {
+    return this.runningBackgroundWorkIds;
   }
 }
 
@@ -5737,12 +5742,16 @@ interface AccountLimitedModelFixture {
   resumedConfigs: Array<Partial<AgentSessionConfig> | undefined>;
   resumedEnvs: Array<Record<string, string> | undefined>;
   sessionOpens: PluginSessionOpenRequest[];
+  /** The agent's states as clients receive them, from after its creation. */
+  states: ManagedAgent[];
+  /** How many times the plugins heard that the agent closed. */
+  closedEvents(): number;
 }
 
 async function withAccountLimitedModelAgent(
   options: {
     failure?: Error;
-    onSessionOpen?: (request: PluginSessionOpenRequest) => void;
+    onSessionOpen?: (request: PluginSessionOpenRequest) => void | Promise<void>;
     resume?: (config: Partial<AgentSessionConfig> | undefined) => Promise<AgentSession>;
     thinkingOptionId?: string;
     resolveModelSwitchConfig?: AgentClient["resolveModelSwitchConfig"];
@@ -5781,6 +5790,7 @@ async function withAccountLimitedModelAgent(
     }
   }
   const sessionOpens: PluginSessionOpenRequest[] = [];
+  const closedAgentIds: string[] = [];
   const storage = new AgentStorage(join(workdir, "agents"), logger);
   const hook = options.sessionOpenHook ?? "registered";
   const manager = new AgentManager({
@@ -5791,12 +5801,16 @@ async function withAccountLimitedModelAgent(
       hook === "absent with plugins off"
         ? undefined
         : {
-            emit: () => {},
+            emit: (name, event) => {
+              if (name === "agent.closed") {
+                closedAgentIds.push((event as PluginLifecycleEvents["agent.closed"]).agent.id);
+              }
+            },
             before: async (name, request) => {
               if (name === "agent.session_open") {
                 const open = request as PluginSessionOpenRequest;
                 sessionOpens.push(structuredClone(open));
-                options.onSessionOpen?.(open);
+                await options.onSessionOpen?.(open);
               }
               return request;
             },
@@ -5805,8 +5819,17 @@ async function withAccountLimitedModelAgent(
               : { hasBefore: (name) => name === "agent.session_open" && hook === "registered" }),
           },
   });
+  let unsubscribe = () => {};
   try {
     const agent = await manager.createAgent(config, undefined, { workspaceId: "wks_limited" });
+    await manager.flush();
+    const states: ManagedAgent[] = [];
+    unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state") states.push(event.agent);
+      },
+      { agentId: agent.id, replayState: false },
+    );
     await run({
       manager,
       agentId: agent.id,
@@ -5816,8 +5839,11 @@ async function withAccountLimitedModelAgent(
       resumedConfigs,
       resumedEnvs,
       sessionOpens,
+      states,
+      closedEvents: () => closedAgentIds.filter((id) => id === agent.id).length,
     });
   } finally {
+    unsubscribe();
     for (const agent of manager.listAgents()) await manager.closeAgent(agent.id);
     await manager.flush();
     rmSync(workdir, { recursive: true, force: true });
@@ -6117,9 +6143,361 @@ test("a reopen whose previous model does not open again either closes the agent 
         "gpt-5.4",
       ]);
       expect(manager.getAgent(agentId)).toBeNull();
+      // Clients stop showing it as idle, and the plugins release what they hold for it.
+      expect(fixture.states.at(-1)).toMatchObject({
+        lifecycle: "closed",
+        config: { model: "gpt-5.4" },
+      });
+      expect(fixture.closedEvents()).toBe(1);
       const record = await storage.get(agentId);
       expect(record?.lastStatus).toBe("closed");
       expect(record?.config?.model).toBe("gpt-5.4");
+    },
+  );
+});
+
+const REGISTRATION_FAILURE_MESSAGE = "Registration snapshot unavailable";
+
+/**
+ * Fails the first snapshot that a registration writes for an agent on `model`. The agent is
+ * already in the manager by then, so the registration closes it and announces that itself.
+ */
+function failRegistrationSnapshot(storage: AgentStorage, model: string): void {
+  const applySnapshot = storage.applySnapshot.bind(storage);
+  let failed = false;
+  vi.spyOn(storage, "applySnapshot").mockImplementation(async (agent, options) => {
+    if (!failed && agent.lifecycle === "initializing" && agent.config.model === model) {
+      failed = true;
+      throw new Error(REGISTRATION_FAILURE_MESSAGE);
+    }
+    await applySnapshot(agent, options);
+  });
+}
+
+function lifecyclesOf(states: readonly ManagedAgent[]): string[] {
+  return states.map((state) => state.lifecycle);
+}
+
+/** A replacement session whose first close fails, so a failed registration cannot retire it. */
+function resumeUnclosable(resumed: Partial<AgentSessionConfig> | undefined): Promise<AgentSession> {
+  const replacement = new TestAgentSession({
+    ...resumed,
+    provider: "codex",
+    cwd: resumed?.cwd ?? "",
+  });
+  vi.spyOn(replacement, "close").mockRejectedValueOnce(new Error("Session owns its writer"));
+  return Promise.resolve(replacement);
+}
+
+test("a reload whose replacement fails to register announces the closure once", async () => {
+  await withAccountLimitedModelAgent({}, async (fixture) => {
+    const { manager, agentId, storage } = fixture;
+    failRegistrationSnapshot(storage, "gpt-5.4");
+
+    await expect(manager.reloadAgentSession(agentId)).rejects.toThrow(REGISTRATION_FAILURE_MESSAGE);
+    await manager.flush();
+
+    expect(manager.getAgent(agentId)).toBeNull();
+    expect(lifecyclesOf(fixture.states).filter((lifecycle) => lifecycle === "closed")).toEqual([
+      "closed",
+    ]);
+    expect(fixture.closedEvents()).toBe(1);
+    expect((await storage.get(agentId))?.lastStatus).toBe("closed");
+  });
+});
+
+test("a reload whose replacement fails to register and cannot close stays in error, not closed", async () => {
+  await withAccountLimitedModelAgent({ resume: resumeUnclosable }, async (fixture) => {
+    const { manager, agentId, storage } = fixture;
+    failRegistrationSnapshot(storage, "gpt-5.4");
+
+    await expect(manager.reloadAgentSession(agentId)).rejects.toThrow(REGISTRATION_FAILURE_MESSAGE);
+    await manager.flush();
+
+    expect(manager.getAgent(agentId)?.lifecycle).toBe("error");
+    expect(fixture.states.at(-1)?.lifecycle).toBe("error");
+    expect(lifecyclesOf(fixture.states)).not.toContain("closed");
+    expect(fixture.closedEvents()).toBe(0);
+  });
+});
+
+test("a model change whose new session fails to register opens the previous model again", async () => {
+  await withAccountLimitedModelAgent({}, async (fixture) => {
+    const { manager, agentId, storage } = fixture;
+    failRegistrationSnapshot(storage, "gpt-5.4-mini");
+
+    const failure = await manager
+      .setAgentModel(agentId, "gpt-5.4-mini")
+      .catch((error: unknown) => error);
+    await manager.flush();
+
+    expect(failure).toMatchObject({
+      message: `Could not reopen the session to change the model: ${REGISTRATION_FAILURE_MESSAGE}`,
+    });
+    expect(fixture.sessionOpens.map(({ model }) => model)).toEqual([
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.4",
+    ]);
+    const live = manager.getAgent(agentId);
+    expect(live?.lifecycle).toBe("idle");
+    expect(live?.config.model).toBe("gpt-5.4");
+    expect(fixture.states.at(-1)).toMatchObject({
+      lifecycle: "idle",
+      config: { model: "gpt-5.4" },
+    });
+    // Only the new model's agent, which its registration published and closed, was announced.
+    expect(fixture.closedEvents()).toBe(1);
+    expect((await storage.get(agentId))?.config?.model).toBe("gpt-5.4");
+  });
+});
+
+test("a model change whose new session fails to register and whose previous model fails too keeps the previous model on record", async () => {
+  await withAccountLimitedModelAgent(
+    {
+      resume: async (resumed) => {
+        if (resumed?.model === "gpt-5.4") throw new Error("resume failed on gpt-5.4");
+        return new TestAgentSession({ ...resumed, provider: "codex", cwd: resumed?.cwd ?? "" });
+      },
+    },
+    async (fixture) => {
+      const { manager, agentId, storage } = fixture;
+      failRegistrationSnapshot(storage, "gpt-5.4-mini");
+
+      const failure = await manager
+        .setAgentModel(agentId, "gpt-5.4-mini")
+        .catch((error: unknown) => error);
+      await manager.flush();
+
+      expect(failure).toMatchObject({
+        message: `Could not reopen the session to change the model: ${REGISTRATION_FAILURE_MESSAGE}. Opening it again on the previous model failed too, so the agent is closed: resume failed on gpt-5.4`,
+      });
+      expect(manager.getAgent(agentId)).toBeNull();
+      expect(fixture.states.at(-1)).toMatchObject({
+        lifecycle: "closed",
+        config: { model: "gpt-5.4" },
+      });
+      // Each opening the hooks placed ended in a closure the plugins heard about.
+      expect(fixture.sessionOpens).toHaveLength(3);
+      expect(fixture.closedEvents()).toBe(2);
+      const record = await storage.get(agentId);
+      expect(record?.lastStatus).toBe("closed");
+      expect(record?.config?.model).toBe("gpt-5.4");
+    },
+  );
+});
+
+test("a model change whose previous model reopens but fails to register announces that closure once", async () => {
+  await withAccountLimitedModelAgent(
+    {
+      resume: async (resumed) => {
+        if (resumed?.model === "gpt-5.4-mini") throw new Error("resume failed");
+        return new TestAgentSession({ ...resumed, provider: "codex", cwd: resumed?.cwd ?? "" });
+      },
+    },
+    async (fixture) => {
+      const { manager, agentId, storage } = fixture;
+      failRegistrationSnapshot(storage, "gpt-5.4");
+
+      const failure = await manager
+        .setAgentModel(agentId, "gpt-5.4-mini")
+        .catch((error: unknown) => error);
+      await manager.flush();
+
+      expect(failure).toMatchObject({
+        message: `Could not reopen the session to change the model: resume failed. Opening it again on the previous model failed too, so the agent is closed: ${REGISTRATION_FAILURE_MESSAGE}`,
+      });
+      expect(manager.getAgent(agentId)).toBeNull();
+      expect(lifecyclesOf(fixture.states).filter((lifecycle) => lifecycle === "closed")).toEqual([
+        "closed",
+      ]);
+      expect(fixture.closedEvents()).toBe(1);
+    },
+  );
+});
+
+test("a model change whose previous model reopens but cannot close after its failed registration says the agent is left in error", async () => {
+  await withAccountLimitedModelAgent(
+    {
+      resume: async (resumed) => {
+        if (resumed?.model === "gpt-5.4-mini") throw new Error("resume failed");
+        return resumeUnclosable(resumed);
+      },
+    },
+    async (fixture) => {
+      const { manager, agentId, storage } = fixture;
+      failRegistrationSnapshot(storage, "gpt-5.4");
+
+      const failure = await manager
+        .setAgentModel(agentId, "gpt-5.4-mini")
+        .catch((error: unknown) => error);
+      await manager.flush();
+
+      expect(failure).toMatchObject({
+        message: `Could not reopen the session to change the model: resume failed. Opening it again on the previous model failed too: ${REGISTRATION_FAILURE_MESSAGE}`,
+      });
+      expect(manager.getAgent(agentId)?.lifecycle).toBe("error");
+      expect(fixture.closedEvents()).toBe(0);
+    },
+  );
+});
+
+test("a model change whose new session fails to register and cannot close does not open another", async () => {
+  await withAccountLimitedModelAgent({ resume: resumeUnclosable }, async (fixture) => {
+    const { manager, agentId, storage } = fixture;
+    failRegistrationSnapshot(storage, "gpt-5.4-mini");
+
+    const failure = await manager
+      .setAgentModel(agentId, "gpt-5.4-mini")
+      .catch((error: unknown) => error);
+    await manager.flush();
+
+    // The new model's agent still holds its session, so another would be a second writer.
+    expect(failure).toMatchObject({
+      message: `Could not reopen the session to change the model: ${REGISTRATION_FAILURE_MESSAGE}`,
+    });
+    expect(fixture.sessionOpens).toHaveLength(2);
+    expect(manager.getAgent(agentId)?.lifecycle).toBe("error");
+    expect(lifecyclesOf(fixture.states)).not.toContain("closed");
+    expect(fixture.closedEvents()).toBe(0);
+  });
+});
+
+test("a model change whose reopen meets a shutdown leaves the agent closed without opening it again", async () => {
+  let shutDown = () => {};
+  await withAccountLimitedModelAgent(
+    {
+      resume: async (resumed) => {
+        shutDown();
+        return new TestAgentSession({ ...resumed, provider: "codex", cwd: resumed?.cwd ?? "" });
+      },
+    },
+    async (fixture) => {
+      const { manager, agentId, storage } = fixture;
+      shutDown = () => manager.prepareForShutdown();
+
+      const failure = await manager
+        .setAgentModel(agentId, "gpt-5.4-mini")
+        .catch((error: unknown) => error);
+      await manager.flush();
+
+      expect(failure).toBeInstanceOf(AgentManagerShuttingDownError);
+      expect(fixture.sessionOpens.map(({ reason }) => reason)).toEqual(["create", "refresh"]);
+      expect(fixture.resumedConfigs.map((config) => config?.model)).toEqual(["gpt-5.4-mini"]);
+      expect(manager.getAgent(agentId)).toBeNull();
+      expect(fixture.states.at(-1)?.lifecycle).toBe("closed");
+      expect(fixture.closedEvents()).toBe(1);
+      expect((await storage.get(agentId))?.config?.model).toBe("gpt-5.4");
+    },
+  );
+});
+
+function subagentStatuses(manager: AgentManager, agentId: string): string[] {
+  return manager.listProviderSubagents(agentId).map(({ status }) => status);
+}
+
+test.each(["reported by the session", "of a provider subagent still running"] as const)(
+  "a model change refused on the account limit leaves background work %s on its session",
+  async (work) => {
+    await withAccountLimitedModelAgent({}, async (fixture) => {
+      const { manager, agentId, session } = fixture;
+      if (work === "reported by the session") {
+        session.runningBackgroundWorkIds = ["background-task"];
+      } else {
+        session.pushEvent({
+          type: "provider_subagent",
+          provider: "codex",
+          event: { type: "upsert", id: "background-task", status: "running" },
+        });
+        await vi.waitFor(() => expect(subagentStatuses(manager, agentId)).toEqual(["running"]));
+      }
+
+      // Reopening would cancel the work that outlived its turn.
+      await expect(manager.setAgentModel(agentId, "gpt-5.4-mini")).rejects.toBe(fixture.failure);
+
+      expect(fixture.sessionOpens.map(({ reason }) => reason)).toEqual(["create"]);
+      expect(fixture.resumedConfigs).toEqual([]);
+      expect(manager.getAgent(agentId)?.session).toBe(session);
+      expect(manager.getAgent(agentId)?.config.model).toBe("gpt-5.4");
+      if (work === "of a provider subagent still running") {
+        expect(subagentStatuses(manager, agentId)).toEqual(["running"]);
+      }
+    });
+  },
+);
+
+test.each(["a turn", "background work"] as const)(
+  "a model change refused on the account limit leaves %s that starts while the reopen waits",
+  async (work) => {
+    await withAccountLimitedModelAgent({}, async (fixture) => {
+      const { manager, agentId, session, storage } = fixture;
+      // Another lifecycle change holds the agent's lane while the reopen queues behind it.
+      const laneHeld = deferred<void>();
+      const applySnapshot = storage.applySnapshot.bind(storage);
+      vi.spyOn(storage, "applySnapshot").mockImplementationOnce(async (agent, options) => {
+        await laneHeld.promise;
+        await applySnapshot(agent, options);
+      });
+      const labeling = manager.setLabels(agentId, { note: "held" });
+      const changing = manager
+        .setAgentModel(agentId, "gpt-5.4-mini")
+        .catch((error: unknown) => error);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(session.requestedModels).toEqual(["gpt-5.4-mini"]);
+
+      let run: Promise<void> | null = null;
+      if (work === "a turn") {
+        run = drainAsyncGenerator(manager.streamAgent(agentId, "work that must survive"));
+        await manager.waitForAgentRunStart(agentId);
+      } else {
+        session.runningBackgroundWorkIds = ["background-task"];
+      }
+      laneHeld.resolve();
+      await labeling;
+
+      expect(await changing).toBe(fixture.failure);
+      expect(fixture.sessionOpens.map(({ reason }) => reason)).toEqual(["create"]);
+      expect(fixture.resumedConfigs).toEqual([]);
+      expect(session.interruptCalled).toBe(false);
+      expect(manager.getAgent(agentId)?.session).toBe(session);
+      expect(manager.getAgent(agentId)?.config.model).toBe("gpt-5.4");
+      if (run) {
+        session.pushEvent({ type: "turn_completed", provider: "codex", turnId: session.turnId });
+        await run;
+      }
+    });
+  },
+);
+
+test("a model change refused on the account limit leaves a turn that starts while the hooks pick an account", async () => {
+  const hookEntered = deferred<void>();
+  const hookHeld = deferred<void>();
+  await withAccountLimitedModelAgent(
+    {
+      onSessionOpen: async (request) => {
+        if (!request.modelChange) return;
+        hookEntered.resolve();
+        await hookHeld.promise;
+      },
+    },
+    async (fixture) => {
+      const { manager, agentId, session } = fixture;
+      const changing = manager
+        .setAgentModel(agentId, "gpt-5.4-mini")
+        .catch((error: unknown) => error);
+      await hookEntered.promise;
+
+      const run = drainAsyncGenerator(manager.streamAgent(agentId, "work that must survive"));
+      await manager.waitForAgentRunStart(agentId);
+      hookHeld.resolve();
+
+      expect(await changing).toBe(fixture.failure);
+      expect(fixture.resumedConfigs).toEqual([]);
+      expect(session.interruptCalled).toBe(false);
+      expect(manager.getAgent(agentId)?.session).toBe(session);
+      expect(manager.getAgent(agentId)?.config.model).toBe("gpt-5.4");
+      session.pushEvent({ type: "turn_completed", provider: "codex", turnId: session.turnId });
+      await run;
     },
   );
 });

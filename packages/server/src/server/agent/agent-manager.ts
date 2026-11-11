@@ -681,17 +681,36 @@ interface ReloadOpening extends PreparedSessionConfig {
 /** Agent state a reload reads before closing the old session and keeps for the new one. */
 type ReloadPreservedState = Pick<ManagedAgentBase, "historyPrimed" | "lastUsage" | "lastError">;
 
+/**
+ * Whether a reload's replacement reached the agent map. From then on a failed registration
+ * closes it and announces that itself, so the reload must not announce the closure again.
+ */
+interface ReloadRegistration {
+  published: boolean;
+}
+
+/** What still runs on a session, so that reopening it for a model change would cut it off. */
+type ModelChangeBusyReason = "starting" | "turn" | "scheduled_retry" | "background_work";
+
+/** Work began on the session while a model change waited to reopen it, so the refusal stands. */
+class ModelChangeBusyError extends Error {
+  constructor(readonly busy: ModelChangeBusyReason) {
+    super(`The session is busy (${busy}), so it was not reopened for the model change`);
+    this.name = "ModelChangeBusyError";
+  }
+}
+
 /** The words a session-open failure gives the user: a plugin's own reason when it refused. */
 function describeReopenFailure(error: unknown): string {
   if (error instanceof PluginHookRefusalError) return error.reason;
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Neither the new model's session nor the previous one opened again, so the agent is closed. */
+/** Neither the new model's session nor the previous one opened again. */
 class ModelChangeRestoreError extends Error {
-  constructor(failure: unknown, restoreFailure: unknown) {
+  constructor(failure: unknown, restoreFailure: unknown, agentClosed: boolean) {
     super(
-      `${describeReopenFailure(failure)}. Opening it again on the previous model failed too, so the agent is closed: ${describeReopenFailure(restoreFailure)}`,
+      `${describeReopenFailure(failure)}. Opening it again on the previous model failed too${agentClosed ? ", so the agent is closed" : ""}: ${describeReopenFailure(restoreFailure)}`,
       { cause: failure },
     );
     this.name = "ModelChangeRestoreError";
@@ -1964,6 +1983,8 @@ export class AgentManager {
     this.assertAcceptingAgentRegistrations();
     await this.clearActiveTurnForReload(agentId, options);
     const existing = this.requireSessionAgent(agentId);
+    // Work can start while the reopen waits in the lifecycle lane, and it keeps the session.
+    if (modelChange) this.assertIdleForModelChange(existing);
     this.raiseDeferredFinishedAttention(agentId, { cause: "runtime_released", notify: false });
     const rehydrateFromDisk = options?.rehydrateFromDisk ?? false;
     const preserved: ReloadPreservedState = {
@@ -1982,6 +2003,8 @@ export class AgentManager {
     } as AgentSessionConfig;
     // The hooks run while the old session still stands, so a refusal leaves it untouched.
     const opening = await this.prepareReloadOpening(existing, client, refreshConfig, modelChange);
+    // So can work that starts while the hooks pick an account.
+    if (modelChange) this.assertIdleForModelChange(existing);
     if (
       Object.keys(opening.storedConfig.mcpServers ?? {}).length > 0 &&
       existing.session.capabilities.supportsMcpServers !== true
@@ -1990,6 +2013,7 @@ export class AgentManager {
     }
 
     let closedExisting: ManagedAgentClosed | undefined;
+    const registration: ReloadRegistration = { published: false };
     try {
       // A persisted thread can have only one writer, even when its turn is idle.
       await this.closeReloadedSession(existing.session, agentId);
@@ -2004,6 +2028,7 @@ export class AgentManager {
         closed: closedExisting,
         preserved,
         rehydrateFromDisk,
+        registration,
       });
     } catch (error) {
       if (closedExisting) {
@@ -2015,9 +2040,10 @@ export class AgentManager {
             closed: closedExisting,
             preserved,
             failure: error,
+            failedRegistration: registration,
           });
         }
-        this.emitClosedAgent(closedExisting, { persist: false });
+        if (!registration.published) this.emitClosedAgent(closedExisting, { persist: false });
       } else if (this.agents.get(agentId) === existing) {
         existing.lifecycle = "error";
         existing.lastError = error instanceof Error ? error.message : String(error);
@@ -2068,8 +2094,9 @@ export class AgentManager {
     closed: ManagedAgentClosed;
     preserved: ReloadPreservedState;
     rehydrateFromDisk: boolean;
+    registration: ReloadRegistration;
   }): Promise<ManagedAgent> {
-    const { client, handle, opening, closed, preserved, rehydrateFromDisk } = input;
+    const { client, handle, opening, closed, preserved, rehydrateFromDisk, registration } = input;
     const agentId = closed.id;
     const hadPreviousPaseoToolPolicy = this.paseoToolPolicies.has(agentId);
     const previousPaseoToolPolicy = this.paseoToolPolicies.get(agentId);
@@ -2095,7 +2122,7 @@ export class AgentManager {
 
       // Preserve existing labels and timeline during reload.
       handedToRegistration = true;
-      return await this.registerSession(session, opening.storedConfig, agentId, {
+      return this.registerSession(session, opening.storedConfig, agentId, {
         labels: closed.labels,
         workspaceId: closed.workspaceId,
         owner: closed.owner,
@@ -2109,6 +2136,9 @@ export class AgentManager {
         // session was closing must not come back with the replacement.
         attention: closed.attention,
         restoring: true,
+        onPublished: () => {
+          registration.published = true;
+        },
       });
     } finally {
       if (!handedToRegistration) {
@@ -2128,6 +2158,9 @@ export class AgentManager {
    * The old session closed and the new model's session did not open. Opening the previous
    * settings once more keeps the agent; the session-open hooks run again for it and may place it
    * on another account. Rejects with the failure either way, so the model change still fails.
+   *
+   * A registration that published the new model's agent announced its closure and stored that
+   * model; the record then gets the previous settings back, which the agent closes or reopens with.
    */
   private async restoreAfterFailedModelChange(input: {
     client: AgentClient;
@@ -2136,8 +2169,16 @@ export class AgentManager {
     closed: ManagedAgentClosed;
     preserved: ReloadPreservedState;
     failure: unknown;
+    failedRegistration: ReloadRegistration;
   }): Promise<never> {
-    const { client, provider, closed, failure } = input;
+    const { client, provider, closed, failure, failedRegistration } = input;
+    if (!this.acceptingAgentRegistrations) {
+      // Nothing registers once shutdown began, so the agent stays closed without another opening.
+      if (failedRegistration.published) this.enqueueBackgroundPersist(closed);
+      else this.emitClosedAgent(closed, { persist: false });
+      throw failure;
+    }
+    const restoreRegistration: ReloadRegistration = { published: false };
     try {
       const opening = await this.prepareReloadOpening(
         closed,
@@ -2145,12 +2186,18 @@ export class AgentManager {
         { ...closed.config, provider },
         false,
       );
-      await this.installReloadedSession({ ...input, opening, rehydrateFromDisk: false });
+      await this.installReloadedSession({
+        ...input,
+        opening,
+        rehydrateFromDisk: false,
+        registration: restoreRegistration,
+      });
     } catch (restoreFailure) {
-      if (!this.agents.has(closed.id)) {
-        this.emitClosedAgent(closed, { persist: false });
+      // This opening ran the hooks again, so its end is announced unless its registration did.
+      if (!restoreRegistration.published) {
+        this.emitClosedAgent(closed, { persist: failedRegistration.published });
       }
-      throw new ModelChangeRestoreError(failure, restoreFailure);
+      throw new ModelChangeRestoreError(failure, restoreFailure, !this.agents.has(closed.id));
     }
     throw failure;
   }
@@ -2589,8 +2636,8 @@ export class AgentManager {
    * The provider refused the switch on this account's limit. Opening the session again with the
    * new model lets the session-open hooks place it on an account that still has room for it.
    * Without such a hook it would open on the same account and fail on the next turn instead, so
-   * the refusal stands. A turn, a permission prompt, a scheduled retry or a startup still owns
-   * the session, so those keep the refusal instead of being cut off.
+   * the refusal stands. Work that still runs on the session keeps the refusal too, instead of
+   * being cut off by the reopen.
    */
   private async reopenSessionWithModel(
     agent: ActiveManagedAgent,
@@ -2603,12 +2650,9 @@ export class AgentManager {
       this.logger.info({ ...fields, result: "no_session_open_hook" }, message);
       throw limitError;
     }
-    if (
-      agent.lifecycle === "initializing" ||
-      this.isTurnInProgress(agent.id) ||
-      this.turnRetries.get(agent.id)?.timer
-    ) {
-      this.logger.info({ ...fields, result: "kept_busy_session" }, message);
+    const busy = this.modelChangeBusyReason(agent);
+    if (busy) {
+      this.logger.info({ ...fields, result: "kept_busy_session", busy }, message);
       throw limitError;
     }
     try {
@@ -2620,9 +2664,13 @@ export class AgentManager {
       );
     } catch (reloadError) {
       const reason = describeReopenFailure(reloadError);
-      if (reloadError instanceof AgentTurnInProgressError) {
-        // A turn started while the reopen waited for the agent's lifecycle lane.
-        this.logger.info({ ...fields, result: "kept_busy_session" }, message);
+      if (
+        reloadError instanceof AgentTurnInProgressError ||
+        reloadError instanceof ModelChangeBusyError
+      ) {
+        // Work started while the reopen waited for the agent's lifecycle lane or for the hooks.
+        const lateBusy = reloadError instanceof ModelChangeBusyError ? reloadError.busy : "turn";
+        this.logger.info({ ...fields, result: "kept_busy_session", busy: lateBusy }, message);
         throw limitError;
       }
       if (reloadError instanceof PluginHookRefusalError) {
@@ -2635,6 +2683,7 @@ export class AgentManager {
         { ...fields, result: "reopen_failed", reason, agentOpen: Boolean(live?.session) },
         message,
       );
+      if (reloadError instanceof AgentManagerShuttingDownError) throw reloadError;
       throw new Error(`Could not reopen the session to change the model: ${reason}`, {
         cause: reloadError,
       });
@@ -2646,6 +2695,26 @@ export class AgentManager {
       this.emitState(reopened);
     }
     this.logger.info({ ...fields, result: "reopened" }, message);
+  }
+
+  /** What still runs on the agent's session and a reopen would cut off, or null when nothing does. */
+  private modelChangeBusyReason(agent: ActiveManagedAgent): ModelChangeBusyReason | null {
+    if (agent.lifecycle === "initializing") return "starting";
+    if (this.isTurnInProgress(agent.id)) return "turn";
+    if (this.turnRetries.get(agent.id)?.timer) return "scheduled_retry";
+    // A reload cancels the subagents still running; background work outlives the turn that began it.
+    if (
+      (agent.session.getRunningBackgroundWorkIds?.().length ?? 0) > 0 ||
+      this.providerSubagents.list(agent.id).some((subagent) => subagent.status === "running")
+    ) {
+      return "background_work";
+    }
+    return null;
+  }
+
+  private assertIdleForModelChange(agent: ActiveManagedAgent): void {
+    const busy = this.modelChangeBusyReason(agent);
+    if (busy) throw new ModelChangeBusyError(busy);
   }
 
   async setAgentThinkingOption(
@@ -4285,6 +4354,11 @@ export class AgentManager {
        * activity in it.
        */
       restoring?: boolean;
+      /**
+       * Called once the agent is in the manager. From then on a failed registration closes it
+       * and announces that itself.
+       */
+      onPublished?: () => void;
       initialTitle?: string | null;
       publishWhenReady?: boolean;
       workspaceId?: string;
@@ -4332,6 +4406,7 @@ export class AgentManager {
       this.assertAcceptingAgentRegistrations();
       this.agents.set(resolvedAgentId, managed);
       registeredAgent = managed;
+      options?.onPublished?.();
       // Initialize previousStatus to track transitions
       this.previousStatuses.set(resolvedAgentId, managed.lifecycle);
       if (session.initialTimeline?.length) {
