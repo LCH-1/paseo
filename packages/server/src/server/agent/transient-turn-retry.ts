@@ -11,10 +11,12 @@ const TRANSIENT_CODE =
 const TRANSIENT_MESSAGE =
   /(?:model|server|service).{0,60}(?:at capacity|overload|temporarily unavailable)|\boverloaded\b|\btoo many requests\b|\brate limit(?:ed| exceeded| reached| error)\b|\b(?:network|connection) (?:error|failed|reset|closed|timed out)\b|\brequest (?:timed out|timeout)\b|\bfetch failed\b|\bsocket hang up\b|\b(?:bad gateway|gateway timeout|service unavailable|internal server error)\b|\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN)\b/i;
 
+// "You've hit your limit" and "You've reached your Fable limit" name the account's own limit;
+// "reached the token limit" names a limit of the request, which no other account lifts.
 const ACCOUNT_LIMIT =
-  /\b(?:api error|error|status|http)\W{0,3}429\b|\brate[_ -]?limit|\btoo many requests\b|insufficient[_ ]quota|quota.{0,30}(?:exceeded|exhausted)|\b(?:usage|weekly|monthly|daily|hourly|session|model|5-hour|five-hour)[_ -]limit|\b(?:hit|reached) (?:your |the )?(?:[\w.-]+ ){0,3}limit\b/i;
+  /\b(?:api error|error|status|http)\W{0,3}429\b|\brate[_ -]?limit|\btoo many requests\b|insufficient[_ ]quota|quota.{0,30}(?:exceeded|exhausted)|\b(?:usage|weekly|monthly|daily|hourly|session|model|5-hour|five-hour)[_ -]limit|\b(?:hit|reached) your (?:[\w.-]+ ){0,3}limit\b/i;
 const NOT_ACCOUNT_LIMIT =
-  /context[_ ](?:length|window)|max(?:imum)?[_ ]tokens|prompt is too long|authentication|unauthori[sz]ed|invalid[_ ]api[_ ]key/i;
+  /context[_ ]?(?:length|window|limit)|max(?:imum)?[_ ]?(?:output[_ ])?tokens|\b(?:output[_ ])?tokens? (?:limit|maximum)|prompt is too long|\bbudget\b|authentication|unauthori[sz]ed|invalid[_ ]api[_ ]key/i;
 
 /** The provider refused a request on the account's rate or usage limit; another account may have room. */
 export function isAccountLimitError(error: unknown): boolean {
