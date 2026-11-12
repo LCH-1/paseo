@@ -13,8 +13,8 @@ import type { UsageDisplayAs } from "./preferences";
 import { UsageSourceIcon } from "./source-icon";
 import type { UsageTone } from "./types";
 
-/** Room for the window name, meter, percentage and compact reset countdown. */
-export const PINNED_USAGE_DETAILS_MAX_WIDTH = 360;
+/** Keep the card within a normal sidebar while showing its reset date and countdown. */
+export const PINNED_USAGE_DETAILS_MAX_WIDTH = 320;
 // A long window name ("5시간 · GPT-5.3-Codex-Spark") gives way here, keeping its period, so the
 // name column it widens for every row never takes the reset time's room.
 const WINDOW_NAME_MAX_WIDTH = 104;
@@ -173,12 +173,15 @@ function WindowDetailRow({
   );
 }
 
-/** Keep the exact reset accessible while the visible row only shows its countdown. */
+/** A short local date and countdown, with the full timestamp accessible. */
 function ResetDetail({ reset }: { reset: PinnedUsageReset }) {
   return (
     <View style={styles.reset} accessibilityLabel={reset.at} testID="sidebar-usage-detail-reset">
+      <Text style={styles.resetAt} numberOfLines={1}>
+        {reset.compactAt}
+      </Text>
       <Text style={styles.resetRelative} numberOfLines={1}>
-        {reset.relative}
+        · {reset.relative}
       </Text>
     </View>
   );
@@ -222,8 +225,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   windowRow: {
     flexDirection: "row",
+    flexWrap: "wrap",
     alignItems: "center",
-    gap: theme.spacing[2],
+    gap: theme.spacing[1.5],
   },
   // Names are the rows' context; the percent and the time to reset carry the values.
   windowName: {
@@ -233,7 +237,7 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.sm,
   },
   meter: {
-    width: 56,
+    width: 44,
     height: 6,
     borderRadius: 3,
   },
@@ -249,10 +253,17 @@ const styles = StyleSheet.create((theme) => ({
   percentDanger: { color: theme.colors.statusDanger },
   reset: {
     flexDirection: "row",
+    flexWrap: "wrap",
     alignItems: "center",
     flexShrink: 1,
     minWidth: 0,
     gap: theme.spacing[1],
+  },
+  resetAt: {
+    flexShrink: 0,
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    fontVariant: ["tabular-nums"],
   },
   resetRelative: {
     flexShrink: 0,

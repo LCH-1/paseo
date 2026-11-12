@@ -466,6 +466,7 @@ describe("resolveProviderPinnedUsage hover card", () => {
 
     expect(provider.windows[0].detail.reset).toEqual({
       at: `11. 11. (수) ${clock("오전 09:00", "09:00")}`,
+      compactAt: "11/11 09:00",
       relative: "지남",
     });
   });

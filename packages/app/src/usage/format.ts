@@ -79,6 +79,19 @@ export function formatResetAt(
   return resetFormatter(date.getFullYear() !== new Date(now).getFullYear()).format(date);
 }
 
+/** Local reset date and 24-hour time for a narrow sidebar card. */
+export function formatCompactResetAt(
+  iso: string | null | undefined,
+  now: number = Date.now(),
+): string | null {
+  const at = parseInstant(iso);
+  if (at === null) return null;
+  const date = new Date(at);
+  const year = date.getFullYear() !== new Date(now).getFullYear() ? `${date.getFullYear()}/` : "";
+  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return `${year}${date.getMonth() + 1}/${date.getDate()} ${clock}`;
+}
+
 /** A compact countdown in its largest whole unit; never less than a minute. */
 function aheadSpan(ms: number): string {
   if (ms < HOUR_MS) return `${Math.max(1, Math.floor(ms / MINUTE_MS))}m`;

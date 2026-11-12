@@ -192,11 +192,16 @@ describe("PinnedUsageDetails", () => {
     ]);
   });
 
-  it("shows compact reset countdowns and keeps exact timestamps accessible", () => {
+  it("shows compact dates and countdowns and keeps full timestamps accessible", () => {
     render();
     const [claude] = byTestId(container!, "sidebar-usage-detail-provider");
     const resets = byTestId(claude, "sidebar-usage-detail-reset");
-    expect(resets.map(cells)).toEqual([["4h"], ["D-3"], ["D-6"], ["지남"]]);
+    expect(resets.map(cells)).toEqual([
+      ["11/11 15:30", "· 4h"],
+      ["11/14 13:00", "· D-3"],
+      ["11/17 15:00", "· D-6"],
+      ["11/11 09:00", "· 지남"],
+    ]);
     expect(resets[1].getAttribute("aria-label")).toMatch(/^11\. 14\. \(토\) (오후 01:00|13:00)$/);
   });
 

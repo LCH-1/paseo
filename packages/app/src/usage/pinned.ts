@@ -1,4 +1,4 @@
-import { formatPct, formatResetAt, formatResetIn } from "./format";
+import { formatCompactResetAt, formatPct, formatResetAt, formatResetIn } from "./format";
 import { displayPercent } from "./model";
 import { effectiveUsagePins, type UsageDisplayAs, type UsagePreferences } from "./preferences";
 import { windowTone } from "./tone";
@@ -32,6 +32,7 @@ export interface PinnedUsageWindowDetail {
 
 /** A window's next reset, as the hover card reads it. */
 export interface PinnedUsageReset {
+  compactAt: string;
   /** "11. 14. (토) 오후 01:00", with the year in front when it falls in another year. */
   at: string;
   /** A compact countdown, such as "D-3", "5h", "12m", or "지남" once it has passed. */
@@ -183,8 +184,9 @@ const UNNAMED_ACCOUNT = "이름을 알 수 없는 계정";
 
 function pinnedUsageReset(iso: string | null | undefined, now: number): PinnedUsageReset | null {
   const at = formatResetAt(iso, now);
+  const compactAt = formatCompactResetAt(iso, now);
   const relative = formatResetIn(iso, now);
-  return at && relative ? { at, relative } : null;
+  return at && compactAt && relative ? { at, compactAt, relative } : null;
 }
 
 function detailPinnedWindow(

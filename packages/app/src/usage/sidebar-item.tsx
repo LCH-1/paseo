@@ -1,6 +1,11 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Pressable, View, type PressableStateCallbackType } from "react-native";
+import {
+  Pressable,
+  View,
+  type LayoutChangeEvent,
+  type PressableStateCallbackType,
+} from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { builtinSidebarNavLabelKey } from "@/sidebar-nav/model";
@@ -104,11 +109,17 @@ function PinnedUsageTrigger({
   onPress: () => void;
 }) {
   const { sources, preferences } = summary;
+  const [detailsWidth, setDetailsWidth] = useState(PINNED_USAGE_DETAILS_MAX_WIDTH);
+  const measureWidth = useCallback((event: LayoutChangeEvent) => {
+    const width = event.nativeEvent.layout.width;
+    if (width > 0) setDetailsWidth(Math.min(PINNED_USAGE_DETAILS_MAX_WIDTH, width));
+  }, []);
   return (
     <Tooltip delayDuration={250}>
       <TooltipTrigger asChild>
         <Pressable
           onPress={onPress}
+          onLayout={measureWidth}
           accessibilityRole="button"
           accessibilityLabel={pinnedUsageLabel(label, sources)}
           style={triggerStyle}
@@ -145,7 +156,7 @@ function PinnedUsageTrigger({
         align="end"
         offset={8}
         maxWidth={PINNED_USAGE_DETAILS_MAX_WIDTH}
-        style={styles.detailsCard}
+        style={[styles.detailsCard, { width: detailsWidth }]}
         testID="sidebar-usage-details"
       >
         <PinnedUsageHoverCard reports={summary.reports} preferences={preferences} />

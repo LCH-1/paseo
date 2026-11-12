@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatAmount, formatResetAt, formatResetIn, formatResetLabel } from "./format";
+import {
+  formatAmount,
+  formatCompactResetAt,
+  formatResetAt,
+  formatResetIn,
+  formatResetLabel,
+} from "./format";
 
 describe("formatAmount", () => {
   it("groups thousands in the app's language", () => {
@@ -64,6 +70,17 @@ describe("formatResetAt", () => {
     for (const value of [null, undefined, "", "not a date"]) {
       expect(formatResetAt(value, now)).toBeNull();
       expect(formatResetIn(value, now)).toBeNull();
+    }
+  });
+});
+
+describe("formatCompactResetAt", () => {
+  it("keeps the local date and 24-hour time compact, including a different year", () => {
+    expect(formatCompactResetAt(local(2026, 11, 14, 13, 0), now)).toBe("11/14 13:00");
+    expect(formatCompactResetAt(local(2026, 11, 17, 3, 5, 39), now)).toBe("11/17 03:05");
+    expect(formatCompactResetAt(local(2027, 1, 2, 9, 5), now)).toBe("2027/1/2 09:05");
+    for (const value of [null, undefined, "", "not a date"]) {
+      expect(formatCompactResetAt(value, now)).toBeNull();
     }
   });
 });
