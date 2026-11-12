@@ -9,12 +9,15 @@ import { buildNewWorkspaceDraftKey } from "@/stores/draft-keys";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import {
   adoptLegacyNewWorkspaceDraft,
+  createNewWorkspaceTabCheckpoint,
+  createNewWorkspaceTabSessionStorage,
   completeNewWorkspaceLaunch,
   completeNewWorkspaceTab,
   NewWorkspaceTabsBar,
   newWorkspaceTabsBridge as bridge,
   useNewWorkspaceTabPresence,
   useHistoryTabPresence,
+  type NewWorkspaceTabEntry,
 } from "./new-workspace-tabs";
 import {
   clearNewWorkspaceDraftState,
@@ -36,6 +39,288 @@ vi.mock("@/stores/navigation-active-workspace-store", () => ({
 vi.mock("@/workspace-tabs/launcher", () => ({
   NewTabLauncherProvider: ({ children }: { children: ReactNode }) => children,
 }));
+
+it("restores open creation tabs after reload without persisting route selection or completion history", async () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: async (key: string) => values.get(key) ?? null,
+    setItem: async (key: string, value: string) => {
+      values.set(key, value);
+    },
+  };
+  const entries: NewWorkspaceTabEntry[] = [
+    { draftId: "one", serverId: "host-a", href: "/new?draftId=one" },
+    { draftId: "two", serverId: "host-b", href: "/new?draftId=two" },
+    { draftId: "history", serverId: "", href: "/sessions", kind: "history" },
+  ];
+  const first = createNewWorkspaceTabCheckpoint({
+    storage,
+    key: "creation-tabs",
+    getEntries: () => entries,
+    restore: () => {},
+  });
+  first.touch("one");
+  await first.flush();
+  expect(JSON.parse(values.get("creation-tabs")!)).toEqual({
+    version: 1,
+    entries: entries.slice(0, 2),
+  });
+  let restored: readonly NewWorkspaceTabEntry[] = [];
+  const reloaded = createNewWorkspaceTabCheckpoint({
+    storage,
+    key: "creation-tabs",
+    getEntries: () => restored,
+    restore: (next) => {
+      restored = next;
+    },
+  });
+  await reloaded.hydrate();
+  expect(restored).toEqual(entries.slice(0, 2));
+});
+
+it("keeps live opens and closes authoritative while a saved tab checkpoint is loading", async () => {
+  const saved = [
+    { draftId: "closed", serverId: "old", href: "/new?draftId=closed" },
+    { draftId: "changed", serverId: "old", href: "/new?draftId=changed&serverId=old" },
+    { draftId: "untouched", serverId: "old", href: "/new?draftId=untouched" },
+  ];
+  let read!: (value: string) => void;
+  let entries: readonly NewWorkspaceTabEntry[] = [];
+  let written = "";
+  const checkpoint = createNewWorkspaceTabCheckpoint({
+    key: "creation-tabs",
+    storage: {
+      getItem: () =>
+        new Promise<string>((resolve) => {
+          read = resolve;
+        }),
+      setItem: async (_key, value) => {
+        written = value;
+      },
+    },
+    getEntries: () => entries,
+    restore: (next) => {
+      entries = next;
+    },
+  });
+  const restoring = checkpoint.hydrate();
+  checkpoint.touch("closed");
+  checkpoint.touch("changed");
+  checkpoint.touch("new");
+  entries = [
+    { draftId: "changed", serverId: "new-host", href: "/new?draftId=changed&serverId=new-host" },
+    { draftId: "new", serverId: "new-host", href: "/new?draftId=new" },
+  ];
+  read(JSON.stringify({ version: 1, entries: saved }));
+  await restoring;
+  await checkpoint.flush();
+  expect(entries).toEqual([
+    { draftId: "changed", serverId: "new-host", href: "/new?draftId=changed&serverId=new-host" },
+    saved[2],
+    { draftId: "new", serverId: "new-host", href: "/new?draftId=new" },
+  ]);
+  expect(JSON.parse(written).entries).toEqual(entries);
+});
+
+it("waits for saved composer inputs before exposing restored tabs to preview replacement", async () => {
+  const saved = [{ draftId: "saved", serverId: "host", href: "/new?draftId=saved" }];
+  let inputsReady!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    inputsReady = resolve;
+  });
+  let entries: readonly NewWorkspaceTabEntry[] = [];
+  const restore = vi.fn((next) => {
+    entries = next;
+  });
+  const checkpoint = createNewWorkspaceTabCheckpoint({
+    key: "creation-tabs",
+    storage: {
+      getItem: async () => JSON.stringify({ version: 1, entries: saved }),
+      setItem: vi.fn(),
+    },
+    getEntries: () => entries,
+    beforeRestore: () => waiting,
+    restore,
+  });
+  const restoring = checkpoint.hydrate();
+  await Promise.resolve();
+  expect(restore).not.toHaveBeenCalled();
+  checkpoint.touch("saved");
+  inputsReady();
+  await restoring;
+  expect(entries).toEqual([]);
+});
+
+it("never overwrites a checkpoint it cannot read or recognize", async () => {
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    for (const raw of ["broken json", JSON.stringify({ version: 2, entries: [] })]) {
+      const write = vi.fn();
+      const restore = vi.fn();
+      const checkpoint = createNewWorkspaceTabCheckpoint({
+        key: "creation-tabs",
+        storage: { getItem: async () => raw, setItem: write },
+        getEntries: () => [{ draftId: "new", serverId: "host", href: "/new?draftId=new" }],
+        restore,
+      });
+      checkpoint.touch("new");
+      await checkpoint.flush();
+      expect(write).not.toHaveBeenCalled();
+      expect(restore).not.toHaveBeenCalled();
+    }
+    expect(warning).toHaveBeenCalledTimes(2);
+  } finally {
+    warning.mockRestore();
+  }
+});
+
+it("serializes pending checkpoint writes so an earlier save cannot overwrite the newest tabs", async () => {
+  let entries: readonly NewWorkspaceTabEntry[] = [
+    { draftId: "first", serverId: "host", href: "/new?draftId=first" },
+  ];
+  let finishFirst!: () => void;
+  const writes: string[] = [];
+  const checkpoint = createNewWorkspaceTabCheckpoint({
+    key: "creation-tabs",
+    storage: {
+      getItem: async () => null,
+      setItem: async (_key, value) => {
+        writes.push(value);
+        if (writes.length === 1)
+          await new Promise<void>((resolve) => {
+            finishFirst = resolve;
+          });
+      },
+    },
+    getEntries: () => entries,
+    restore: () => {},
+  });
+  await checkpoint.hydrate();
+  checkpoint.touch("first");
+  await Promise.resolve();
+  entries = [{ draftId: "latest", serverId: "host", href: "/new?draftId=latest" }];
+  checkpoint.touch("first");
+  checkpoint.touch("latest");
+  expect(writes).toHaveLength(1);
+  finishFirst();
+  await checkpoint.flush();
+  expect(writes.map((value) => JSON.parse(value).entries)).toEqual([
+    [{ draftId: "first", serverId: "host", href: "/new?draftId=first" }],
+    entries,
+  ]);
+});
+
+it("keeps integrated windows' creation checkpoints separate and restores a reload in the same window", async () => {
+  function browserWindowStorage() {
+    const values = new Map<string, string>();
+    return {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        values.set(key, value);
+      },
+    };
+  }
+  const one = browserWindowStorage();
+  const two = browserWindowStorage();
+  const entryOne = { draftId: "one", serverId: "host", href: "/new?draftId=one" };
+  const entryTwo = { draftId: "two", serverId: "host", href: "/new?draftId=two" };
+  const first = createNewWorkspaceTabCheckpoint({
+    key: "creation-tabs",
+    storage: createNewWorkspaceTabSessionStorage(() => one),
+    getEntries: () => [entryOne],
+    restore: () => {},
+  });
+  const second = createNewWorkspaceTabCheckpoint({
+    key: "creation-tabs",
+    storage: createNewWorkspaceTabSessionStorage(() => two),
+    getEntries: () => [entryTwo],
+    restore: () => {},
+  });
+  first.touch("one");
+  await first.flush();
+  second.touch("two");
+  await second.flush();
+  let restored: readonly NewWorkspaceTabEntry[] = [];
+  const reloaded = createNewWorkspaceTabCheckpoint({
+    key: "creation-tabs",
+    storage: createNewWorkspaceTabSessionStorage(() => one),
+    getEntries: () => restored,
+    restore: (next) => {
+      restored = next;
+    },
+  });
+  await reloaded.hydrate();
+  expect(restored).toEqual([entryOne]);
+  expect(JSON.parse(two.getItem("creation-tabs")!).entries).toEqual([entryTwo]);
+});
+
+it("reports rejected browser storage access without falling back to shared persistence", async () => {
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const access = vi.fn(() => {
+      throw new Error("Storage access denied");
+    });
+    const restore = vi.fn();
+    const checkpoint = createNewWorkspaceTabCheckpoint({
+      key: "creation-tabs",
+      storage: createNewWorkspaceTabSessionStorage(access),
+      getEntries: () => [{ draftId: "new", serverId: "host", href: "/new?draftId=new" }],
+      restore,
+    });
+    checkpoint.touch("new");
+    await checkpoint.flush();
+    expect(access).toHaveBeenCalledTimes(1);
+    expect(restore).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(
+      "[new-workspace-tabs] Failed to restore creation tabs",
+      expect.objectContaining({ message: "Storage access denied" }),
+    );
+  } finally {
+    warning.mockRestore();
+  }
+});
+
+it("persists explicitly kept empty tabs across reload and preserves pins on route presence updates", async () => {
+  const draftId = bridge.open({ serverId: "host-a" });
+  const href = bridge.getSnapshot().entries[0].href;
+  act(() => bridge.pin(draftId));
+  expect(bridge.hasInput(draftId)).toBe(false);
+  const presence = renderHook(
+    ({ serverId, currentHref }) =>
+      useNewWorkspaceTabPresence({ draftId, href: currentHref, serverId }),
+    { initialProps: { serverId: "host-a", currentHref: href } },
+  );
+  presence.rerender({ serverId: "host-b", currentHref: `${href}&name=Changed` });
+  const pinned = bridge.getSnapshot().entries.find((entry) => entry.draftId === draftId)!;
+  expect(pinned.pinned).toBe(true);
+  let saved = "";
+  const storage = {
+    getItem: async () => saved || null,
+    setItem: async (_key: string, value: string) => {
+      saved = value;
+    },
+  };
+  const checkpoint = createNewWorkspaceTabCheckpoint({
+    key: "creation-tabs",
+    storage,
+    getEntries: () => [pinned],
+    restore: () => {},
+  });
+  checkpoint.touch(draftId);
+  await checkpoint.flush();
+  let restored: readonly NewWorkspaceTabEntry[] = [];
+  const reloaded = createNewWorkspaceTabCheckpoint({
+    key: "creation-tabs",
+    storage,
+    getEntries: () => restored,
+    restore: (entries) => {
+      restored = entries;
+    },
+  });
+  await reloaded.hydrate();
+  expect(restored).toEqual([{ ...pinned, pinned: true }]);
+  presence.unmount();
+});
 
 afterEach(() => {
   cleanup();

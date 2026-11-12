@@ -15,6 +15,11 @@ interface SavedHostInput {
   endpoint: string;
 }
 
+interface NewWorkspaceRouteInput {
+  serverId: string;
+  draftId: string;
+}
+
 export function startupScenario(page: Page) {
   return new StartupScenario(page);
 }
@@ -68,6 +73,13 @@ class StartupScenario {
     await this.page.goto(
       `/h/${encodeURIComponent(input.serverId)}/workspace/${encodeURIComponent(input.workspaceId)}`,
     );
+    return new StartupAssertions(this.page);
+  }
+
+  async openNewWorkspace(input: NewWorkspaceRouteInput): Promise<StartupAssertions> {
+    await this.prepare();
+    const params = new URLSearchParams({ serverId: input.serverId, draftId: input.draftId });
+    await this.page.goto(`/new?${params}`);
     return new StartupAssertions(this.page);
   }
 
@@ -189,6 +201,38 @@ class StartupAssertions {
     return this;
   }
 
+  async expectsNewWorkspaceDraftRoute(input: NewWorkspaceRouteInput): Promise<this> {
+    await expect(this.page).toHaveURL(
+      (url) =>
+        url.pathname === "/new" &&
+        url.searchParams.get("serverId") === input.serverId &&
+        url.searchParams.get("draftId") === input.draftId,
+    );
+    await expect(this.page.getByTestId("root-error-boundary")).toHaveCount(0);
+    return this;
+  }
+
+  async completeDesktopDaemon(input: { serverId: string; listen: string }): Promise<this> {
+    await this.page.evaluate((status) => {
+      const complete = (
+        window as unknown as {
+          __paseoE2ECompleteDesktopDaemon?: (status: { serverId: string; listen: string }) => void;
+        }
+      ).__paseoE2ECompleteDesktopDaemon;
+      if (!complete) throw new Error("Pending desktop daemon bridge was not installed.");
+      complete(status);
+    }, input);
+    return this;
+  }
+
+  async expectsNewWorkspaceReady(input: NewWorkspaceRouteInput): Promise<this> {
+    await expect(this.page.getByTestId("workspace-create-submit")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(this.page.getByTestId("startup-splash")).toHaveCount(0);
+    return this.expectsNewWorkspaceDraftRoute(input);
+  }
+
   async expectsSidebarHidden(): Promise<this> {
     await expect(this.page.locator('[data-testid="sidebar-settings"]:visible')).toHaveCount(0);
     await expect(this.page.locator('[data-testid="sidebar-project-list"]:visible')).toHaveCount(0);
@@ -203,26 +247,38 @@ class StartupAssertions {
 
 async function installPendingDesktopBridge(page: Page): Promise<void> {
   await page.addInitScript(() => {
+    let daemonStatus = {
+      serverId: "srv_desktop_pending",
+      status: "starting",
+      listen: null as string | null,
+      hostname: null,
+      pid: null,
+      home: "",
+      version: null,
+      desktopManaged: true,
+      error: null,
+    };
+    let completeStart: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      completeStart = resolve;
+    });
+    (
+      window as unknown as {
+        __paseoE2ECompleteDesktopDaemon: (status: { serverId: string; listen: string }) => void;
+      }
+    ).__paseoE2ECompleteDesktopDaemon = (status) => {
+      daemonStatus = { ...daemonStatus, ...status, status: "running" };
+      completeStart();
+    };
     (window as unknown as { paseoDesktop: unknown }).paseoDesktop = {
       platform: "darwin",
       invoke: async (command: string) => {
         if (command === "start_desktop_daemon") {
-          await new Promise(() => {
-            // Keep the daemon in the startup phase until the test ends.
-          });
+          await started;
+          return daemonStatus;
         }
         if (command === "desktop_daemon_status") {
-          return {
-            serverId: "srv_desktop_pending",
-            status: "starting",
-            listen: null,
-            hostname: null,
-            pid: null,
-            home: "",
-            version: null,
-            desktopManaged: true,
-            error: null,
-          };
+          return daemonStatus;
         }
         if (command === "desktop_daemon_logs") {
           return { logPath: "", contents: "" };

@@ -19,6 +19,7 @@ export function filterProjectWindowHosts<T extends { serverId: string }>(
 
 const WINDOW_STORAGE_KEYS = new Set([
   "paseo-drafts",
+  "new-workspace-tabs",
   "panel-state",
   "sidebar-order",
   "sidebar-project-workspace-order",

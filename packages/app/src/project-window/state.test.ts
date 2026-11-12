@@ -28,6 +28,7 @@ describe("project window state", () => {
   it("keeps tabs, drafts, panels, filters, ordering and selection separate even for the same project", () => {
     for (const key of [
       "paseo-drafts",
+      "new-workspace-tabs",
       "panel-state",
       "sidebar-view",
       "sidebar-project-workspace-order",
