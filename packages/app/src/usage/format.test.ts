@@ -72,20 +72,20 @@ describe("formatResetIn", () => {
   const ahead = (ms: number) => new Date(now + ms).toISOString();
 
   it.each([
-    [30_000, "1분 후 초기화"],
-    [59 * MINUTE, "59분 후 초기화"],
-    [HOUR - 1000, "59분 후 초기화"],
-    [HOUR, "1시간 후 초기화"],
-    [23 * HOUR, "23시간 후 초기화"],
-    [DAY - MINUTE, "23시간 후 초기화"],
-    [DAY, "1일 후 초기화"],
-    [3 * DAY + 2 * HOUR, "3일 후 초기화"],
+    [30_000, "1m"],
+    [59 * MINUTE, "59m"],
+    [HOUR - 1000, "59m"],
+    [HOUR, "1h"],
+    [23 * HOUR, "23h"],
+    [DAY - MINUTE, "23h"],
+    [DAY, "D-1"],
+    [3 * DAY + 2 * HOUR, "D-3"],
   ])("reads %i ms ahead as %s, in its largest whole unit", (ms, expected) => {
     expect(formatResetIn(ahead(ms), now)).toBe(expected);
   });
 
   it("says a reset time that has come has passed", () => {
-    expect(formatResetIn(ahead(0), now)).toBe("초기화 시각 지남");
-    expect(formatResetIn(ahead(-5 * MINUTE), now)).toBe("초기화 시각 지남");
+    expect(formatResetIn(ahead(0), now)).toBe("지남");
+    expect(formatResetIn(ahead(-5 * MINUTE), now)).toBe("지남");
   });
 });

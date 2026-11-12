@@ -410,48 +410,26 @@ describe("resolveProviderPinnedUsage hover card", () => {
       [
         "claudecodelover@gmail.com",
         [
-          [
-            "5시간",
-            "12% 사용",
-            "default",
-            `11. 11. (수) ${clock("오후 03:30", "15:30")} · 4시간 후 초기화`,
-          ],
-          [
-            "주간",
-            "75% 사용",
-            "warning",
-            `11. 14. (토) ${clock("오후 01:00", "13:00")} · 3일 후 초기화`,
-          ],
+          ["5시간", "12% 사용", "default", `11. 11. (수) ${clock("오후 03:30", "15:30")} · 4h`],
+          ["주간", "75% 사용", "warning", `11. 14. (토) ${clock("오후 01:00", "13:00")} · D-3`],
           [
             "주간 · Fable",
             "95% 사용",
             "danger",
-            `2027. 1. 2. (토) ${clock("오전 09:05", "09:05")} · 51일 후 초기화`,
+            `2027. 1. 2. (토) ${clock("오전 09:05", "09:05")} · D-51`,
           ],
         ],
       ],
       [
         "claudecodelover2@gmail.com",
-        [
-          [
-            "주간",
-            "60% 사용",
-            "default",
-            `11. 17. (화) ${clock("오후 03:00", "15:00")} · 6일 후 초기화`,
-          ],
-        ],
+        [["주간", "60% 사용", "default", `11. 17. (화) ${clock("오후 03:00", "15:00")} · D-6`]],
       ],
     ]);
     expect(rows(providers[1])).toEqual([
       [
         null,
         [
-          [
-            "주간",
-            "48% 사용",
-            "default",
-            `11. 15. (일) ${clock("오전 10:36", "10:36")} · 3일 후 초기화`,
-          ],
+          ["주간", "48% 사용", "default", `11. 15. (일) ${clock("오전 10:36", "10:36")} · D-3`],
           ["주간 · Code review", "10% 사용", "default", null],
         ],
       ],
@@ -488,7 +466,7 @@ describe("resolveProviderPinnedUsage hover card", () => {
 
     expect(provider.windows[0].detail.reset).toEqual({
       at: `11. 11. (수) ${clock("오전 09:00", "09:00")}`,
-      relative: "초기화 시각 지남",
+      relative: "지남",
     });
   });
 

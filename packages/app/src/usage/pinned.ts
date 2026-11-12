@@ -34,7 +34,7 @@ export interface PinnedUsageWindowDetail {
 export interface PinnedUsageReset {
   /** "11. 14. (토) 오후 01:00", with the year in front when it falls in another year. */
   at: string;
-  /** "3일 후 초기화", or "초기화 시각 지남" once it has passed. */
+  /** A compact countdown, such as "D-3", "5h", "12m", or "지남" once it has passed. */
   relative: string;
 }
 

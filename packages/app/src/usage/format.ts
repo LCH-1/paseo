@@ -79,16 +79,16 @@ export function formatResetAt(
   return resetFormatter(date.getFullYear() !== new Date(now).getFullYear()).format(date);
 }
 
-/** A span ahead in its largest whole unit: "3일", "5시간", "12분" (never less than a minute). */
+/** A compact countdown in its largest whole unit; never less than a minute. */
 function aheadSpan(ms: number): string {
-  if (ms < HOUR_MS) return `${Math.max(1, Math.floor(ms / MINUTE_MS))}분`;
-  if (ms < DAY_MS) return `${Math.floor(ms / HOUR_MS)}시간`;
-  return `${Math.floor(ms / DAY_MS)}일`;
+  if (ms < HOUR_MS) return `${Math.max(1, Math.floor(ms / MINUTE_MS))}m`;
+  if (ms < DAY_MS) return `${Math.floor(ms / HOUR_MS)}h`;
+  return `D-${Math.floor(ms / DAY_MS)}`;
 }
 
 /**
- * How far off a reset is, in its largest whole unit: "3일 후 초기화", "5시간 후 초기화",
- * "12분 후 초기화", or "초기화 시각 지남" once it has passed. Null for a missing or unreadable time.
+ * How far off a reset is: "D-3", "5h", "12m", or "지남" once it has passed.
+ * Null for a missing or unreadable time.
  */
 export function formatResetIn(
   iso: string | null | undefined,
@@ -97,7 +97,7 @@ export function formatResetIn(
   const at = parseInstant(iso);
   if (at === null) return null;
   const remainingMs = at - now;
-  return remainingMs > 0 ? `${aheadSpan(remainingMs)} 후 초기화` : "초기화 시각 지남";
+  return remainingMs > 0 ? aheadSpan(remainingMs) : "지남";
 }
 
 /** A balance amount as the app's language writes it: "$1,234.50", "12,345". */

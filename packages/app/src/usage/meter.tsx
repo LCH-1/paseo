@@ -5,8 +5,8 @@ import { clampPct } from "./format";
 import type { UsageDisplayAs } from "./preferences";
 import type { UsageTone } from "./types";
 
-/** The sidebar meters' fill for the share left, over a `surface3` track for the share used. */
-export const USAGE_REMAINING_COLOR = "#91b89c";
+/** The sidebar meters' normal used share, over a gray track for the remaining capacity. */
+export const USAGE_USED_COLOR = "#91b89c";
 
 function fillToneStyle(tone: UsageTone) {
   switch (tone) {
@@ -35,14 +35,15 @@ export function UsageMeter({
   percent: number;
   tone: UsageTone;
   quiet?: boolean;
-  /** Sidebar bars fill the remaining share over a gray track in either input mode. */
+  /** Sidebar input unit; the filled share always represents how much was used. */
   displayAs?: UsageDisplayAs;
   style?: StyleProp<ViewStyle>;
 }) {
-  const fillWidth = clampPct(displayAs === "used" ? 100 - percent : percent);
+  const fillWidth = clampPct(displayAs === "remaining" ? 100 - percent : percent);
   const fillStyle = useMemo<StyleProp<ViewStyle>>(() => {
     let color = quiet ? styles.fillQuiet : fillToneStyle(tone);
-    if (displayAs) color = styles.remaining;
+    if (displayAs)
+      color = tone === "warning" || tone === "danger" ? fillToneStyle(tone) : styles.fillUsed;
     return [styles.fill, color, { width: `${fillWidth}%` }];
   }, [displayAs, fillWidth, quiet, tone]);
   let trackColor;
@@ -70,7 +71,7 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface4,
   },
   used: { backgroundColor: theme.colors.surface3 },
-  remaining: { backgroundColor: USAGE_REMAINING_COLOR },
+  fillUsed: { backgroundColor: USAGE_USED_COLOR },
   fillDefault: {
     backgroundColor: theme.colors.foregroundMuted,
   },

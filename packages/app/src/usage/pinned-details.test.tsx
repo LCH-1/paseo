@@ -145,11 +145,27 @@ function child(element: Element, index: number): HTMLElement {
 }
 
 describe("PinnedUsageDetails", () => {
+  it("fills used percentages and applies warning colours without account indentation", () => {
+    render();
+    const [claude] = byTestId(container!, "sidebar-usage-detail-provider");
+    const rows = byTestId(claude, "sidebar-usage-detail-row");
+    const fills = rows.map((row) => child(child(row, 1), 0));
+    expect(fills.map((fill) => fill.style.width)).toEqual(["12%", "75%", "95%", "5%"]);
+    expect(fills.map((fill) => fill.style.backgroundColor)).toEqual([
+      "rgb(145, 184, 156)",
+      "rgb(217, 119, 6)",
+      "rgb(185, 28, 28)",
+      "rgb(145, 184, 156)",
+    ]);
+    expect(
+      byTestId(claude, "sidebar-usage-detail-account").map((account) => account.style.paddingLeft),
+    ).toEqual(["", "", ""]);
+  });
   it("lays out providers, then accounts, then a row per window", () => {
     render();
     const providers = byTestId(container!, "sidebar-usage-detail-provider");
 
-    expect(container!.textContent).toMatch(/^사용량남은 양/);
+    expect(container!.textContent).not.toContain("사용");
     expect(providers.map((provider) => provider.firstElementChild?.textContent)).toEqual([
       "Claude",
       "Codex",
@@ -169,48 +185,33 @@ describe("PinnedUsageDetails", () => {
       byTestId(account, "sidebar-usage-detail-row"),
     );
     expect(claudeRows.map((row) => cells(row).slice(0, 3))).toEqual([
-      ["5시간", "", "12% 사용"],
-      ["주간", "", "75% 사용"],
-      ["주간", "", "95% 사용"],
-      ["주간", "", "5% 사용"],
+      ["5시간", "", "12%"],
+      ["주간", "", "75%"],
+      ["주간", "", "95%"],
+      ["주간", "", "5%"],
     ]);
   });
 
-  it("reads each reset as its date and time, then how far off it is", () => {
+  it("shows compact reset countdowns and keeps exact timestamps accessible", () => {
     render();
     const [claude] = byTestId(container!, "sidebar-usage-detail-provider");
-    const resets = byTestId(claude, "sidebar-usage-detail-reset").map(cells);
-
-    expect(resets[1]).toEqual([
-      expect.stringMatching(/^11\. 14\. \(토\) (오후 01:00|13:00)$/),
-      "·",
-      "3일 후 초기화",
-    ]);
-    expect(resets[3]).toEqual([
-      expect.stringMatching(/^11\. 11\. \(수\) (오전 09:00|09:00)$/),
-      "·",
-      "초기화 시각 지남",
-    ]);
+    const resets = byTestId(claude, "sidebar-usage-detail-reset");
+    expect(resets.map(cells)).toEqual([["4h"], ["D-3"], ["D-6"], ["지남"]]);
+    expect(resets[1].getAttribute("aria-label")).toMatch(/^11\. 14\. \(토\) (오후 01:00|13:00)$/);
   });
 
-  it("keeps the values forward: a bold percent, its meaning and the date muted", () => {
+  it("keeps a bold numeric percent without a meaning suffix", () => {
     render();
-    const [row] = byTestId(container!, "sidebar-usage-detail-row");
-    const [name, , percent] = [...row.children] as HTMLElement[];
-    const [at, , relative] = [...byTestId(row, "sidebar-usage-detail-reset")[0].children].map(
-      (part) => (part as HTMLElement).style,
-    );
-
+    const [claude] = byTestId(container!, "sidebar-usage-detail-provider");
+    const [row] = byTestId(claude, "sidebar-usage-detail-row");
+    const name = child(row, 0),
+      percent = child(row, 2),
+      reset = child(row, 3);
     expect(name.style.color).toBe("rgb(102, 102, 102)");
-    // A long name gives way before it widens the name column into the reset time's room.
     expect(name.style.maxWidth).toBe("104px");
     expect(percent.style.fontWeight).toBe("600");
-    expect(child(percent, 0).textContent).toBe(" 사용");
-    expect(child(percent, 0).style.color).toBe("rgb(102, 102, 102)");
-    expect(child(percent, 0).style.fontWeight).toBe("normal");
-    expect(at.color).toBe("rgb(102, 102, 102)");
-    expect(relative.color).toBe("rgb(34, 34, 34)");
-    expect([at.flexShrink, relative.flexShrink]).toEqual(["1", "0"]);
+    expect(percent.textContent).toBe("12%");
+    expect(child(reset, 0).style.flexShrink).toBe("0");
   });
 
   it("leaves out the account line and reset column a source has nothing for", () => {
@@ -220,7 +221,7 @@ describe("PinnedUsageDetails", () => {
     const rows = byTestId(account, "sidebar-usage-detail-row");
 
     expect(account.firstElementChild).toBe(rows[0]);
-    expect(rows.map(cells)).toEqual([["주간", "", "48% 사용"]]);
+    expect(rows.map(cells)).toEqual([["주간", "", "48%"]]);
   });
 
   it("colours a percent by its window's tone and divides providers with a rule", () => {

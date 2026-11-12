@@ -27,7 +27,7 @@ function useUsageSummary(): UsageSummary {
   const { preferences } = useUsagePreferences();
   const reports = useUsageHostReports(useUsageHostId());
   const sources = useMemo(
-    () => resolveProviderPinnedUsage(reports, preferences),
+    () => resolveProviderPinnedUsage(reports, { ...preferences, displayAs: "used" }),
     [preferences, reports],
   );
   return { reports, preferences, sources };
@@ -130,7 +130,7 @@ function PinnedUsageTrigger({
                     <UsageMeter
                       percent={window.percent}
                       tone={window.tone}
-                      displayAs={preferences.displayAs}
+                      displayAs="used"
                       style={styles.meter}
                     />
                   </View>
@@ -168,10 +168,10 @@ function PinnedUsageHoverCard({
 }) {
   const [openedAt] = useState(Date.now);
   const providers = useMemo(
-    () => resolveProviderPinnedUsage(reports, preferences, openedAt),
+    () => resolveProviderPinnedUsage(reports, { ...preferences, displayAs: "used" }, openedAt),
     [openedAt, preferences, reports],
   );
-  return <PinnedUsageDetails providers={providers} displayAs={preferences.displayAs} />;
+  return <PinnedUsageDetails providers={providers} displayAs="used" />;
 }
 
 const styles = StyleSheet.create((theme) => ({
