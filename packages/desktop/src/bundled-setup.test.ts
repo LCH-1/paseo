@@ -64,3 +64,24 @@ test("a distribution setup cannot point outside its resources", async () => {
   );
   await expect(runBundledSetup(context, vi.fn())).rejects.toThrow("escapes resources");
 });
+
+test("a pinned public update feed is accepted without a token in the distribution", async () => {
+  const { context } = await fixture();
+  const source = "export async function prepare() {}";
+  await writeFile(path.join(context.resourcesPath, "setup.mjs"), source);
+  await writeFile(
+    path.join(context.resourcesPath, "bundled-setup.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      entrypoint: "setup.mjs",
+      sha256: createHash("sha256").update(source).digest("hex"),
+      updateFeed: { owner: "example", repo: "distribution", private: false },
+    }),
+  );
+  await runBundledSetup(context, async () => ({ prepare: async () => {} }));
+  expect(getBundledUpdateFeed()).toEqual({
+    owner: "example",
+    repo: "distribution",
+    private: false,
+  });
+});

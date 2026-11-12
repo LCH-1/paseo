@@ -11,7 +11,7 @@ export interface BundledSetupContext {
 }
 
 let daemonVersion: string | null = null;
-let updateFeed: { owner: string; repo: string; private: true } | null = null;
+let updateFeed: { owner: string; repo: string; private: boolean } | null = null;
 export const getBundledDaemonVersion = () => daemonVersion;
 export const getBundledUpdateFeed = () => updateFeed;
 
@@ -20,15 +20,16 @@ function parseUpdateFeed(feed: unknown): typeof updateFeed {
   if (!feed || typeof feed !== "object") throw new Error("Invalid bundled update feed");
   const owner = Reflect.get(feed, "owner");
   const repo = Reflect.get(feed, "repo");
+  const privateFeed = Reflect.get(feed, "private");
   if (
     typeof owner !== "string" ||
     typeof repo !== "string" ||
     !/^[\w.-]+$/.test(owner) ||
     !/^[\w.-]+$/.test(repo) ||
-    Reflect.get(feed, "private") !== true
+    typeof privateFeed !== "boolean"
   )
     throw new Error("Invalid bundled update feed");
-  return { owner, repo, private: true };
+  return { owner, repo, private: privateFeed };
 }
 
 /** Distributions may ship a pinned offline setup without embedding it in core. */

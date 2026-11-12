@@ -9,8 +9,8 @@ export async function configureBundledUpdateFeed(
       provider: "github";
       owner: string;
       repo: string;
-      private: true;
-      token: string;
+      private: boolean;
+      token?: string;
     }): void;
   },
   readToken = async () => {
@@ -30,6 +30,10 @@ export async function configureBundledUpdateFeed(
 ) {
   const feed = getBundledUpdateFeed();
   if (!feed) return;
+  if (!feed.private) {
+    updater.setFeedURL({ provider: "github", ...feed });
+    return;
+  }
   const token = await readToken();
   if (!/^[\w-]{20,4096}$/.test(token)) throw new Error("GitHub 업데이트 인증을 확인하세요.");
   updater.setFeedURL({ provider: "github", ...feed, token });

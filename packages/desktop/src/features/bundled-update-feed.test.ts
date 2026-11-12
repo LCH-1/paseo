@@ -1,6 +1,6 @@
 import { expect, test, vi } from "vitest";
 const { feed } = vi.hoisted(() => ({
-  feed: { value: null as null | { owner: string; repo: string; private: true } },
+  feed: { value: null as null | { owner: string; repo: string; private: boolean } },
 }));
 vi.mock("../bundled-setup.js", () => ({ getBundledUpdateFeed: () => feed.value }));
 import { configureBundledUpdateFeed } from "./bundled-update-feed.js";
@@ -26,4 +26,15 @@ test("a private distribution uses local credentials only at update-check time", 
     "인증",
   );
   expect(updater.setFeedURL).toHaveBeenCalledTimes(1);
+});
+
+test("a public distribution never reads or sends GitHub credentials", async () => {
+  feed.value = { owner: "example", repo: "distribution", private: false };
+  const updater = { setFeedURL: vi.fn() };
+  const token = vi.fn(async () => {
+    throw new Error("Public downloads must not require a local GitHub login");
+  });
+  await configureBundledUpdateFeed(updater, token);
+  expect(token).not.toHaveBeenCalled();
+  expect(updater.setFeedURL).toHaveBeenCalledWith({ provider: "github", ...feed.value });
 });
