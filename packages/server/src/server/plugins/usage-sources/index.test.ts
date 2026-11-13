@@ -1815,3 +1815,68 @@ test("a forced refresh waiting on a running discovery does not ask a source remo
   expect(await forced).toEqual([]);
   expect(discoveries).toBe(1);
 });
+
+/** A source whose fetch, like the Claude source on Windows, uses the token read as it starts. */
+function loginBoundSource() {
+  const state = { login: "old" };
+  const fetches: Array<{ login: string; answer: (report: unknown) => void }> = [];
+  const registered = source({
+    id: "source",
+    discover: async () => [{ key: "a", input: "a" }],
+    fetch: () => {
+      const login = state.login;
+      return new Promise((resolve) => fetches.push({ login, answer: resolve }));
+    },
+  });
+  return { state, fetches, registered };
+}
+
+const signedIn = (login: string) => ({ status: "available", planLabel: login, windows: [] });
+const signedInAs = (reports: Awaited<ReturnType<UsageSourceRegistry["listReports"]>>) =>
+  reports.map((entry) =>
+    entry.report.status === "available" ? entry.report.planLabel : entry.report.status,
+  );
+
+test("a forced refresh after a login change does not take a renewal's fetch made with the old token", async () => {
+  let now = 0;
+  const { state, fetches, registered } = loginBoundSource();
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(registered);
+  const first = registry.listReports();
+  await vi.waitFor(() => expect(fetches).toHaveLength(1));
+  fetches[0]!.answer(signedIn("old"));
+  await first;
+  // Near the window's end a poll is answered from the cache and renews the group behind it.
+  now = 250_000;
+  expect(signedInAs(await registry.listReports())).toEqual(["old"]);
+  await vi.waitFor(() => expect(fetches).toHaveLength(2));
+  // Settings Sync restores another token while that renewal's fetch is still out.
+  state.login = "new";
+  const forced = registry.listReports({ forceRefresh: true });
+  await vi.waitFor(() => expect(fetches).toHaveLength(3));
+  expect(fetches.map((fetch) => fetch.login)).toEqual(["old", "old", "new"]);
+  fetches[2]!.answer(signedIn("new"));
+  // The vendor rejects the replaced token, and that answer arrives last.
+  fetches[1]!.answer({ status: "error", error: "HTTP 401" });
+  expect(signedInAs(await forced)).toEqual(["new"]);
+  // Nor does the late answer replace the forced one in the cache.
+  expect(signedInAs(await registry.listReports())).toEqual(["new"]);
+  expect(fetches).toHaveLength(3);
+});
+
+test("a forced refresh of chosen reports does not join a fetch that started before it", async () => {
+  const { state, fetches, registered } = loginBoundSource();
+  const registry = new UsageSourceRegistry();
+  registry.register(registered);
+  const polled = registry.listReports();
+  await vi.waitFor(() => expect(fetches).toHaveLength(1));
+  state.login = "new";
+  const forced = registry.listReports({ reportIds: ["source:a"], forceRefresh: true });
+  await vi.waitFor(() => expect(fetches).toHaveLength(2));
+  fetches[1]!.answer(signedIn("new"));
+  fetches[0]!.answer({ status: "error", error: "HTTP 401" });
+  expect(signedInAs(await forced)).toEqual(["new"]);
+  // The poll asked before the change and keeps the answer of the fetch it joined.
+  expect(signedInAs(await polled)).toEqual(["error"]);
+  expect(signedInAs(await registry.listReports())).toEqual(["new"]);
+});

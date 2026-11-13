@@ -83,6 +83,14 @@ type RenewalReason = "forced" | Exclude<HostGroupState, "fresh">;
  */
 type FetchMode = "cached" | "forced" | "renewed";
 
+interface RunningFetch {
+  request: Promise<UsageReportEntry>;
+  /** Fetches are numbered as they start, so a forced query can tell which began after it. */
+  seq: number;
+  /** A later forced fetch replaced it: its answer still goes to those who joined it, not the cache. */
+  supersede(): void;
+}
+
 /** A renewal that fetched nothing is logged at info only when its discovery took this long. */
 const SLOW_EMPTY_DISCOVERY_MS = 1_000;
 
@@ -95,7 +103,8 @@ export class UsageSourceRegistry {
   private readonly byAgent = new Map<string, AgentReports>();
   private readonly cache = new Map<string, { at: number; entry: UsageReportEntry }>();
   private readonly successful = new Map<string, NonNullable<UsageReportEntry["lastSuccessful"]>>();
-  private readonly pending = new Map<string, Promise<UsageReportEntry>>();
+  private readonly pending = new Map<string, RunningFetch>();
+  private fetchSeq = 0;
   /** When the host queries of the last cache window arrived, oldest first; forced ones excluded. */
   private readonly hostQueries: number[] = [];
 
@@ -147,6 +156,9 @@ export class UsageSourceRegistry {
   async listReports(options: ListUsageReportsOptions = {}): Promise<UsageReportEntry[]> {
     if (options.agentId !== undefined && options.reportIds !== undefined)
       throw new Error("agentId and reportIds cannot be combined");
+    // A forced query shares only fetches started after it was made: an earlier one may still use
+    // a token that the login change behind the force replaced.
+    const askedAfter = this.fetchSeq;
     this.pruneAgents();
     let ids: string[];
     let reports = this.known;
@@ -172,7 +184,7 @@ export class UsageSourceRegistry {
         const known = reports.get(id);
         if (!known) return [];
         return [
-          this.fetchId(id, known, mode(id), renewAhead(id)).then((entry) => {
+          this.fetchId(id, known, mode(id), renewAhead(id), askedAfter).then((entry) => {
             options.onReport?.(entry);
             return entry;
           }),
@@ -285,10 +297,14 @@ export class UsageSourceRegistry {
       // Asked at the instant the fetches below ask each report, so a report due by then brings
       // the rest of its group with it rather than leaving them for a renewal a poll later.
       const windowEnding = discoveryEnding || this.hostReportEnding(sources);
+      // A forced renewal's fetches use the logins its discovery just read, so they share no fetch
+      // started before it answered; the group's sources still share the fetches they start here.
+      const startedAfter = reason === "forced" ? this.fetchSeq : -1;
       const fetches = sources.flatMap((source, index) =>
         this.refetchHostSource(
           source,
           reason === "forced" || (windowEnding && answered[index] === true),
+          startedAfter,
         ),
       );
       if (sources.length > 0)
@@ -327,13 +343,17 @@ export class UsageSourceRegistry {
    * reports that are due are fetched: a source whose discovery failed still has its previous
    * logins, and a group renewed only to ask such a source again has no other report to fetch.
    */
-  private refetchHostSource(source: UsageSource, every: boolean): Promise<UsageReportEntry>[] {
+  private refetchHostSource(
+    source: UsageSource,
+    every: boolean,
+    startedAfter: number,
+  ): Promise<UsageReportEntry>[] {
     const found = this.defaults.get(source);
     if (!found || this.sources.get(source.id) !== source) return [];
     return [...found.reports.keys()].flatMap((id) => {
       const known = this.known.get(id);
       if (!known || (!every && !this.hostReportDue(id))) return [];
-      return [this.fetchId(id, known, "forced")];
+      return [this.fetchId(id, known, "forced", false, startedAfter)];
     });
   }
 
@@ -568,11 +588,16 @@ export class UsageSourceRegistry {
     };
   }
 
+  /**
+   * A forced or renewed query shares a running fetch only if it started after `startedAfter`, a
+   * `fetchSeq` the caller read before the logins it trusts were read. A cached query shares any.
+   */
   private fetchId(
     id: string,
     known: KnownReport,
     mode: FetchMode = "cached",
     renewAhead = false,
+    startedAfter = -1,
   ): Promise<UsageReportEntry> {
     // Account identity groups cards; the ordered login set identifies a fetch result.
     const cacheKey = cacheIdentity(id, known);
@@ -591,19 +616,26 @@ export class UsageSourceRegistry {
             account: { label: known.label },
           };
     const cached = this.cache.get(cacheKey);
-    const pending = this.pending.get(cacheKey);
-    if (mode === "renewed" && pending) return pending.then(present);
+    const running = this.pending.get(cacheKey);
+    const shared =
+      running && (mode === "cached" || running.seq > startedAfter) ? running : undefined;
+    if (mode === "renewed" && shared) return shared.request.then(present);
     if (mode !== "forced" && cached && this.now() - cached.at < this.ttlMs) {
       if (
         renewAhead &&
-        !pending &&
+        !running &&
         this.now() - cached.at >= this.ttlMs - this.renewAheadMs &&
         !this.renewedByHostGroup(cacheKey)
       )
         void this.fetchId(id, known, "forced");
       return Promise.resolve(present(cached.entry));
     }
-    if (pending) return pending.then(present);
+    if (shared) return shared.request.then(present);
+    // The fetch it replaces may answer from the replaced token, and answering last it would
+    // stand in the cache for the whole window.
+    running?.supersede();
+    const seq = ++this.fetchSeq;
+    let superseded = false;
     const request = (async () => {
       const fetchedAt = new Date(this.now()).toISOString();
       const outcome = await this.fetchWithFallback(known);
@@ -623,6 +655,7 @@ export class UsageSourceRegistry {
         entry.lastSuccessful = this.successful.get(cacheKey);
       }
       if (
+        !superseded &&
         this.sources.get(known.source.id) === known.source &&
         this.activeCacheKeys().has(cacheKey)
       ) {
@@ -636,11 +669,18 @@ export class UsageSourceRegistry {
       }
       return entry;
     })();
-    this.pending.set(cacheKey, request);
-    void request.finally(() => {
-      if (this.pending.get(cacheKey) === request) this.pending.delete(cacheKey);
+    const started: RunningFetch = {
+      request,
+      seq,
+      supersede: () => {
+        superseded = true;
+      },
+    };
+    this.pending.set(cacheKey, started);
+    void started.request.finally(() => {
+      if (this.pending.get(cacheKey) === started) this.pending.delete(cacheKey);
     });
-    return request;
+    return started.request;
   }
 
   private writeCache(id: string, entry: UsageReportEntry): void {
