@@ -54,7 +54,7 @@ import {
 import {
   createRunGitCommand,
   runGitCommand,
-  runWithGitCommandPriority,
+  runWithGitCommandPriorityBoost,
   runWithGitCommandProvenance,
   type RunGitCommand,
 } from "../utils/run-git-command.js";
@@ -3373,8 +3373,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
             if (target.closed || this.workspaceTargets.get(target.cwd) !== target) {
               return null;
             }
-            const refresh = () => this.refreshSnapshot(target, request, runRefreshGitCommand);
-            return target.clientWaiting ? runWithGitCommandPriority("high", refresh) : refresh();
+            // Read per command: a client that starts waiting on a refresh already admitted at
+            // normal priority still moves the rest of its Git work up.
+            return runWithGitCommandPriorityBoost(
+              () => target.clientWaiting,
+              () => this.refreshSnapshot(target, request, runRefreshGitCommand),
+            );
           },
           () => target.clientWaiting,
         );

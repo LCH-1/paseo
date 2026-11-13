@@ -378,6 +378,38 @@ describe("WorkspaceGitServiceImpl", () => {
     service.dispose();
   });
 
+  test("a client that starts waiting on a refresh already under way moves its remaining Git work up", async () => {
+    const visibleCwd = path.resolve("/tmp/visible-repo");
+    const statusGate = createDeferred<CheckoutStatusGit>();
+    const steps: Array<{ step: string; priority: string }> = [];
+    const getCheckoutStatus = vi.fn(() => {
+      steps.push({ step: "status", priority: getGitCommandPriority() });
+      return statusGate.promise;
+    });
+    const getCheckoutShortstat = vi.fn(async () => {
+      steps.push({ step: "shortstat", priority: getGitCommandPriority() });
+      return { additions: 1, deletions: 0 };
+    });
+    const service = createService({ getCheckoutStatus, getCheckoutShortstat });
+
+    // Admitted at normal priority before anyone looked at this workspace.
+    const background = service.getSnapshot(visibleCwd, { includeForge: false });
+    await vi.waitFor(() => expect(steps).toHaveLength(1));
+    const visible = service.getSnapshot(visibleCwd, { includeForge: false, priority: "high" });
+    statusGate.resolve(createCheckoutStatus(visibleCwd));
+    await Promise.all([background, visible]);
+
+    expect(steps).toEqual([
+      { step: "status", priority: "normal" },
+      { step: "shortstat", priority: "high" },
+    ]);
+
+    // With the snapshot delivered nobody is waiting; later Git work is ordinary again.
+    await service.getSnapshot(visibleCwd, { force: true, reason: "test", includeForge: false });
+    expect(steps.slice(2).map((entry) => entry.priority)).not.toContain("high");
+    service.dispose();
+  });
+
   test("registerWorkspace returns a subscription without an initial snapshot contract", async () => {
     const service = createService();
 

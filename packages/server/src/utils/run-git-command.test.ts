@@ -409,6 +409,40 @@ describe("runGitCommand", () => {
     ]);
   });
 
+  it("boosts a Git command only while its boost holds when the command is submitted", async () => {
+    const { runGitCommand, runWithGitCommandPriorityBoost } = await loadRunGitCommand(1);
+    enqueueSpawnBehaviors(
+      { delayMs: 100, stdoutData: "first" },
+      { stdoutData: "second" },
+      { stdoutData: "third" },
+      { stdoutData: "fourth" },
+    );
+    const cwd = process.cwd();
+    let waiting = true;
+
+    const active = runGitCommand(["status"], { cwd });
+    await vi.waitFor(() => expect(fakeSpawnController.processes).toHaveLength(1));
+    const normal = runGitCommand(["rev-parse", "normal"], { cwd });
+    // A timer started inside outlives the wait it was started for.
+    const runAfterATick = async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      return runGitCommand(["rev-parse", "later"], { cwd });
+    };
+    const [boosted, later] = runWithGitCommandPriorityBoost(
+      () => waiting,
+      () => [runGitCommand(["rev-parse", "boosted"], { cwd }), runAfterATick()],
+    );
+    waiting = false;
+
+    // Spawn order shows in stdout: the boosted command jumps the queue, the later one does not.
+    await expect(Promise.all([active, boosted, normal, later])).resolves.toEqual([
+      expect.objectContaining({ stdout: "first" }),
+      expect.objectContaining({ stdout: "second" }),
+      expect.objectContaining({ stdout: "third" }),
+      expect.objectContaining({ stdout: "fourth" }),
+    ]);
+  });
+
   it("binds queue provenance to a Git command runner", async () => {
     const { createRunGitCommand, snapshotGitCommandRuntimeMetrics } = await loadRunGitCommand(1);
     enqueueSpawnBehaviors({ stdoutData: "ok" });

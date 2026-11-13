@@ -27,14 +27,25 @@ const DEFAULT_STDERR_LIMIT = 2048;
 let gitProcessScheduler = new GitProcessScheduler(resolveGitProcessPolicy({ env: process.env }));
 let gitRuntimeMetrics = createGitCommandRuntimeMetricsWindow(gitProcessScheduler.policy);
 const gitCommandPriority = new AsyncLocalStorage<GitProcessPriority>();
+const gitCommandPriorityBoost = new AsyncLocalStorage<() => boolean>();
 const gitCommandProvenance = new AsyncLocalStorage<string>();
 
 export function runWithGitCommandPriority<T>(priority: GitProcessPriority, operation: () => T): T {
   return gitCommandPriority.run(priority, operation);
 }
 
+/**
+ * Runs `operation` so that a Git command it submits goes at high priority whenever `boosted()`
+ * answers true at that moment. Unlike a fixed priority, the answer can turn true after the
+ * operation started, and timers or watchers created inside are not boosted once it turns false.
+ */
+export function runWithGitCommandPriorityBoost<T>(boosted: () => boolean, operation: () => T): T {
+  return gitCommandPriorityBoost.run(boosted, operation);
+}
+
 /** The priority a Git command started here would get. */
 export function getGitCommandPriority(): GitProcessPriority {
+  if (gitCommandPriorityBoost.getStore()?.()) return "high";
   return gitCommandPriority.getStore() ?? "normal";
 }
 
@@ -579,7 +590,7 @@ function executeGitCommand<Output>(
     return { result: resultPromise, exited };
   };
   const promise = gitProcessScheduler.run(startCommand, {
-    priority: gitCommandPriority.getStore() ?? "normal",
+    priority: getGitCommandPriority(),
   });
   gitRuntimeMetrics.observeLimiter(
     gitProcessScheduler.activeCount,
