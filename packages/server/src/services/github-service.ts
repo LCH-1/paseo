@@ -121,6 +121,10 @@ export const GITHUB_POLL_ERROR_BACKOFF_CAP_MS = 3_600_000;
 // machine-wide (issues #3587 / #2470).
 export const GITHUB_POLL_BATCH_MAX = 25;
 export const GITHUB_POLL_ALIGNMENT_MS = 5_000;
+// Slow polls (stable status, error backoff) snap to their own period. On the 5 second grid,
+// targets first polled at different moments kept their phase forever and each ran its own gh
+// call every two minutes; on this grid every slow target lands on the same tick and one batch.
+const GITHUB_POLL_SLOW_ALIGNMENT_MS = GITHUB_POLL_SLOW_INTERVAL_MS;
 const GITHUB_GRAPHQL_RESERVE_RATIO = 0.4;
 const GITHUB_GRAPHQL_RESET_GRACE_MS = 1_000;
 const BATCH_PR_CANDIDATE_LIMIT = 10;
@@ -1429,8 +1433,8 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     // drift the grid — but when the cycle overran its slot entirely, re-anchor
     // at completion: scheduling in the past would poll back-to-back precisely
     // when GitHub is slow or erroring.
-    const dueAt = alignGitHubPollTime(baseline + delayMs);
-    const nextDueAt = dueAt >= now ? dueAt : alignGitHubPollTime(now + delayMs);
+    const dueAt = alignGitHubPollTime(baseline + delayMs, delayMs);
+    const nextDueAt = dueAt >= now ? dueAt : alignGitHubPollTime(now + delayMs, delayMs);
     target.nextDueAt = Math.max(nextDueAt, pauseUntil);
     armGitHubPollTimer();
   }
@@ -1449,8 +1453,13 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     return pauseUntil;
   }
 
-  function alignGitHubPollTime(dueAt: number): number {
-    return Math.ceil(dueAt / GITHUB_POLL_ALIGNMENT_MS) * GITHUB_POLL_ALIGNMENT_MS;
+  function alignGitHubPollTime(dueAt: number, delayMs: number): number {
+    if (delayMs < GITHUB_POLL_SLOW_INTERVAL_MS) {
+      return Math.ceil(dueAt / GITHUB_POLL_ALIGNMENT_MS) * GITHUB_POLL_ALIGNMENT_MS;
+    }
+    // The nearest slow tick, so joining the grid moves a poll by at most half a period either way.
+    const grid = GITHUB_POLL_SLOW_ALIGNMENT_MS;
+    return Math.ceil((dueAt - grid / 2) / grid) * grid;
   }
 
   function armGitHubPollTimer(): void {
@@ -1484,8 +1493,10 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     const due: GitHubPollTarget[] = [];
     for (const target of pollTargets.values()) {
       if (target.retainCount > 0 && target.nextDueAt !== null && target.nextDueAt <= now) {
+        // Anchor the next cycle at this due time, not at the moment the timer fired: a timer that
+        // fires a few milliseconds late would otherwise push every cycle to the next grid step.
+        target.pollCycleStartedAt = target.nextDueAt;
         target.nextDueAt = null;
-        target.pollCycleStartedAt = now;
         due.push(target);
       }
     }

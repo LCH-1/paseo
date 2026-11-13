@@ -1047,8 +1047,9 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
     now += EXPECTED_GITHUB_FAST_POLL_MS * 2;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS * 2);
-    now += EXPECTED_GITHUB_SLOW_POLL_MS;
-    await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_SLOW_POLL_MS);
+    // Recovered at 80s; the slow cadence resumes on the shared two-minute tick nearest 200s.
+    now = 2 * EXPECTED_GITHUB_SLOW_POLL_MS;
+    await vi.advanceTimersByTimeAsync(now - 4 * EXPECTED_GITHUB_FAST_POLL_MS);
 
     expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(5);
     expect(reads.map((read) => read.reason)).toEqual([
@@ -1300,6 +1301,59 @@ describe("ForgeService", () => {
     expect(runner.calls[0]?.args.slice(0, 2)).toEqual(["api", "graphql"]);
     expect(runner.calls[0]?.args[3]).toContain('t0: repository(owner: "acme", name: "widgets")');
     expect(runner.calls[0]?.args[3]).toContain('t1: repository(owner: "acme", name: "gadgets")');
+
+    subscriptionA?.unsubscribe();
+    subscriptionB?.unsubscribe();
+    service.dispose?.();
+  });
+
+  it("joins slow polls that started at different moments into one batch", async () => {
+    let now = 0;
+    const noPullRequest = (alias: string) =>
+      batchPollStatusJson({ [alias]: batchPollRepositoryJson([]) });
+    const runner = createScriptedRunner([
+      noPullRequest("t0"),
+      noPullRequest("t0"),
+      batchPollStatusJson({ t0: batchPollRepositoryJson([]), t1: batchPollRepositoryJson([]) }),
+    ]);
+    const slugs: Record<string, string> = { "/ws-a": "acme/widgets", "/ws-b": "acme/gadgets" };
+    const service = createGitHubService({
+      ttlMs: 0,
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      resolveRepoHost: async () => null,
+      resolveRepoSlug: async (cwd) => slugs[cwd] ?? null,
+      now: () => now,
+    });
+
+    const subscriptionA = service.retainCurrentPullRequestStatusPoll?.({
+      cwd: "/ws-a",
+      headRef: "main",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await flushMicrotasks();
+    expect(runner.calls).toHaveLength(1);
+
+    now = 40_000;
+    await vi.advanceTimersByTimeAsync(40_000);
+    const subscriptionB = service.retainCurrentPullRequestStatusPoll?.({
+      cwd: "/ws-b",
+      headRef: "main",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await flushMicrotasks();
+    expect(runner.calls).toHaveLength(2);
+
+    now = EXPECTED_GITHUB_SLOW_POLL_MS;
+    await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_SLOW_POLL_MS - 40_000);
+    await flushMicrotasks();
+    expect(runner.calls).toHaveLength(3);
+    expect(runner.calls[2]?.args[3]).toContain('repository(owner: "acme", name: "widgets")');
+    expect(runner.calls[2]?.args[3]).toContain('repository(owner: "acme", name: "gadgets")');
+
+    now = 2 * EXPECTED_GITHUB_SLOW_POLL_MS - 1;
+    await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_SLOW_POLL_MS - 1);
+    expect(runner.calls).toHaveLength(3);
 
     subscriptionA?.unsubscribe();
     subscriptionB?.unsubscribe();
