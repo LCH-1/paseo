@@ -13409,6 +13409,68 @@ test("a shared agent load upgrades provider history hydration to broadcast", asy
   }
 });
 
+test("a load that announces provider subagents keeps history rows off the stream", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-subagent-only-load-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new (class extends TestAgentClient {
+    override async resumeSession(
+      _handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+    ): Promise<AgentSession> {
+      return new (class extends TestAgentSession {
+        override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+          yield {
+            type: "provider_subagent",
+            provider: "codex",
+            event: { type: "upsert", id: "child", title: "Reread child", status: "completed" },
+          };
+          yield {
+            type: "timeline",
+            provider: "codex",
+            item: { type: "assistant_message", text: "Recovered history" },
+          };
+        }
+      })({ provider: "codex", cwd: config?.cwd ?? workdir });
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    await manager.closeAgent(agent.id);
+    await manager.deleteAgentState(agent.id);
+    const events: AgentManagerEvent[] = [];
+    manager.subscribe((event) => events.push(event), { agentId: agent.id, replayState: false });
+
+    await ensureAgentLoaded(agent.id, {
+      agentManager: manager,
+      agentStorage: storage,
+      broadcastProviderSubagents: true,
+      logger,
+    });
+
+    expect(manager.getTimeline(agent.id)).toEqual([
+      { type: "assistant_message", text: "Recovered history" },
+    ]);
+    expect(events.filter((event) => event.type === "agent_stream")).toEqual([]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "provider_subagent",
+        event: expect.objectContaining({
+          type: "upsert",
+          subagent: expect.objectContaining({ id: "child", title: "Reread child" }),
+        }),
+      }),
+    );
+  } finally {
+    await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("explicit close cancels running provider subagents before resume", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-closed-provider-child-"));
   const storage = new AgentStorage(join(workdir, "agents"), logger);

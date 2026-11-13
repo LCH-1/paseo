@@ -1,4 +1,8 @@
-import type { AgentStreamEvent, AgentSessionConfig } from "./agent/agent-sdk-types.js";
+import type {
+  AgentSession,
+  AgentStreamEvent,
+  AgentSessionConfig,
+} from "./agent/agent-sdk-types.js";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -450,6 +454,102 @@ test("rewind routes replacement completion by source capability and subscription
   ).toHaveLength(0);
   expect(unrelated.hasTimeline(agent.id)).toBe(false);
 }, 30_000);
+
+const REFRESHED_HISTORY_ROWS = 120;
+
+// Every reopened session reads back the same provider history, as a reloaded Codex thread does.
+class HistoryRereadingProvider extends MockLoadTestAgentClient {
+  override async resumeSession(
+    ...args: Parameters<MockLoadTestAgentClient["resumeSession"]>
+  ): Promise<AgentSession> {
+    const session = await super.resumeSession(...args);
+    session.streamHistory = async function* () {
+      for (let index = 0; index < REFRESHED_HISTORY_ROWS; index += 1) {
+        yield {
+          type: "timeline",
+          provider: "mock",
+          item: { type: "user_message", text: `Reread row ${index}`, messageId: `reread-${index}` },
+        };
+      }
+    };
+    return session;
+  }
+}
+
+test.each([
+  { loaded: true, name: "a live agent" },
+  { loaded: false, name: "an agent the daemon has not loaded" },
+])(
+  "refreshing $name invalidates subscribed timelines instead of replaying every row",
+  async ({ loaded }) => {
+    await daemon.close();
+    daemon = await createTestPaseoDaemon({
+      isDev: true,
+      agentClients: { mock: new HistoryRereadingProvider() },
+    });
+    const requesting = await connect({
+      clientId: "refresh-requesting",
+      selective: true,
+      timelineReplacementInvalidation: true,
+    });
+    const passive = await connect({
+      clientId: "refresh-passive",
+      selective: true,
+      timelineReplacementInvalidation: true,
+    });
+    const legacy = await connect({ clientId: "refresh-legacy", selective: false });
+    const agent = await requesting.client.createAgent({
+      provider: "mock",
+      cwd: "/tmp",
+      title: "Refresh replay",
+      model: "ten-second-stream",
+    });
+    await Promise.all([
+      requesting.setLegacyTimelineMembership([agent.id]),
+      passive.setLegacyTimelineMembership([agent.id]),
+    ]);
+    if (!loaded) {
+      // As after a daemon restart: no live session and no timeline kept in memory.
+      await daemon.daemon.agentManager.closeAgent(agent.id);
+      await daemon.daemon.agentManager.deleteAgentState(agent.id);
+    }
+
+    for (const connected of [requesting, passive, legacy]) connected.clear();
+    await expect(requesting.client.refreshAgent(agent.id)).resolves.toMatchObject({
+      timelineSize: REFRESHED_HISTORY_ROWS,
+    });
+    await Promise.all([
+      requesting.barrier("refresh-requesting"),
+      passive.barrier("refresh-passive"),
+      legacy.barrier("refresh-legacy"),
+    ]);
+
+    const replayedRows = (connected: ConnectedClient) =>
+      connected.messages.filter(isAgentStream(agent.id)).length;
+    expect({
+      requestingRows: replayedRows(requesting),
+      passiveRows: replayedRows(passive),
+      passiveReplacements: passive.messages.filter(
+        (message) => message.type === "agent.timeline.replacement",
+      ).length,
+    }).toEqual({ requestingRows: 0, passiveRows: 0, passiveReplacements: 1 });
+    // A client without invalidation support still receives the rows it cannot refetch.
+    expect(replayedRows(legacy)).toBe(REFRESHED_HISTORY_ROWS);
+
+    const timeline = await passive.client.fetchAgentTimeline(agent.id, {
+      direction: "tail",
+      limit: 0,
+      projection: "canonical",
+    });
+    expect(timeline.entries.map((entry) => entry.item)).toContainEqual(
+      expect.objectContaining({
+        type: "user_message",
+        text: `Reread row ${REFRESHED_HISTORY_ROWS - 1}`,
+      }),
+    );
+  },
+  30_000,
+);
 
 test("subscription acknowledgements stay on the requesting socket of a retained session", async () => {
   const legacy = await connect({ clientId: "shared-client", selective: false });

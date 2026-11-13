@@ -4789,11 +4789,17 @@ export class Session {
         snapshot = await ensureAgentLoaded(agentId, {
           agentManager: this.agentManager,
           agentStorage: this.agentStorage,
-          broadcastTimeline: true,
+          broadcastProviderSubagents: true,
           logger: this.sessionLogger,
         });
       }
-      await this.agentManager.hydrateTimelineFromProvider(agentId, { broadcast: true });
+      await this.agentManager.hydrateTimelineFromProvider(agentId, {
+        broadcast: true,
+        broadcastTimeline: false,
+      });
+      // As rewind does: one invalidation, after which each window refetches the page it shows.
+      // Streaming the reread history instead sends every row to every subscribed window.
+      this.agentManager.announceTimelineReplacement(agentId);
       await this.agentUpdates.forwardLiveAgent(snapshot);
       const timelineSize = this.agentManager.getTimeline(agentId).length;
       this.sessionLogger.info({ ...requester, timelineSize }, `Refreshed agent ${agentId}`);

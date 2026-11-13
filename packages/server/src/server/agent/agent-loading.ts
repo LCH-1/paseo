@@ -21,7 +21,7 @@ export class AgentNotFoundError extends Error {
 
 interface PendingAgentInitialization {
   promise: Promise<ManagedAgent>;
-  options: { broadcastTimeline: boolean };
+  options: { broadcastTimeline: boolean; broadcastProviderSubagents: boolean };
 }
 
 const pendingAgentInitializations = new Map<string, PendingAgentInitialization>();
@@ -40,8 +40,20 @@ export interface EnsureAgentLoadedDeps {
   agentManager: AgentLoaderManager;
   agentStorage: AgentStorage;
   validProviders?: Iterable<AgentProvider>;
+  /** Stream every history row to subscribers, provider subagents included. */
   broadcastTimeline?: boolean;
+  /** Announce the provider subagents read from history without streaming its rows. */
+  broadcastProviderSubagents?: boolean;
   logger: Logger;
+}
+
+// A caller that joins an in-flight load can widen what it announces, never narrow it.
+function widenBroadcast(
+  options: PendingAgentInitialization["options"],
+  deps: Pick<EnsureAgentLoadedDeps, "broadcastTimeline" | "broadcastProviderSubagents">,
+): void {
+  options.broadcastTimeline ||= deps.broadcastTimeline === true;
+  options.broadcastProviderSubagents ||= deps.broadcastProviderSubagents === true;
 }
 
 export async function ensureUnarchivedAgentLoaded(
@@ -75,7 +87,7 @@ export async function ensureAgentLoaded(
 
   const inflight = pendingAgentInitializations.get(agentId);
   if (inflight) {
-    inflight.options.broadcastTimeline ||= deps.broadcastTimeline === true;
+    widenBroadcast(inflight.options, deps);
     return inflight.promise;
   }
 
@@ -91,13 +103,12 @@ export async function ensureAgentLoaded(
 
   const laterInflight = pendingAgentInitializations.get(agentId);
   if (laterInflight) {
-    laterInflight.options.broadcastTimeline ||= deps.broadcastTimeline === true;
+    widenBroadcast(laterInflight.options, deps);
     return laterInflight.promise;
   }
 
-  const pendingOptions = {
-    broadcastTimeline: deps.broadcastTimeline === true,
-  };
+  const pendingOptions = { broadcastTimeline: false, broadcastProviderSubagents: false };
+  widenBroadcast(pendingOptions, deps);
   const initPromise = (async () => {
     const record = await deps.agentStorage.get(agentId);
     if (!record) {
@@ -140,7 +151,9 @@ export async function ensureAgentLoaded(
     }
 
     await deps.agentManager.hydrateTimelineFromProvider(agentId, {
-      broadcast: () => pendingOptions.broadcastTimeline,
+      broadcast: () =>
+        pendingOptions.broadcastTimeline || pendingOptions.broadcastProviderSubagents,
+      broadcastTimeline: () => pendingOptions.broadcastTimeline,
     });
     return deps.agentManager.getAgent(agentId) ?? snapshot;
   })();

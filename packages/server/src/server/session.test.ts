@@ -225,6 +225,7 @@ describe("refresh_agent_request while a turn is in progress", () => {
       unarchiveSnapshot: vi.fn(async () => false),
       reloadAgentSession: vi.fn(options.reloadAgentSession ?? (async () => agent)),
       hydrateTimelineFromProvider: vi.fn(async () => undefined),
+      announceTimelineReplacement: vi.fn(),
       getTimeline: vi.fn(() => []),
     };
     const session = createSessionForTest({

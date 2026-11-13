@@ -276,10 +276,20 @@ export interface SubscribeOptions {
   includeInternal?: boolean;
 }
 
+type HydrateBroadcast = boolean | (() => boolean);
+
 interface HydrateTimelineOptions {
   force?: boolean;
-  broadcast?: boolean | (() => boolean);
-  broadcastTimeline?: boolean;
+  broadcast?: HydrateBroadcast;
+  /**
+   * Whether replayed history rows go out one stream event each. Defaults to `broadcast`.
+   * Off, subscribers learn of the new timeline from one `timeline_replacement` instead.
+   */
+  broadcastTimeline?: HydrateBroadcast;
+}
+
+function resolveHydrateBroadcast(broadcast: HydrateBroadcast): boolean {
+  return typeof broadcast === "function" ? broadcast() : broadcast;
 }
 
 type ProviderSubagentHistoryEvent = Extract<AgentStreamEvent, { type: "provider_subagent" }>;
@@ -4105,6 +4115,19 @@ export class AgentManager {
     await this.hydrateTimelineFromLegacyProviderHistory(agent, options);
   }
 
+  /**
+   * Tells timeline subscribers the agent's timeline was rebuilt, so each refetches the page it
+   * shows. Replaying every history row instead costs one stream event per row per subscriber.
+   */
+  announceTimelineReplacement(agentId: string): void {
+    if (!this.agents.has(agentId)) return;
+    this.dispatch({
+      type: "timeline_replacement",
+      agentId,
+      epoch: this.timelineStore.getEpoch(agentId),
+    });
+  }
+
   async rewind(agentId: string, messageId: string, mode: RewindMode): Promise<void> {
     const agent = this.requireSessionAgent(agentId);
     const submittedRow = this.timelineStore
@@ -4137,11 +4160,7 @@ export class AgentManager {
           broadcast: true,
           broadcastTimeline: false,
         });
-        this.dispatch({
-          type: "timeline_replacement",
-          agentId,
-          epoch: this.timelineStore.getEpoch(agentId),
-        });
+        this.announceTimelineReplacement(agentId);
       }
       // Rewind stages provider events under the run lock; publish its final state directly.
       this.refreshSessionPersistence(agent);
@@ -5016,13 +5035,18 @@ export class AgentManager {
     if (options?.force) {
       await this.forceHydrateTimelineFromLegacyProviderHistory(
         agent,
-        typeof broadcast === "function" ? broadcast() : broadcast,
-        typeof broadcastTimeline === "function" ? broadcastTimeline() : broadcastTimeline,
+        resolveHydrateBroadcast(broadcast),
+        resolveHydrateBroadcast(broadcastTimeline),
       );
       return;
     }
 
-    await this.primeTimelineFromLegacyProviderHistory(agent, broadcast);
+    await this.primeTimelineFromLegacyProviderHistory(
+      agent,
+      broadcast,
+      agent.session.streamHistory(),
+      broadcastTimeline,
+    );
   }
 
   private async forceHydrateTimelineFromLegacyProviderHistory(
@@ -5080,12 +5104,14 @@ export class AgentManager {
 
   private async primeTimelineFromLegacyProviderHistory(
     agent: ActiveManagedAgent,
-    broadcast: boolean | (() => boolean),
+    broadcast: HydrateBroadcast,
     history:
       | AsyncIterable<AgentStreamEvent>
       | Iterable<AgentStreamEvent> = agent.session.streamHistory(),
+    broadcastTimeline: HydrateBroadcast = broadcast,
   ): Promise<void> {
-    const deferredBroadcast = typeof broadcast === "function";
+    const deferredBroadcast =
+      typeof broadcast === "function" || typeof broadcastTimeline === "function";
     const historyEvents: Extract<AgentStreamEvent, { type: "timeline" }>[] = [];
     const historySubagentEvents: Extract<AgentStreamEvent, { type: "provider_subagent" }>[] = [];
     agent.historyPrimed = false;
@@ -5138,7 +5164,7 @@ export class AgentManager {
       );
       if (deferredBroadcast) {
         timelineEvents.push({ event, row });
-      } else if (broadcast) {
+      } else if (broadcastTimeline) {
         this.dispatchStream(agent.id, event, {
           seq: row.seq,
           epoch: this.timelineStore.getEpoch(agent.id),
@@ -5148,16 +5174,40 @@ export class AgentManager {
     }
     agent.historyPrimed = true;
 
-    if (typeof broadcast !== "function" || !broadcast()) {
+    if (deferredBroadcast) {
+      this.dispatchDeferredHistory(agent.id, {
+        providerSubagentEvents,
+        timelineEvents,
+        broadcast: resolveHydrateBroadcast(broadcast),
+        broadcastTimeline: resolveHydrateBroadcast(broadcastTimeline),
+      });
+    }
+  }
+
+  private dispatchDeferredHistory(
+    agentId: string,
+    input: {
+      providerSubagentEvents: AgentManagerEvent[];
+      timelineEvents: Array<{
+        event: Extract<AgentStreamEvent, { type: "timeline" }>;
+        row: AgentTimelineRow;
+      }>;
+      broadcast: boolean;
+      broadcastTimeline: boolean;
+    },
+  ): void {
+    if (input.broadcast) {
+      for (const event of input.providerSubagentEvents) {
+        this.dispatch(event);
+      }
+    }
+    if (!input.broadcastTimeline) {
       return;
     }
-    for (const event of providerSubagentEvents) {
-      this.dispatch(event);
-    }
-    for (const { event, row } of timelineEvents) {
-      this.dispatchStream(agent.id, event, {
+    for (const { event, row } of input.timelineEvents) {
+      this.dispatchStream(agentId, event, {
         seq: row.seq,
-        epoch: this.timelineStore.getEpoch(agent.id),
+        epoch: this.timelineStore.getEpoch(agentId),
         timestamp: row.timestamp,
       });
     }
