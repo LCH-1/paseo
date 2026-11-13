@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
@@ -180,6 +180,40 @@ test("a creation still running is not expired", async () => {
   release();
   expect((await running).phase).toBe("completed");
   expect(await readdir(directory)).toContain(identityFile);
+});
+
+test("a creation interrupted before completing outlives the retention and its retry resumes", async () => {
+  const home = await createHome();
+  const directory = join(home, "creations");
+  let provisions = 0;
+  const provision: CreationInput["provision"] = async (id) => {
+    provisions += 1;
+    return { workspace: { ...workspace, id } };
+  };
+  const finished = await new CreationService(directory, silentLogger).create(
+    workspaceCreation("interrupted", provision),
+  );
+  // A daemon that stopped right after provisioning leaves the workspace recorded and nothing in
+  // flight; the receipt is all that stops a retry from provisioning a second workspace.
+  const receipt = join(directory, `${digest(["workspace", "interrupted"])}.json`);
+  const record = JSON.parse(await readFile(receipt, "utf8")) as {
+    snapshot: { [key: string]: unknown };
+  };
+  await writeFile(
+    receipt,
+    JSON.stringify({ ...record, snapshot: { ...record.snapshot, phase: "workspace_ready" } }),
+  );
+  for (const name of await readdir(directory)) {
+    await age(join(directory, name), 365 * DAY_MS);
+  }
+  const restarted = new CreationService(directory, silentLogger);
+
+  expect(await restarted.expireCompleted(NOW - COMPLETED_RECEIPT_RETENTION_MS)).toBe(0);
+
+  const resumed = await restarted.create(workspaceCreation("interrupted", provision));
+  expect(resumed.phase).toBe("completed");
+  expect(resumed.workspaceId).toBe(finished.workspaceId);
+  expect(provisions).toBe(1);
 });
 
 test("uploads expire by their newest write after the upload retention", async () => {
