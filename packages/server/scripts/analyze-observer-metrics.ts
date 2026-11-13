@@ -61,6 +61,11 @@ function buildSample(root: Record<string, unknown>, observer: Record<string, unk
   };
 }
 
+// A ws_runtime_metrics line leaves zero values out, and carries the state gauges (memory,
+// git.workspaceService with the observer) only every five minutes and in notable windows; see
+// compactRuntimeMetricsForLog. So every metrics line is a sample: each has its uptime and its own
+// event loop delay, and a value it leaves out reads as 0, which never raises a peak. The observer
+// columns other than the cumulative counts are therefore peaks over the gauge lines only.
 async function readSamples(path: string): Promise<Sample[]> {
   const samples: Sample[] = [];
   const lines = createInterface({ input: createReadStream(path), crlfDelay: Infinity });
@@ -68,8 +73,8 @@ async function readSamples(path: string): Promise<Sample[]> {
     const root = parseLogLine(line);
     if (!root) continue;
     const observer = extractObserverRecord(root);
-    if (!observer) continue;
-    samples.push(buildSample(root, observer));
+    if (!observer && root.msg !== "ws_runtime_metrics") continue;
+    samples.push(buildSample(root, observer ?? {}));
   }
   return samples;
 }
