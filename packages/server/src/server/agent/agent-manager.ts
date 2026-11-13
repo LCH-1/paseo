@@ -1964,9 +1964,10 @@ export class AgentManager {
   // Hot-reload an active agent session with config overrides. By default the
   // in-memory timeline is preserved (used for voice-mode toggles and similar
   // config swaps). When `rehydrateFromDisk` is set, the timeline is wiped so a
-  // new epoch is minted and provider history is re-streamed — this is what the
+  // new epoch is minted and provider history is re-read — this is what the
   // user-facing "Reload agent" action wants when the on-disk session was
-  // mutated outside Paseo.
+  // mutated outside Paseo. That history is read before the agent's lifecycle
+  // lane is released; see reloadAgentSessionInternal.
   reloadAgentSession(
     agentId: string,
     overrides?: Partial<AgentSessionConfig>,
@@ -2045,7 +2046,7 @@ export class AgentManager {
       this.cancelRunningProviderSubagents(agentId);
       closedExisting = this.prepareAgentForClosure(existing, "agent reloaded");
       await this.persistSnapshot(closedExisting);
-      return await this.installReloadedSession({
+      const reloaded = await this.installReloadedSession({
         client,
         handle,
         opening,
@@ -2054,6 +2055,18 @@ export class AgentManager {
         rehydrateFromDisk,
         registration,
       });
+      if (!rehydrateFromDisk) return reloaded;
+      // The history is read back before the lifecycle lane is released. A prompt loads the agent
+      // behind this lane, so its rows follow the history: Claude reads it over many tasks, and a
+      // turn started meanwhile landed above the whole conversation. A reload queued behind this
+      // one waits too, instead of closing the session mid-read and keeping an empty timeline that
+      // nothing reads again. The caller announces the replacement, so the rows are not streamed;
+      // the provider subagents read with them are announced.
+      await this.hydrateTimelineFromLegacyProviderHistory(this.requireSessionAgent(agentId), {
+        broadcast: true,
+        broadcastTimeline: false,
+      });
+      return this.getAgent(agentId) ?? reloaded;
     } catch (error) {
       if (closedExisting) {
         if (modelChange && !this.agents.has(agentId)) {
@@ -2136,8 +2149,8 @@ export class AgentManager {
       this.assertAcceptingAgentRegistrations();
 
       if (rehydrateFromDisk) {
-        // Wipe the in-memory timeline so registerSession mints a new epoch and
-        // hydrateTimelineFromProvider re-streams the freshly read provider history.
+        // Wipe the in-memory timeline so registerSession mints a new epoch, which the
+        // reload then fills with the freshly read provider history.
         this.timelineStore.delete(agentId);
         for (const event of this.providerSubagents.deleteParent(agentId)) {
           this.dispatch({ type: "provider_subagent", event });

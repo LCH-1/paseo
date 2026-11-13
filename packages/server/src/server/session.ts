@@ -4793,6 +4793,8 @@ export class Session {
           logger: this.sessionLogger,
         });
       }
+      // Both branches have usually read the history already: the reload before it released the
+      // agent, so a prompt sent meanwhile lands after it, and the loader before it answered.
       await this.agentManager.hydrateTimelineFromProvider(agentId, {
         broadcast: true,
         broadcastTimeline: false,

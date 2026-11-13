@@ -5,8 +5,8 @@ import {
 } from "./agent-messages/index.js";
 import { expect, test, vi } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
@@ -27,6 +27,7 @@ import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/
 import { sendPromptToAgent, startAgentRun } from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import { ClaudeAgentClient } from "./providers/claude/agent.js";
+import { claudeProjectDirSync } from "./providers/claude/project-dir.js";
 import type { Query } from "@anthropic-ai/claude-agent-sdk";
 import { PluginHookRefusalError } from "../plugins/hook-refusal.js";
 import type { PluginLifecycleEvents, PluginSessionOpenRequest } from "@getpaseo/plugin/server";
@@ -762,6 +763,165 @@ test("refreshing an agent replaces the injected timeline store instead of append
   }
 });
 
+test("a prompt sent while a refresh rereads the history lands after that history", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-refresh-prompt-order-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const rereadStarted = deferred<void>();
+  const turnStarted = deferred<void>();
+  // Like Claude's, the replacement session reads its history over many tasks.
+  class SlowHistorySession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      turnStarted.resolve();
+      return super.startTurn();
+    }
+
+    override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+      rereadStarted.resolve();
+      // Long enough for a prompt that does not wait for the reread to start its turn first.
+      await Promise.race([
+        turnStarted.promise,
+        new Promise<void>((resolve) => setTimeout(resolve, 300)),
+      ]);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      yield { type: "timeline", provider: "codex", item: { type: "user_message", text: "first" } };
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      yield {
+        type: "timeline",
+        provider: "codex",
+        item: { type: "assistant_message", text: "answer" },
+      };
+    }
+  }
+  class SlowHistoryClient extends TestAgentClient {
+    override async resumeSession(
+      _handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+    ): Promise<AgentSession> {
+      return new SlowHistorySession({ provider: "codex", cwd: config?.cwd ?? workdir });
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new SlowHistoryClient() },
+    registry: storage,
+    logger,
+  });
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+
+    // What session.handleRefreshAgentRequest does for a loaded agent.
+    const refreshing = (async () => {
+      await manager.reloadAgentSession(agent.id, undefined, { rehydrateFromDisk: true });
+      await manager.hydrateTimelineFromProvider(agent.id, {
+        broadcast: true,
+        broadcastTimeline: false,
+      });
+      manager.announceTimelineReplacement(agent.id);
+    })();
+    await rereadStarted.promise;
+    await sendPromptToAgent({
+      agentManager: manager,
+      agentStorage: storage,
+      agentId: agent.id,
+      prompt: "follow-up",
+      messageId: "follow-up-message",
+      logger,
+    });
+    await refreshing;
+    await vi.waitFor(() => expect(manager.getTimeline(agent.id)).toHaveLength(3));
+    await vi.waitFor(() => expect(manager.getAgent(agent.id)?.lifecycle).toBe("idle"));
+
+    expect(
+      manager
+        .getTimeline(agent.id)
+        .map((item) => ("text" in item ? `${item.type}:${item.text}` : item.type)),
+    ).toEqual(["user_message:first", "assistant_message:answer", "user_message:follow-up"]);
+  } finally {
+    for (const live of manager.listAgents()) await manager.closeAgent(live.id).catch(() => {});
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("a reload that keeps the timeline waits for a refresh to reread a Claude transcript", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-claude-refresh-reload-"));
+  const cwd = join(workdir, "repo");
+  const configDir = join(workdir, "claude");
+  mkdirSync(cwd, { recursive: true });
+  // Keep the Claude adapter off this machine's own Claude settings and transcripts.
+  vi.stubEnv("CLAUDE_CONFIG_DIR", configDir);
+  const sessionId = "refresh-reload-session";
+  const transcript = join(claudeProjectDirSync(cwd, { configDir }), `${sessionId}.jsonl`);
+  mkdirSync(dirname(transcript), { recursive: true });
+  const exchanges = 1_000;
+  const lines: string[] = [];
+  for (let index = 0; index < exchanges; index++) {
+    const timestamp = new Date(Date.UTC(2026, 10, 1, 0, 0, index)).toISOString();
+    lines.push(
+      JSON.stringify({
+        type: "user",
+        uuid: `user-${index}`,
+        timestamp,
+        message: { role: "user", content: `prompt ${index}` },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        uuid: `assistant-${index}`,
+        timestamp,
+        message: { role: "assistant", content: [{ type: "text", text: `answer ${index}` }] },
+      }),
+    );
+  }
+  writeFileSync(transcript, `${lines.join("\n")}\n`);
+  class AvailableClaudeClient extends ClaudeAgentClient {
+    override async isAvailable(): Promise<boolean> {
+      return true;
+    }
+  }
+  const manager = new AgentManager({
+    clients: {
+      claude: new AvailableClaudeClient({
+        logger,
+        queryFactory: () => {
+          throw new Error("reading history must not start a query");
+        },
+        resolveBinary: async () => "/test/claude/bin",
+        resolveVersion: async () => "2.1.220",
+      }),
+    },
+    logger,
+  });
+  try {
+    const agent = await manager.resumeAgentFromPersistence(
+      { provider: "claude", sessionId, metadata: { cwd } },
+      { cwd },
+    );
+    await manager.hydrateTimelineFromProvider(agent.id);
+    expect(manager.getTimeline(agent.id)).toHaveLength(2 * exchanges);
+
+    // What session.handleRefreshAgentRequest does, while a voice toggle reloads the same agent.
+    const refreshing = manager
+      .reloadAgentSession(agent.id, undefined, { rehydrateFromDisk: true })
+      .then(() =>
+        manager.hydrateTimelineFromProvider(agent.id, {
+          broadcast: true,
+          broadcastTimeline: false,
+        }),
+      );
+    const toggling = manager.reloadAgentSession(agent.id, { systemPrompt: "voice mode" });
+    await Promise.all([refreshing, toggling]);
+
+    expect(manager.getTimeline(agent.id)).toHaveLength(2 * exchanges);
+    expect(manager.getAgent(agent.id)?.historyPrimed).toBe(true);
+  } finally {
+    for (const live of manager.listAgents()) await manager.closeAgent(live.id).catch(() => {});
+    await manager.flush();
+    vi.unstubAllEnvs();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("a failed history replay leaves the committed timeline intact", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-timeline-replay-fail-"));
   const store = new RecordingTimelineStore();
@@ -812,7 +972,11 @@ test("a failed history replay leaves the committed timeline intact", async () =>
     const committed = await manager.getTimelineRows(agent.id);
 
     failReplay = true;
-    await manager.reloadAgentSession(agent.id, undefined, { rehydrateFromDisk: true });
+    // The reload reads the history back itself, so its failure is the reload's.
+    await expect(
+      manager.reloadAgentSession(agent.id, undefined, { rehydrateFromDisk: true }),
+    ).rejects.toThrow("history stream closed");
+    // The new session stays installed, and the caller's own read fails the same way.
     await expect(
       manager.hydrateTimelineFromProvider(agent.id, { broadcast: true }),
     ).rejects.toThrow("history stream closed");
