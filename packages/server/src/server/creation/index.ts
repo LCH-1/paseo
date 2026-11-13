@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import {
@@ -49,6 +49,7 @@ const RecordSchema = z.object({
   failedPrompt: z.string().optional(),
 });
 type Record = z.infer<typeof RecordSchema>;
+const RECEIPT_FILE_NAME = /^[0-9a-f]{64}\.json$/;
 
 /** Owns creation across socket lifetimes. Resource owners perform work; this module commits its milestones. */
 export class CreationService {
@@ -180,6 +181,65 @@ export class CreationService {
       };
     }
     return latest?.failure ?? null;
+  }
+
+  /**
+   * Removes completed creation receipts last written before `cutoffMs`, with the resource claims
+   * they own. Failed receipts stay: they are a workspace's only trace of a failed agent and its
+   * restorable prompt. A receipt that is still in flight or being created is never touched.
+   */
+  async expireCompleted(cutoffMs: number): Promise<number> {
+    let names: string[];
+    try {
+      names = await readdir(this.directory);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return 0;
+      throw error;
+    }
+    // Claims hold their owner's identity; a claim left behind would let a replay of that key skip
+    // the existence check for the resource it names.
+    const claimsByOwner = new Map<string, string[]>();
+    for (const name of names) {
+      if (!name.endsWith(".claim")) continue;
+      const owner = await readOptional(join(this.directory, name)).catch(() => null);
+      if (owner === null) continue;
+      claimsByOwner.set(owner, [...(claimsByOwner.get(owner) ?? []), name]);
+    }
+    let removed = 0;
+    for (const name of names) {
+      if (!RECEIPT_FILE_NAME.test(name)) continue;
+      const identity = name.slice(0, -".json".length);
+      if (this.active.has(identity)) continue;
+      const expired = await this.accessReceipt(identity, async () => {
+        if (!(await this.removeIfExpired(identity, cutoffMs))) return false;
+        for (const claim of claimsByOwner.get(identity) ?? []) {
+          const file = join(this.directory, claim);
+          if ((await readOptional(file)) === identity) await rm(file, { force: true });
+        }
+        return true;
+      }).catch((err: unknown) => {
+        this.logger.warn({ err, identity }, "Skipped expiring creation receipt");
+        return false;
+      });
+      if (expired) removed += 1;
+    }
+    return removed;
+  }
+
+  private async removeIfExpired(identity: string, cutoffMs: number): Promise<boolean> {
+    if (this.active.has(identity)) return false;
+    const file = join(this.directory, `${identity}.json`);
+    const modifiedAt = await stat(file).then(
+      (stats) => stats.mtimeMs,
+      () => null,
+    );
+    if (modifiedAt === null || modifiedAt > cutoffMs) return false;
+    const text = await readOptional(file);
+    const parsed = text === null ? null : RecordSchema.safeParse(JSON.parse(text));
+    if (!parsed?.success) return false;
+    if (parsed.data.snapshot.phase !== "completed" || parsed.data.inFlight !== null) return false;
+    await rm(file, { force: true });
+    return true;
   }
 
   private async readForLookup(identity: string): Promise<Record | null> {

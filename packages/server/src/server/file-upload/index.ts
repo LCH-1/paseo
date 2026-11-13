@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 
 import { FileTransferOpcode, type FileTransferFrame } from "@getpaseo/protocol/binary-frames/index";
@@ -26,6 +26,44 @@ interface PendingUpload {
   staleTimeout: ReturnType<typeof setTimeout>;
   queue: Promise<void>;
   cleanup?: Promise<void>;
+}
+
+const UPLOAD_DIRECTORY_NAME = /^upload_[0-9a-f-]{36}$/;
+
+/**
+ * Removes upload directories whose newest entry was written before `cutoffMs`. Uploads in flight
+ * are minutes old (stale ones are abandoned after ten minutes), so any cutoff in days leaves them
+ * alone. Only directories named the way this store names them are considered.
+ */
+export async function expireUploads(paseoHome: string, cutoffMs: number): Promise<number> {
+  const root = join(paseoHome, "uploads");
+  let names: string[];
+  try {
+    names = await readdir(root);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return 0;
+    throw error;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!UPLOAD_DIRECTORY_NAME.test(name)) continue;
+    const directory = join(root, name);
+    const lastWrittenAt = await newestWrite(directory).catch(() => null);
+    if (lastWrittenAt === null || lastWrittenAt > cutoffMs) continue;
+    await rm(directory, { recursive: true, force: true });
+    removed += 1;
+  }
+  return removed;
+}
+
+async function newestWrite(directory: string): Promise<number | null> {
+  const directoryStats = await stat(directory);
+  if (!directoryStats.isDirectory()) return null;
+  let newest = directoryStats.mtimeMs;
+  for (const entry of await readdir(directory)) {
+    newest = Math.max(newest, (await stat(join(directory, entry))).mtimeMs);
+  }
+  return newest;
 }
 
 export class FileUploadStore {

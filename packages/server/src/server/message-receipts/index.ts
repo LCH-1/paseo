@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { writeJsonFileAtomic } from "../atomic-file.js";
@@ -9,6 +9,7 @@ const ReceiptSchema = z.object({
   state: z.enum(["pending", "completed"]),
   agentId: z.string(),
 });
+const RECEIPT_FILE_NAME = /^[0-9a-f]{64}\.json$/;
 interface SendMessageInput {
   agentId: string;
   messageId: string;
@@ -38,6 +39,40 @@ export class MessageReceipts {
     return result;
   }
 
+  /**
+   * Removes completed receipts last written before `cutoffMs`. A completed receipt only answers a
+   * retry of the same message, and clients retry within one connection, never weeks later. A
+   * pending receipt stays: it is what stops a message of unknown outcome from being sent twice.
+   * The legacy creation receipts kept in this directory share the shape and the rule.
+   */
+  async expireCompleted(cutoffMs: number): Promise<number> {
+    let names: string[];
+    try {
+      names = await readdir(this.directory);
+    } catch (error) {
+      if (isMissingFile(error)) return 0;
+      throw error;
+    }
+    let removed = 0;
+    for (const name of names) {
+      if (!RECEIPT_FILE_NAME.test(name)) continue;
+      const key = name.slice(0, -".json".length);
+      if (this.pending.has(key)) continue;
+      const file = path.join(this.directory, name);
+      try {
+        if ((await stat(file)).mtimeMs > cutoffMs) continue;
+        if ((await readReceipt(file))?.state !== "completed") continue;
+      } catch {
+        // Unreadable or racing a writer: leave it for the next pass.
+        continue;
+      }
+      if (this.pending.has(key)) continue;
+      await rm(file, { force: true });
+      removed += 1;
+    }
+    return removed;
+  }
+
   private async sendOnce(key: string, input: SendMessageInput): Promise<void> {
     const file = path.join(this.directory, `${key}.json`);
     const fingerprint = digest(input.request);
@@ -60,9 +95,13 @@ async function readReceipt(file: string): Promise<z.infer<typeof ReceiptSchema> 
   try {
     return ReceiptSchema.parse(JSON.parse(await readFile(file, "utf8")));
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+    if (isMissingFile(error)) return null;
     throw error;
   }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 function digest(value: unknown): string {

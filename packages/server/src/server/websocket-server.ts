@@ -15,6 +15,7 @@ import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type pino from "pino";
 import type { ProjectRegistry, WorkspaceRegistry } from "./workspace-registry.js";
 import type { ProjectUpdate } from "./workspace-reconciliation-service.js";
+import { startDurableRecordExpiry } from "./durable-record-expiry.js";
 import type { ScheduleService } from "./schedule/service.js";
 import type { CheckoutDiffManager, CheckoutDiffMetrics } from "./checkout-diff-manager.js";
 import type { DaemonConfigStore, MutableDaemonConfig } from "./daemon-config-store.js";
@@ -609,6 +610,7 @@ export class VoiceAssistantWebSocketServer {
   private runtimeMetricsInterval: ReturnType<typeof setInterval> | null = null;
   private quietRuntimeMetricsWindows = 0;
   private logDigestInterval: ReturnType<typeof setInterval> | null = null;
+  private stopDurableRecordExpiry: (() => void) | null = null;
   private readonly slowRequestDigest = new RepeatDigest<SlowRequestKind>();
   private readonly unusedSocketDigest = new RepeatDigest<UnusedSocketKind>();
   private readonly socketLogStates = new WeakMap<WebSocketLike, SocketLogState>();
@@ -797,6 +799,12 @@ export class VoiceAssistantWebSocketServer {
 
     this.wss = this.createWebSocketServer(server, wsConfig, auth);
     this.startRuntimeMetricsInterval();
+    this.stopDurableRecordExpiry = startDurableRecordExpiry({
+      messageReceipts: this.messageReceipts,
+      creations: this.creationService,
+      paseoHome,
+      logger: this.logger.child({ module: "durable-record-expiry" }),
+    });
     this.startApplicationSocketLeaseInterval();
 
     this.logger.info("WebSocket server initialized on /ws");
@@ -1127,6 +1135,8 @@ export class VoiceAssistantWebSocketServer {
       clearInterval(this.logDigestInterval);
       this.logDigestInterval = null;
     }
+    this.stopDurableRecordExpiry?.();
+    this.stopDurableRecordExpiry = null;
     this.applicationSocketLease.clear();
     this.flushLogDigests();
     this.flushRuntimeMetrics({ final: true });
