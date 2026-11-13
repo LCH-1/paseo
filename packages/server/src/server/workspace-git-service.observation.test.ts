@@ -1100,12 +1100,11 @@ describe("WorkspaceGitService checkout observation", () => {
     await vi.advanceTimersByTimeAsync(180_000);
     expect(runGitFetch).toHaveBeenCalledTimes(4);
 
-    const offsets = [REPO_CWD, otherRepo].map((cwd) =>
-      (fetchedAt.get(cwd) ?? []).map((at) => Math.round((at - startedAt) / 1_000)),
-    );
-    const [firstOffsets, secondOffsets] = offsets;
-    expect(secondOffsets?.[0]! - firstOffsets?.[0]!).toBeGreaterThanOrEqual(15);
-    expect(secondOffsets?.[1]! - firstOffsets?.[1]!).toBeGreaterThanOrEqual(15);
+    const secondsAfterStart = (at: number) => Math.round((at - startedAt) / 1_000);
+    const [firstA = 0, secondA = 0] = (fetchedAt.get(REPO_CWD) ?? []).map(secondsAfterStart);
+    const [firstB = 0, secondB = 0] = (fetchedAt.get(otherRepo) ?? []).map(secondsAfterStart);
+    expect(firstB - firstA).toBeGreaterThanOrEqual(15);
+    expect(secondB - secondA).toBeGreaterThanOrEqual(15);
 
     first.unsubscribe();
     second.unsubscribe();
