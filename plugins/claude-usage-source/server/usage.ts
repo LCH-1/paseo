@@ -348,15 +348,15 @@ export interface ClaudeCredentialLookup extends StoreLookup {
   readWindowsCredentials?: (service: string) => Promise<unknown | null>;
   /** The Windows helper process; used when `readWindowsCredentials` is not given. */
   readWindowsSnapshots?: ReadSnapshots;
-  /** Windows logins a discovery read, for the usage fetches that follow it straight away. */
+  /** Windows logins a host discovery read, for the usage fetches that follow it straight away. */
   recentWindowsReads?: RecentWindowsReads;
   readKeychainCredentials?: (service: string, account: string) => Promise<unknown | null>;
   claudeHome?: string;
 }
 
 /**
- * The Windows logins one discovery read, kept for the usage fetches its renewal starts right after
- * it. Each is taken once and only within a few seconds, so a fetch in a later renewal, or a
+ * The Windows logins one host discovery read, kept for the usage fetches its renewal starts right
+ * after it. Each is taken once and only within a few seconds, so a fetch in a later renewal, or a
  * targeted refresh, reads the store again.
  */
 export class RecentWindowsReads {
@@ -524,7 +524,11 @@ export async function discover(
       }
     }),
   );
-  for (const [service, value] of shared.held) lookup.recentWindowsReads?.remember(service, value);
+  // Only the host's discovery is followed by its fetches. An agent's may have read the store
+  // before the host's did and answer after it, so keeping its reads could hand a host fetch an
+  // older login than the one its account was named by.
+  if (scope.kind === "global")
+    for (const [service, value] of shared.held) lookup.recentWindowsReads?.remember(service, value);
   return accounts.flat();
 }
 

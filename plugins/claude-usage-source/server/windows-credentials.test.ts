@@ -835,6 +835,63 @@ describe("Windows logins read once per renewal", () => {
     expect(helper.starts).toHaveLength(4);
   });
 
+  it.each([
+    [30_000, "isolated-expiring-new", 2],
+    [60_000, "isolated-expiring-new", 2],
+    [60_001, "isolated-expiring-old", 1],
+  ])(
+    "a fetch reads the store again instead of using a login discovery read that ends within a minute: %i ms left",
+    async (left, used, helperProcesses) => {
+      const now = Date.now();
+      const expiring = (accessToken: string, expiresAt: number) => ({
+        claudeAiOauth: { accessToken, expiresAt },
+      });
+      const store: Record<string, unknown> = {
+        [DAEMON_LOGIN]: expiring("isolated-expiring-old", now + left),
+      };
+      const { helper, lookup } = batchedHost(store, new RecentWindowsReads(5_000, () => now));
+      const clocked = { ...lookup, now: () => now };
+      const { api, usage } = vendor();
+      const input = { route: { store: "windows-credman" as const, service: DAEMON_LOGIN } };
+      await discover({ kind: "global" }, clocked, api);
+      // Claude Code has refreshed the login since discovery read it.
+      store[DAEMON_LOGIN] = expiring("isolated-expiring-new", now + 3_600_000);
+      expect((await fetchUsage(input, api, clocked)).status).toBe("available");
+      expect(usage).toEqual([used]);
+      expect(helper.starts).toHaveLength(helperProcesses);
+    },
+  );
+
+  it("a fetch never takes a login an agent's discovery read, which may predate the host's", async () => {
+    const recent = new RecentWindowsReads();
+    const store: Record<string, unknown> = { [DAEMON_LOGIN]: login("isolated-agent-old") };
+    const { helper, lookup } = batchedHost(store, recent);
+    let answerOld = () => {};
+    const oldAnswered = new Promise<void>((resolve) => {
+      answerOld = resolve;
+    });
+    const { api: vendorApi, usage } = vendor();
+    // The vendor names the old login's owner only after the host has read the new login.
+    const api: typeof fetch = async (url, init) => {
+      const token = new Headers(init?.headers).get("Authorization")?.replace("Bearer ", "");
+      if (String(url).endsWith("/profile") && token === "isolated-agent-old") await oldAnswered;
+      return vendorApi(url, init);
+    };
+    const agent = discover(
+      { kind: "session", provider: "claude", env: { USERPROFILE: lookup.home } },
+      lookup,
+      api,
+    );
+    await vi.waitFor(() => expect(helper.starts).toHaveLength(1));
+    store[DAEMON_LOGIN] = login("isolated-agent-new");
+    await discover({ kind: "global" }, lookup, api);
+    answerOld();
+    await agent;
+    const input = { route: { store: "windows-credman" as const, service: DAEMON_LOGIN } };
+    expect((await fetchUsage(input, api, lookup)).status).toBe("available");
+    expect(usage).toEqual(["isolated-agent-new"]);
+  });
+
   it("a login replaced after discovery read it is read again rather than reported rejected", async () => {
     const recent = new RecentWindowsReads();
     const store: Record<string, unknown> = { [DAEMON_LOGIN]: login("isolated-replaced-old") };
