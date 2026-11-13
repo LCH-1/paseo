@@ -1131,6 +1131,105 @@ test("a forced refresh during a background renewal waits for a discovery started
   expect((await forced).map((report) => report.id)).toEqual(["source:a", "source:b"]);
 });
 
+test("a poll made while a forced refresh rediscovers the host waits for it instead of answering with the logins it replaces", async () => {
+  let now = 0;
+  let store = "a";
+  const answers: Array<() => void> = [];
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "source",
+      discover: () => {
+        // The login store is read when the discovery starts, not when it answers.
+        const accounts = [{ key: store, input: store }];
+        return new Promise((resolve) => {
+          answers.push(() => resolve(accounts));
+        });
+      },
+    }),
+  );
+  const ids = async (query: ReturnType<typeof registry.listReports>) =>
+    (await query).map((report) => report.id);
+  const first = registry.listReports();
+  answers[0]!();
+  expect(await ids(first)).toEqual(["source:a"]);
+  // Another login is signed in and refreshed for, while another window polls inside the window.
+  now = 100_000;
+  store = "b";
+  const forced = registry.listReports({ forceRefresh: true });
+  const polled = registry.listReports();
+  answers[1]!();
+  expect(await ids(polled)).toEqual(["source:b"]);
+  expect(await ids(forced)).toEqual(["source:b"]);
+  expect(answers).toHaveLength(2);
+  // Likewise for a forced refresh queued behind a renewal that runs behind the cache's answers.
+  now = 350_000;
+  expect(await ids(registry.listReports())).toEqual(["source:b"]);
+  expect(answers).toHaveLength(3);
+  store = "c";
+  const forcedAgain = registry.listReports({ forceRefresh: true });
+  const polledAgain = registry.listReports();
+  answers[2]!();
+  await vi.waitFor(() => expect(answers).toHaveLength(4));
+  answers[3]!();
+  expect(await ids(polledAgain)).toEqual(["source:c"]);
+  expect(await ids(forcedAgain)).toEqual(["source:c"]);
+});
+
+test("an agent running under a login the host lists adds no vendor fetch to its group's renewals", async () => {
+  let now = 0;
+  let renewals = 0;
+  let fetches = 0;
+  const registry = new UsageSourceRegistry(() => now, 300_000, undefined, {
+    hasAgent: () => true,
+    usageSession: () => ({ provider: "claude", env: {}, sessionKey: "launch" }),
+  });
+  registry.register({
+    id: "claude",
+    label: "Claude",
+    // The host's only login is the one the agent runs under, so both use one cache entry.
+    discover: async (scope) => {
+      if (scope.kind === "global") renewals++;
+      await settle();
+      now += 1_000;
+      return [{ key: "account", input: "login" }];
+    },
+    fetch: async () => {
+      fetches++;
+      await settle();
+      now += 500;
+      return { status: "available", windows: [] };
+    },
+  });
+  await registry.listReports();
+  await registry.listReports({ agentId: "agent" });
+  renewals = 0;
+  fetches = 0;
+  const waits: number[] = [];
+  /** An hour of the agent's open usage details polling, with or without the host's polls. */
+  const poll = async (from: number, host: boolean) => {
+    for (let tick = from; tick < from + 2 * 60; tick++) {
+      if (tick % 2 === 0 && !host) continue;
+      now = Math.max(now, tick * 30_000);
+      const asked = now;
+      await registry.listReports(tick % 2 === 0 ? {} : { agentId: "agent" });
+      waits.push(now - asked);
+      for (let step = 0; step < 4; step++) await settle();
+    }
+  };
+  // The host polls once a minute, and the agent's details half a minute after each.
+  await poll(2, true);
+  expect(waits.filter((wait) => wait > 0)).toEqual([]);
+  expect(renewals).toBeGreaterThanOrEqual(11);
+  expect(fetches).toBe(renewals);
+  // Once nothing polls the host, the agent's details renew the entry themselves.
+  fetches = 0;
+  await poll(2 + 2 * 60, false);
+  expect(waits.filter((wait) => wait > 0)).toEqual([]);
+  expect(fetches).toBeGreaterThanOrEqual(11);
+  expect(fetches).toBeLessThanOrEqual(13);
+});
+
 test("an agent's report is renewed behind its answer near the end of the cache window", async () => {
   let now = 0;
   let value = 1;
@@ -1203,6 +1302,47 @@ test("each renewal logs one line with how long discovery and fetching took", asy
       "Usage source group renewed",
     ],
   ]);
+});
+
+test("a renewal that lists no account is logged at debug unless its discovery was slow", async () => {
+  let now = 0;
+  let discoveryMs = 30;
+  const info: unknown[][] = [];
+  const debug: unknown[][] = [];
+  const registry = new UsageSourceRegistry(() => now, 300_000, {
+    warn: () => {},
+    info: (...args: unknown[]) => {
+      info.push(args);
+    },
+    debug: (...args: unknown[]) => {
+      debug.push(args);
+    },
+  });
+  registry.register(
+    source({
+      id: "unused",
+      discover: async () => {
+        now += discoveryMs;
+        return [];
+      },
+    }),
+  );
+  await registry.listReports();
+  await settle();
+  const quiet = { group: "unused", reason: "expired", discoveryMs: 30, fetchMs: 0, reports: 0 };
+  expect(debug).toEqual([[quiet, "Usage source group renewed"]]);
+  expect(info).toEqual([]);
+  // A store that takes a second to say it holds nothing is still a cost worth reading.
+  discoveryMs = 1_000;
+  await registry.listReports({ forceRefresh: true });
+  await settle();
+  expect(info).toEqual([
+    [
+      { group: "unused", reason: "forced", discoveryMs: 1_000, fetchMs: 0, reports: 0 },
+      "Usage source group renewed",
+    ],
+  ]);
+  expect(debug).toHaveLength(1);
 });
 
 test("an account added to the host appears on a forced refresh or once the cache window ends", async () => {

@@ -59,6 +59,8 @@ interface HostDiscovery {
 
 interface RunningHostDiscovery {
   current: Promise<unknown>;
+  /** A forced refresh started `current`: the store may hold logins the cache does not. */
+  forced: boolean;
   /** Starts once `current` settles, for the forced queries that arrived while it ran. */
   next?: Promise<unknown>;
 }
@@ -81,6 +83,9 @@ type RenewalReason = "forced" | Exclude<HostGroupState, "fresh">;
  */
 type FetchMode = "cached" | "forced" | "renewed";
 
+/** A renewal that fetched nothing is logged at info only when its discovery took this long. */
+const SLOW_EMPTY_DISCOVERY_MS = 1_000;
+
 /** Owns account identity, ordered logins for each account, and the five-minute fetch cache. */
 export class UsageSourceRegistry {
   private readonly sources = new Map<string, UsageSource>();
@@ -97,7 +102,7 @@ export class UsageSourceRegistry {
   constructor(
     private readonly now: () => number = Date.now,
     private readonly ttlMs = 300_000,
-    private readonly logger: Pick<Logger, "warn"> & Partial<Pick<Logger, "info">> = {
+    private readonly logger: Pick<Logger, "warn"> & Partial<Pick<Logger, "info" | "debug">> = {
       warn: console.warn,
     },
     private readonly agents: AgentUsageLookup = { hasAgent: () => false, usageSession: () => null },
@@ -231,9 +236,14 @@ export class UsageSourceRegistry {
     const sources = [...this.sources.values()].filter((source) => hostGroup(source) === group);
     const running = this.discovering.get(group);
     if (running) {
-      // A renewal running behind earlier answers is joined only once the cache cannot answer.
-      if (!forceRefresh)
+      if (!forceRefresh) {
+        // A forced refresh asked for the logins the store holds now, often because they changed,
+        // so a query made while it is under way waits for its answer instead of the cache's.
+        const forced = running.next ?? (running.forced ? running.current : undefined);
+        if (forced) return forced;
+        // A renewal running behind earlier answers is joined only once the cache cannot answer.
         return this.hostGroupState(sources) === "expired" ? running.current : Promise.resolve();
+      }
       // The running discovery may have read the login store before this query was made, and its
       // answer would then be reused for the whole cache window. Forced queries that arrive while
       // it runs share one discovery that starts after it.
@@ -279,6 +289,7 @@ export class UsageSourceRegistry {
       current: renew().finally(() => {
         if (this.discovering.get(group) === started) this.discovering.delete(group);
       }),
+      forced: reason === "forced",
     };
     this.discovering.set(group, started);
     return started.current;
@@ -365,7 +376,11 @@ export class UsageSourceRegistry {
     return cached === undefined ? undefined : this.now() - cached.at;
   }
 
-  /** One line per renewal, so the time spent discovering and fetching can be read from the log. */
+  /**
+   * One line per renewal, so the time spent discovering and fetching can be read from the log.
+   * Most sources list no account on a host, and their quick discoveries every five minutes would
+   * fill the info log; they are logged at debug, and a slow one is still logged at info.
+   */
   private async logRenewal(
     group: HostGroup,
     reason: RenewalReason,
@@ -373,17 +388,34 @@ export class UsageSourceRegistry {
     discoveredAt: number,
     fetches: Promise<UsageReportEntry>[],
   ): Promise<void> {
-    if (!this.logger.info) return;
+    if (!this.logger.info && !this.logger.debug) return;
     await Promise.allSettled(fetches);
-    this.logger.info(
-      {
-        group: groupName(group),
-        reason,
-        discoveryMs,
-        fetchMs: this.now() - discoveredAt,
-        reports: fetches.length,
-      },
-      "Usage source group renewed",
+    const line = {
+      group: groupName(group),
+      reason,
+      discoveryMs,
+      fetchMs: this.now() - discoveredAt,
+      reports: fetches.length,
+    };
+    if (fetches.length === 0 && discoveryMs < SLOW_EMPTY_DISCOVERY_MS)
+      this.logger.debug?.(line, "Usage source group renewed");
+    else this.logger.info?.(line, "Usage source group renewed");
+  }
+
+  /**
+   * Whether a host group renewal will fetch this cache entry before it ends. An agent running under
+   * a login the host also lists shares the host's entry, and renewing it apart from its group would
+   * fetch it twice in each cache window. A host asked at least once a minute renews its groups
+   * before their windows end; once its queries stop, the agent renews the entry itself.
+   */
+  private renewedByHostGroup(cacheKey: string): boolean {
+    const lastHostQuery = this.hostQueries[this.hostQueries.length - 1];
+    if (lastHostQuery === undefined || this.now() - lastHostQuery > this.renewAheadMs) return false;
+    return this.hostReports().some((reports) =>
+      [...reports.keys()].some((id) => {
+        const known = this.known.get(id);
+        return known !== undefined && cacheIdentity(id, known) === cacheKey;
+      }),
     );
   }
 
@@ -528,7 +560,12 @@ export class UsageSourceRegistry {
     const pending = this.pending.get(cacheKey);
     if (mode === "renewed" && pending) return pending.then(present);
     if (mode !== "forced" && cached && this.now() - cached.at < this.ttlMs) {
-      if (renewAhead && !pending && this.now() - cached.at >= this.ttlMs - this.renewAheadMs)
+      if (
+        renewAhead &&
+        !pending &&
+        this.now() - cached.at >= this.ttlMs - this.renewAheadMs &&
+        !this.renewedByHostGroup(cacheKey)
+      )
         void this.fetchId(id, known, "forced");
       return Promise.resolve(present(cached.entry));
     }
