@@ -130,9 +130,10 @@ function* observeWorkflowTimelineSteps(input: {
 }): ClaudeReplaySteps<SubagentObservation[]> {
   const observations: SubagentObservation[] = [];
   const replayedAssistantText = new Set<string>();
-  const entries = [...input.entries].sort(compareReplayTimestamps);
+  const order = yield* orderByReplayTimeSteps(input.entries);
 
-  for (const entry of entries) {
+  for (const index of order) {
+    const entry = input.entries[index];
     const timestamp = normalizeProviderReplayTimestamp(entry.timestamp);
     const items = input.convertEntry?.(entry) ?? [];
     for (const item of items) {
@@ -158,13 +159,67 @@ function* observeWorkflowTimelineSteps(input: {
   return observations;
 }
 
-function compareReplayTimestamps(a: ClaudeReplayEntry, b: ClaudeReplayEntry): number {
-  const aTimestamp = normalizeProviderReplayTimestamp(a.timestamp);
-  const bTimestamp = normalizeProviderReplayTimestamp(b.timestamp);
-  if (!aTimestamp && !bTimestamp) return 0;
-  if (!aTimestamp) return 1;
-  if (!bTimestamp) return -1;
-  return Date.parse(aTimestamp) - Date.parse(bTimestamp);
+/** Ordering work done between pauses: entries timed, or entries moved by a merge. */
+const ORDER_STEP_ENTRIES = 1024;
+
+/**
+ * Indexes of `entries` in time order. Entries without a time go last, and entries with the same
+ * time keep their order. Sorting the 320,000 entries of a large workflow in one call, parsing two
+ * times per comparison, held the daemon for half a second. This parses each time once and merges
+ * in pieces with a pause between them. A workflow's entries are its files one after another, each
+ * already in time order, so there are about as many runs to merge as files.
+ */
+function* orderByReplayTimeSteps(
+  entries: readonly ClaudeReplayEntry[],
+): ClaudeReplaySteps<Uint32Array> {
+  const count = entries.length;
+  const times = new Float64Array(count);
+  let order = new Uint32Array(count);
+  // Where each run of entries already in time order starts, then where the last one ends.
+  let runBounds = [0];
+  for (let index = 0; index < count; index += 1) {
+    times[index] = readReplayTime(entries[index].timestamp);
+    order[index] = index;
+    if (index > 0 && times[index] < times[index - 1]) runBounds.push(index);
+    if (index % ORDER_STEP_ENTRIES === ORDER_STEP_ENTRIES - 1) yield;
+  }
+  runBounds.push(count);
+
+  let merged = new Uint32Array(count);
+  let budget = ORDER_STEP_ENTRIES;
+  while (runBounds.length > 2) {
+    const mergedBounds = [0];
+    for (let run = 0; run + 1 < runBounds.length; run += 2) {
+      const start = runBounds[run];
+      const middle = runBounds[run + 1];
+      // An odd run out has nothing to merge with and is copied as it is.
+      const end = run + 2 < runBounds.length ? runBounds[run + 2] : middle;
+      let left = start;
+      let right = middle;
+      for (let next = start; next < end; next += 1) {
+        // On equal times the earlier run goes first, which keeps those entries in order.
+        if (right >= end || (left < middle && times[order[left]] <= times[order[right]])) {
+          merged[next] = order[left++];
+        } else {
+          merged[next] = order[right++];
+        }
+        budget -= 1;
+        if (budget === 0) {
+          budget = ORDER_STEP_ENTRIES;
+          yield;
+        }
+      }
+      mergedBounds.push(end);
+    }
+    [order, merged] = [merged, order];
+    runBounds = mergedBounds;
+  }
+  return order;
+}
+
+function readReplayTime(value: unknown): number {
+  const timestamp = normalizeProviderReplayTimestamp(value);
+  return timestamp ? Date.parse(timestamp) : Number.POSITIVE_INFINITY;
 }
 
 function readWorkflowLinks(entries: readonly ClaudeWorkflowParentEntry[]): Map<string, string> {

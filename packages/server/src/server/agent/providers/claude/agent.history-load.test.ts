@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSession, AgentStreamEvent } from "../../agent-sdk-types.js";
 import { streamSession } from "../test-utils/session-stream-adapter.js";
 import { ClaudeAgentClient } from "./agent.js";
+import { ClaudeHistorySlicer } from "./history-reader.js";
 import { claudeProjectDirSync } from "./project-dir.js";
 import { FakeClaudeSdk } from "./test-rewind-claude-sdk.js";
 
@@ -394,6 +395,74 @@ describe("ClaudeAgentSession persisted history load", () => {
     expect(longestPauseMs).toBeLessThan(Math.max(80, replayMs / 3));
   });
 
+  test("keeps the event loop turning while a large workflow replays", async () => {
+    // About 16MB: eight workflow children of 10,000 rows each, taking turns in time.
+    writeWorkflowSession({
+      transcriptPath: transcriptPath(),
+      children: 8,
+      rowsPerChild: 10_000,
+      blocksPerRow: 1,
+    });
+    let longestPauseMs = 0;
+    let probing = true;
+    let lastTick = performance.now();
+    const probe = (): void => {
+      const now = performance.now();
+      longestPauseMs = Math.max(longestPauseMs, now - lastTick);
+      lastTick = now;
+      if (probing) setImmediate(probe);
+    };
+
+    const startedAt = performance.now();
+    setImmediate(probe);
+    const session = await resume();
+    let events: AgentStreamEvent[];
+    try {
+      events = await drainHistory(session);
+    } finally {
+      probing = false;
+      longestPauseMs = Math.max(longestPauseMs, performance.now() - lastTick);
+      await session.close();
+    }
+    const replayMs = performance.now() - startedAt;
+
+    expect(events.filter((event) => event.type === "provider_subagent").length).toBeGreaterThan(
+      80_000,
+    );
+    // Sorting the rows in one go held the loop for over a third of this replay, and converting
+    // them without a pause for half of it.
+    expect(longestPauseMs).toBeLessThan(Math.max(80, replayMs / 8));
+  });
+
+  test("may pause between any two subagent events it rebuilds", async () => {
+    // One row is converted in one go, but the events made from its blocks need not be.
+    writeWorkflowSession({
+      transcriptPath: transcriptPath(),
+      children: 1,
+      rowsPerChild: 1,
+      blocksPerRow: 5_000,
+    });
+    // Every slice runs out at once, so the read pauses wherever it may.
+    const due = vi.spyOn(ClaudeHistorySlicer.prototype, "due", "get").mockReturnValue(true);
+    const pause = vi.spyOn(ClaudeHistorySlicer.prototype, "pause");
+    const session = await resume();
+    let pausesWhileReading: number;
+    let events: AgentStreamEvent[];
+    try {
+      await internals(session).ensurePersistedHistoryLoaded("history");
+      pausesWhileReading = pause.mock.calls.length;
+      events = await drainHistory(session);
+    } finally {
+      due.mockRestore();
+      pause.mockRestore();
+      await session.close();
+    }
+
+    const subagentEvents = events.filter((event) => event.type === "provider_subagent");
+    expect(subagentEvents.length).toBeGreaterThan(5_000);
+    expect(pausesWhileReading).toBeGreaterThanOrEqual(subagentEvents.length);
+  });
+
   test("replays a subagent with more rows than one call can take as arguments", async () => {
     writeTranscript([
       {
@@ -652,6 +721,80 @@ function writeLargeSession(options: {
   }
   for (let step = 0; step < options.parentTurns; step += 1) parentLines.push(...turn({}));
   writeFileSync(options.transcriptPath, parentLines.join("\n"));
+}
+
+/** A transcript whose Workflow run wrote child transcripts whose rows take turns in time. */
+function writeWorkflowSession(options: {
+  transcriptPath: string;
+  children: number;
+  rowsPerChild: number;
+  blocksPerRow: number;
+}): void {
+  const runId = "wf_history-load-run";
+  const toolUseId = "workflow-call";
+  const sessionDir = path.join(
+    path.dirname(options.transcriptPath),
+    path.basename(options.transcriptPath, ".jsonl"),
+  );
+  mkdirSync(path.join(sessionDir, "workflows"), { recursive: true });
+  writeFileSync(
+    options.transcriptPath,
+    [
+      {
+        type: "assistant",
+        uuid: "workflow-assistant",
+        timestamp: "2026-11-01T00:00:00.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: toolUseId, name: "Workflow", input: {} }],
+        },
+      },
+      {
+        type: "user",
+        uuid: "workflow-result",
+        timestamp: "2026-11-01T00:00:01.000Z",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: toolUseId,
+              content: `Workflow launched in background.\nRun ID: ${runId}`,
+            },
+          ],
+        },
+      },
+    ]
+      .map((entry) => JSON.stringify(entry))
+      .join("\n"),
+  );
+  writeFileSync(
+    path.join(sessionDir, "workflows", `${runId}.json`),
+    JSON.stringify({ runId, summary: "Large workflow", status: "completed" }),
+  );
+  const childDir = path.join(sessionDir, "subagents", "workflows", runId);
+  mkdirSync(childDir, { recursive: true });
+  const startedAt = Date.parse("2026-11-01T00:00:02.000Z");
+  for (let child = 0; child < options.children; child += 1) {
+    const agentId = `workflow-child-${child}`;
+    const lines: string[] = [];
+    for (let row = 0; row < options.rowsPerChild; row += 1) {
+      const blocks = Array.from({ length: options.blocksPerRow }, (_, block) => ({
+        type: "text",
+        text: `child ${child} row ${row} block ${block}`,
+      }));
+      lines.push(
+        JSON.stringify({
+          type: "assistant",
+          isSidechain: true,
+          agentId,
+          timestamp: new Date(startedAt + (row * options.children + child) * 1000).toISOString(),
+          message: { role: "assistant", content: blocks },
+        }),
+      );
+    }
+    writeFileSync(path.join(childDir, `agent-${agentId}.jsonl`), lines.join("\n"));
+  }
 }
 
 /** Claude echoes the prompt (unless told not to), creates a task, and answers. */

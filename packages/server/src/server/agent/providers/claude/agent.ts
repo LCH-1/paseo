@@ -55,7 +55,11 @@ import {
   type ClaudeReplayParentFacts,
   type ClaudeReplaySteps,
 } from "./subagents/replay-source.js";
-import { foldSubagentObservations, type SubagentObservation } from "./subagents/observation.js";
+import {
+  foldSubagentObservation,
+  foldSubagentObservations,
+  type SubagentObservation,
+} from "./subagents/observation.js";
 import {
   observeReplayWorkflowsSteps,
   parseClaudeWorkflowRun,
@@ -5507,23 +5511,25 @@ class ClaudeAgentSession implements AgentSession {
         convertEntry: (entry) => this.convertHistoryEntry(entry as ClaudeHistoryEntry),
       }),
     );
-    const observations = [...subagentReplay.observations, ...workflowObservations];
-    const restoredProviderSubagentIds = new Set(
-      observations
-        .filter((observation) => observation.kind === "declared")
-        .map((observation) => observation.id),
-    );
-    const replay = {
+    // One at a time with pauses: folding the 480,000 observations of a large workflow in one go
+    // held the daemon for a tenth of a second.
+    const restoredProviderSubagentIds = new Set<string>();
+    for (const observations of [subagentReplay.observations, workflowObservations]) {
+      for (const observation of observations) {
+        if (observation.kind === "declared") restoredProviderSubagentIds.add(observation.id);
+        result.providerSubagentEvents.push({
+          type: "provider_subagent",
+          provider: "claude",
+          event: foldSubagentObservation(observation),
+        });
+        if (slicer.due) await slicer.pause();
+      }
+    }
+    return {
       restoredIds: restoredProviderSubagentIds,
       toolOwners: subagentReplay.toolOwners,
       subagentToolCalls: parentFacts.toolCalls,
     };
-    if (observations.length === 0) return replay;
-
-    for (const event of foldSubagentObservations(observations)) {
-      result.providerSubagentEvents.push({ type: "provider_subagent", provider: "claude", event });
-    }
-    return replay;
   }
 
   private ingestPersistedHistoryEntry(

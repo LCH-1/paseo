@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { ProviderSubagentStore } from "../../../provider-subagents/store.js";
-import { foldSubagentObservations } from "./observation.js";
+import { foldSubagentObservations, type SubagentObservation } from "./observation.js";
 import {
   observeReplayWorkflows,
+  observeReplayWorkflowsSteps,
   parseClaudeWorkflowRun,
   type ClaudeWorkflowParentEntry,
 } from "./workflow-replay-source.js";
@@ -177,6 +178,72 @@ describe("Claude workflow replay", () => {
       id: TOOL_CALL_ID,
       status: "failed",
     });
+  });
+
+  it("replays rows in time order, untimed rows last and rows of the same time as written", () => {
+    const at = (second: number): string => `2026-08-06T08:00:0${second}.000Z`;
+    // Child transcripts one after another, each in time order, as Claude writes them.
+    const rows = [
+      { name: "a1", timestamp: at(1) },
+      { name: "a-untimed" },
+      { name: "a3", timestamp: at(3) },
+      { name: "a5", timestamp: at(5) },
+      { name: "b2", timestamp: Date.parse(at(2)) },
+      { name: "b3", timestamp: at(3) },
+      { name: "b-unreadable", timestamp: "not a time" },
+      { name: "b4", timestamp: at(4) },
+      { name: "c0", timestamp: at(0) },
+      { name: "c6", timestamp: at(6) },
+    ];
+
+    const observations = observeReplayWorkflows({
+      workflows: [{ runId: RUN_ID, status: "completed" }],
+      parentEntries: parentEntries(),
+      entriesByRunId: new Map([[RUN_ID, rows]]),
+      convertEntry: (entry) => [{ type: "assistant_message", text: String(entry.name) }],
+    });
+
+    expect(
+      observations.flatMap((observation) =>
+        observation.kind === "timeline" && observation.item.type === "assistant_message"
+          ? [observation.item.text]
+          : [],
+      ),
+    ).toEqual(["c0", "a1", "b2", "a3", "b3", "b4", "a5", "c6", "a-untimed", "b-unreadable"]);
+  });
+
+  it("replays a workflow of hundreds of thousands of rows in short steps", () => {
+    // Out of time order throughout: the most ordering work rows can take.
+    const startOfDay = Date.parse("2026-08-06T00:00:00.000Z");
+    let seed = 1;
+    const rows = Array.from({ length: 200_000 }, (_, index) => {
+      seed = (seed * 48_271) % 2_147_483_647;
+      return { index, timestamp: new Date(startOfDay + (seed % 86_400_000)).toISOString() };
+    });
+    const steps = observeReplayWorkflowsSteps({
+      workflows: [{ runId: RUN_ID, status: "completed" }],
+      parentEntries: parentEntries(),
+      entriesByRunId: new Map([[RUN_ID, rows]]),
+      convertEntry: (entry) => [{ type: "assistant_message", text: String(entry.index) }],
+    });
+
+    let observations: SubagentObservation[] | null = null;
+    let longestStepMs = 0;
+    const startedAt = performance.now();
+    while (!observations) {
+      const stepStartedAt = performance.now();
+      const step = steps.next();
+      longestStepMs = Math.max(longestStepMs, performance.now() - stepStartedAt);
+      if (step.done) observations = step.value;
+    }
+    const totalMs = performance.now() - startedAt;
+
+    expect(observations.filter((observation) => observation.kind === "timeline")).toHaveLength(
+      rows.length,
+    );
+    // Sorting the rows in one step took most of this replay, and converting them in one step
+    // half of it. Each step now does a small piece of either.
+    expect(longestStepMs).toBeLessThan(totalMs / 8);
   });
 
   it("drops a run that no parent Workflow tool call declared", () => {

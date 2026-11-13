@@ -45,52 +45,52 @@ export type SubagentObservation =
 export function foldSubagentObservations(
   observations: readonly SubagentObservation[],
 ): ProviderSubagentInputEvent[] {
-  const events: ProviderSubagentInputEvent[] = [];
-  for (const observation of observations) {
-    if (observation.kind === "timeline") {
-      events.push({
-        type: "timeline",
-        id: observation.id,
-        item: observation.item,
-        ...(observation.timestamp ? { timestamp: observation.timestamp } : {}),
-      });
-      continue;
-    }
+  return observations.map(foldSubagentObservation);
+}
 
-    if (observation.kind === "subtitle") {
-      events.push({
-        type: "upsert",
-        id: observation.id,
-        subtitle: observation.subtitle,
-        ...(observation.timestamp ? { timestamp: observation.timestamp } : {}),
-      });
-      continue;
-    }
+/** One observation's event. Each folds on its own, so a long replay can pause between them. */
+export function foldSubagentObservation(
+  observation: SubagentObservation,
+): ProviderSubagentInputEvent {
+  if (observation.kind === "timeline") {
+    return {
+      type: "timeline",
+      id: observation.id,
+      item: observation.item,
+      ...(observation.timestamp ? { timestamp: observation.timestamp } : {}),
+    };
+  }
 
-    if (observation.kind === "status") {
-      events.push({
-        type: "upsert",
-        id: observation.id,
-        status: observation.status,
-        ...(observation.timestamp ? { timestamp: observation.timestamp } : {}),
-      });
-      continue;
-    }
-
-    // A declared subagent is running until something says otherwise. Its terminal status
-    // arrives as its own observation, so this never has to guess at completion.
-    events.push({
+  if (observation.kind === "subtitle") {
+    return {
       type: "upsert",
       id: observation.id,
-      status: "running",
-      ...(observation.title === undefined ? {} : { title: observation.title }),
-      ...(observation.description === undefined ? {} : { description: observation.description }),
-      ...(observation.toolCallId === undefined ? {} : { toolCallId: observation.toolCallId }),
-      ...(observation.parentSubagentId === undefined
-        ? {}
-        : { parentSubagentId: observation.parentSubagentId }),
+      subtitle: observation.subtitle,
       ...(observation.timestamp ? { timestamp: observation.timestamp } : {}),
-    });
+    };
   }
-  return events;
+
+  if (observation.kind === "status") {
+    return {
+      type: "upsert",
+      id: observation.id,
+      status: observation.status,
+      ...(observation.timestamp ? { timestamp: observation.timestamp } : {}),
+    };
+  }
+
+  // A declared subagent is running until something says otherwise. Its terminal status
+  // arrives as its own observation, so this never has to guess at completion.
+  return {
+    type: "upsert",
+    id: observation.id,
+    status: "running",
+    ...(observation.title === undefined ? {} : { title: observation.title }),
+    ...(observation.description === undefined ? {} : { description: observation.description }),
+    ...(observation.toolCallId === undefined ? {} : { toolCallId: observation.toolCallId }),
+    ...(observation.parentSubagentId === undefined
+      ? {}
+      : { parentSubagentId: observation.parentSubagentId }),
+    ...(observation.timestamp ? { timestamp: observation.timestamp } : {}),
+  };
 }
