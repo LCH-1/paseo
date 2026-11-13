@@ -264,7 +264,9 @@ export class UsageSourceRegistry {
    * Discovers a group's accounts again, then fetches its reports again with the logins that
    * discovery just read. The group's reports are fetched together so they share one cache window:
    * a report fetched on its own (a targeted refresh) would otherwise expire apart from the others
-   * and cost the group a second discovery in every window.
+   * and cost the group a second discovery in every window. A source that cannot be read renews its
+   * group on every query; that alone fetches nothing, so the accounts its siblings named still
+   * reach the vendor once per window.
    */
   private renewHostGroup(
     group: HostGroup,
@@ -272,14 +274,22 @@ export class UsageSourceRegistry {
     reason: RenewalReason,
   ): Promise<unknown> {
     const renew = async () => {
+      // Asked before the discovery renews the windows of the sources that answer it.
+      const discoveryEnding = this.hostDiscoveryEnding(sources);
       const startedAt = this.now();
       const answered = await Promise.all(
         sources.map((source) => this.rediscoverHostSource(source)),
       );
       this.mergeKnown();
       const discoveredAt = this.now();
+      // Asked at the instant the fetches below ask each report, so a report due by then brings
+      // the rest of its group with it rather than leaving them for a renewal a poll later.
+      const windowEnding = discoveryEnding || this.hostReportEnding(sources);
       const fetches = sources.flatMap((source, index) =>
-        this.refetchHostSource(source, reason === "forced" || answered[index] === true),
+        this.refetchHostSource(
+          source,
+          reason === "forced" || (windowEnding && answered[index] === true),
+        ),
       );
       if (sources.length > 0)
         void this.logRenewal(group, reason, discoveredAt - startedAt, discoveredAt, fetches);
@@ -312,18 +322,17 @@ export class UsageSourceRegistry {
   }
 
   /**
-   * Starts a renewal's fetches. A source that answered, or a forced renewal, has every report
-   * fetched with the login just named. A source whose discovery failed still has its previous
-   * logins, so only its reports near the end of their window are fetched, as without a discovery.
+   * Starts a renewal's fetches. A forced renewal fetches every report, and so does a source that
+   * answered while its group's window is ending, with the logins just named. Otherwise only the
+   * reports that are due are fetched: a source whose discovery failed still has its previous
+   * logins, and a group renewed only to ask such a source again has no other report to fetch.
    */
   private refetchHostSource(source: UsageSource, every: boolean): Promise<UsageReportEntry>[] {
     const found = this.defaults.get(source);
     if (!found || this.sources.get(source.id) !== source) return [];
     return [...found.reports.keys()].flatMap((id) => {
       const known = this.known.get(id);
-      if (!known) return [];
-      const age = this.fetchAge(id);
-      if (!every && age !== undefined && age < this.ttlMs - this.hostRenewAhead()) return [];
+      if (!known || (!every && !this.hostReportDue(id))) return [];
       return [this.fetchId(id, known, "forced")];
     });
   }
@@ -364,6 +373,31 @@ export class UsageSourceRegistry {
       }
     }
     return state;
+  }
+
+  /**
+   * Whether a discovery that answered is in the last part of its window. It is timed from its
+   * answer, so it ends a fetch before the reports it named do, and renewing it renews them too.
+   */
+  private hostDiscoveryEnding(sources: UsageSource[]): boolean {
+    const renewAt = this.ttlMs - this.hostRenewAhead();
+    return sources.some((source) => {
+      const found = this.defaults.get(source);
+      return found !== undefined && !found.stale && this.now() - found.at >= renewAt;
+    });
+  }
+
+  /** Whether any of a group's reports is due; see `hostReportDue`. */
+  private hostReportEnding(sources: UsageSource[]): boolean {
+    return sources.some((source) =>
+      [...(this.defaults.get(source)?.reports.keys() ?? [])].some((id) => this.hostReportDue(id)),
+    );
+  }
+
+  /** Whether a report is in its window's last part, or has nothing cached: named anew, or over. */
+  private hostReportDue(id: string): boolean {
+    const age = this.fetchAge(id);
+    return age === undefined || age >= this.ttlMs - this.hostRenewAhead();
   }
 
   /** How long ago a report was fetched: 0 while a fetch runs, undefined when nothing is cached. */

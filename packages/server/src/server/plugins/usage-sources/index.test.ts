@@ -1403,6 +1403,38 @@ test("a renewal fetches every report of its group, so a report refreshed alone r
   expect(fetched).toHaveLength(5);
 });
 
+test("a renewal the end of its discovery's window starts fetches the reports too, whose windows end a fetch later", async () => {
+  let now = 0;
+  const events: string[] = [];
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "source",
+      discover: async () => {
+        events.push(`discover@${now / 1_000}`);
+        return [{ key: "account", input: "login" }];
+      },
+      // The vendor takes ten seconds, so the report's window ends that long after its discovery's.
+      fetch: async () => {
+        events.push(`fetch@${now / 1_000}`);
+        await settle();
+        now += 10_000;
+        return { status: "available", windows: [] };
+      },
+    }),
+  );
+  await registry.listReports();
+  // The discovery is in its window's last minute, and the report not yet.
+  now = 245_000;
+  await registry.listReports();
+  await settle();
+  // One renewal for the window: the next query neither discovers nor fetches again.
+  now = 300_000;
+  await registry.listReports();
+  await settle();
+  expect(events).toEqual(["discover@0", "fetch@0", "discover@245", "fetch@245"]);
+});
+
 test("a failed host discovery keeps the accounts and is asked again by the next query", async () => {
   let now = 0;
   let discoveryFails = false;
@@ -1512,6 +1544,159 @@ test("while the login store cannot be read, renewals fetch each account once per
   expect(warnings).toEqual(
     Array.from({ length: discoveries }, () => "Usage source discovery failed"),
   );
+});
+
+test.each([
+  ["never reads its store", 0],
+  ["fails after its first read", 1],
+])(
+  "while a sibling in the cache group %s, each account reaches the vendor once per cache window and no poll waits for it",
+  async (_case, siblingReads) => {
+    let now = 0;
+    let reads = siblingReads;
+    const fetched: Array<{ input: string; at: number }> = [];
+    const registry = new UsageSourceRegistry(() => now, 300_000, { warn: () => {} });
+    const accounts = ["a", "b"].map((key) => ({ key, input: key }));
+    const vendor = async (input: unknown) => {
+      fetched.push({ input: String(input), at: now });
+      await settle();
+      now += 500;
+      return { status: "available", windows: [] };
+    };
+    // Like the built-in Claude sources: both name the same logins under one label, so each account
+    // has one fetch for both, and the second source's own settings cannot be read.
+    registry.register({
+      id: "claude",
+      cacheGroup: "claude",
+      label: "Claude",
+      discover: async () => {
+        await settle();
+        now += 1_000;
+        return accounts;
+      },
+      fetch: vendor,
+    });
+    registry.register({
+      id: "claude-windows",
+      cacheGroup: "claude",
+      label: "Claude",
+      discover: async () => {
+        if (reads-- > 0) return accounts;
+        throw new Error("Invalid Windows usage compatibility setting");
+      },
+      fetch: vendor,
+    });
+    await registry.listReports();
+    fetched.length = 0;
+    const waits: number[] = [];
+    let oldest = 0;
+    // An app window polls once a minute for an hour.
+    for (let minute = 1; minute <= 60; minute++) {
+      now = Math.max(now, minute * 60_000);
+      const asked = now;
+      const reports = await registry.listReports();
+      waits.push(now - asked);
+      expect(reports.map((report) => report.id)).toEqual(
+        expect.arrayContaining(["claude:a", "claude:b"]),
+      );
+      for (const report of reports) oldest = Math.max(oldest, asked - Date.parse(report.fetchedAt));
+      for (let step = 0; step < 4; step++) await settle();
+    }
+    // A poll may wait for the store read the sibling needs again, never for the vendor.
+    expect(waits.filter((wait) => wait > 1_000)).toEqual([]);
+    // The accounts are still renewed: no poll is answered with a report older than the window.
+    expect(oldest).toBeLessThanOrEqual(300_000);
+    for (const account of ["a", "b"]) {
+      const at = fetched.filter((call) => call.input === account).map((call) => call.at);
+      // Twelve cache windows in the hour, and each fetch at most a minute before its window ends.
+      expect(at.length).toBeLessThanOrEqual(12);
+      expect(
+        Math.min(...at.slice(1).map((time, index) => time - at[index]!)),
+      ).toBeGreaterThanOrEqual(240_000);
+    }
+  },
+);
+
+test("while a sibling in the cache group cannot be read, a report refreshed alone still rejoins its group's window", async () => {
+  let now = 0;
+  const fetched: string[] = [];
+  const registry = new UsageSourceRegistry(() => now, 300_000, { warn: () => {} });
+  registry.register({
+    id: "claude",
+    cacheGroup: "claude",
+    label: "Claude",
+    discover: async () => ["a", "b"].map((key) => ({ key, input: key })),
+    fetch: async (input) => {
+      fetched.push(`${String(input)}@${now / 1_000}`);
+      return { status: "available", windows: [] };
+    },
+  });
+  registry.register({
+    id: "claude-windows",
+    cacheGroup: "claude",
+    label: "Claude",
+    discover: async () => {
+      throw new Error("Invalid Windows usage compatibility setting");
+    },
+    fetch: async () => ({ status: "available", windows: [] }),
+  });
+  await registry.listReports();
+  now = 30_000;
+  await registry.listReports({ reportIds: ["claude:a"], forceRefresh: true });
+  // An app window polls once a minute, and every poll asks the failing source again.
+  for (let minute = 1; minute <= 10; minute++) {
+    now = minute * 60_000;
+    await registry.listReports();
+    await settle();
+  }
+  // "b" reaching the last minute of its window renews "a" with it, once per window after that.
+  expect(fetched).toEqual(["a@0", "b@0", "a@30", "a@240", "b@240", "a@480", "b@480"]);
+});
+
+test("while a sibling in the cache group cannot be read, a store read slower than the last does not split its group's fetches", async () => {
+  let now = 0;
+  let readMs = 1_000;
+  const fetched: string[] = [];
+  // The vendor answers "a" in a quarter of a second and "b" in a second.
+  const answerMs: Record<string, number> = { a: 250, b: 1_000 };
+  const registry = new UsageSourceRegistry(() => now, 300_000, { warn: () => {} });
+  registry.register({
+    id: "claude",
+    cacheGroup: "claude",
+    label: "Claude",
+    discover: async () => {
+      await settle();
+      now += readMs;
+      return ["a", "b"].map((key) => ({ key, input: key }));
+    },
+    fetch: async (input) => {
+      fetched.push(`${String(input)}@${now / 1_000}`);
+      await settle();
+      now += answerMs[String(input)]!;
+      return { status: "available", windows: [] };
+    },
+  });
+  registry.register({
+    id: "claude-windows",
+    cacheGroup: "claude",
+    label: "Claude",
+    discover: async () => {
+      throw new Error("Invalid Windows usage compatibility setting");
+    },
+    fetch: async () => ({ status: "available", windows: [] }),
+  });
+  await registry.listReports();
+  // An app window polls once a minute, and every poll asks the failing source again. One store
+  // read takes half a second longer, long enough for "a" but not "b" to reach its window's last
+  // minute while it runs.
+  for (let minute = 1; minute <= 10; minute++) {
+    now = Math.max(now, minute * 60_000);
+    readMs = minute === 4 ? 1_500 : 1_000;
+    await registry.listReports();
+    for (let step = 0; step < 4; step++) await settle();
+  }
+  // "a" is renewed with "b" rather than alone and then again with "b" a minute later.
+  expect(fetched).toEqual(["a@1", "b@1", "a@241.5", "b@241.5", "a@541", "b@541"]);
 });
 
 test("a forced refresh that meets a running discovery is answered by one started after it", async () => {
