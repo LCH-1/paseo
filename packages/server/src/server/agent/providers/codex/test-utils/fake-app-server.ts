@@ -32,6 +32,13 @@ interface FakeTerminalCommand {
   processId: string;
   command: string;
 }
+interface FakeTerminalExit {
+  threadId: string;
+  itemId: string;
+  processId: string;
+  command: string;
+  exitCode: number;
+}
 interface FakeTerminalInput {
   threadId: string;
   turnId: string;
@@ -90,6 +97,8 @@ export interface FakeCodexAppServer {
   completesSilentLegacyCommand(params: FakeSilentCommand): void;
   startsTerminalCommand(params: FakeTerminalCommand): void;
   typesIntoTerminal(params: FakeTerminalInput): void;
+  /** Codex reports a terminal command once its process exits, possibly turns later. */
+  exitsTerminalCommand(params: FakeTerminalExit): void;
   says(params: { threadId: string; itemId?: string; text: string; chunks?: string[] }): void;
   requestCommandApproval(params: {
     itemId: string;
@@ -506,6 +515,17 @@ export function createFakeCodexAppServer(
           command: params.command,
           processId: params.processId,
         },
+      });
+    },
+    exitsTerminalCommand(params) {
+      completeItem(params.threadId, {
+        type: "commandExecution",
+        id: params.itemId,
+        status: params.exitCode === 0 ? "completed" : "failed",
+        command: params.command,
+        processId: params.processId,
+        aggregatedOutput: "",
+        exitCode: params.exitCode,
       });
     },
     typesIntoTerminal(params) {

@@ -3489,6 +3489,24 @@ function buildCodexCustomProviderConfig(
   };
 }
 
+type CodexIdleReleaseHold =
+  | { reason: "thread_not_resumable" | "turn_in_flight" | "permission_pending" }
+  | { reason: "terminal_running"; processIds: string[] }
+  | { reason: "untracked_terminal_running" }
+  | { reason: "subagent_running"; subAgentCallIds: string[] };
+
+const MAX_REMEMBERED_TERMINAL_EXITS = 256;
+
+function readCodexCommandProcessId(item: { type?: string; [key: string]: unknown }): string | null {
+  if (normalizeCodexThreadItemType(item.type) !== "commandExecution") return null;
+  if (typeof item.processId === "number") return String(item.processId);
+  return typeof item.processId === "string" && item.processId ? item.processId : null;
+}
+
+function readRunningTerminalId(output: unknown): string | null {
+  return typeof output === "string" ? (extractCodexTerminalSessionId(output) ?? null) : null;
+}
+
 // A sub-agent card's log is rebuilt from the child's history on every child event. Codex
 // children run for hours, so the log keeps only the newest activity (as Claude's does).
 const CODEX_SUB_AGENT_LOG_MAX_ITEMS = 200;
@@ -3624,9 +3642,17 @@ export class CodexAppServerAgentSession implements AgentSession {
   private idleRelease: Promise<void> | null = null;
   private releasedWhileIdle = false;
   private lastProviderActivityAt = 0;
-  // A command left running lives inside the app-server and dies with it, so a
-  // process that reported one is never released while idle.
-  private backgroundTerminalSeen = false;
+  // A command left running lives inside the app-server and dies with it, so the process is
+  // not released while idle until every terminal it reported has exited.
+  private readonly liveTerminalProcessIds = new Set<string>();
+  // Exits already seen. A write Codex reports after the exit must not bring the terminal back.
+  private readonly exitedTerminalProcessIds = new Set<string>();
+  // Codex may name the process only when the command starts.
+  private readonly terminalProcessIdByItemId = new Map<string, string>();
+  // A running terminal Codex named no process for. Nothing can report its exit, so it holds
+  // the process until a new one starts.
+  private untrackedTerminalRunning = false;
+  private loggedIdleReleaseHold: string | null = null;
   // A thread that has not completed a turn may not be on disk for a new process to resume.
   private threadWithCompletedTurn: string | null = null;
   private collaborationModes: CodexCollaborationMode[] = [];
@@ -3763,7 +3789,11 @@ export class CodexAppServerAgentSession implements AgentSession {
       throw this.createClosedError();
     }
     this.client = client;
-    this.backgroundTerminalSeen = false;
+    this.liveTerminalProcessIds.clear();
+    this.exitedTerminalProcessIds.clear();
+    this.terminalProcessIdByItemId.clear();
+    this.untrackedTerminalRunning = false;
+    this.loggedIdleReleaseHold = null;
     client.setUnexpectedTerminationHandler((error) => {
       this.handleUnexpectedTermination(error);
     });
@@ -5291,6 +5321,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (this.idleRelease === release) this.idleRelease = null;
     }
     this.releasedWhileIdle = true;
+    this.loggedIdleReleaseHold = null;
     return true;
   }
 
@@ -5298,18 +5329,27 @@ export class CodexAppServerAgentSession implements AgentSession {
     const client = this.client;
     if (this.closed || this.idleRelease || this.connectionPromise) return false;
     if (!client || client.isClosed || this.connectionState !== "connected") return false;
-    if (!this.canResumeThreadInNewProcess() || this.hasWorkInFlight()) return false;
     const lastActivityAt = Math.max(client.lastWriteAt, this.lastProviderActivityAt);
-    return Date.now() - lastActivityAt >= idleForMs;
+    if (Date.now() - lastActivityAt < idleForMs) return false;
+    const hold = this.idleReleaseHold();
+    this.logIdleReleaseHold(hold, idleForMs);
+    return hold === null;
   }
 
-  private canResumeThreadInNewProcess(): boolean {
-    const threadId = this.currentThreadId;
-    if (!threadId || this.ephemeral) return false;
-    return this.resumeHandle?.sessionId === threadId || this.threadWithCompletedTurn === threadId;
+  // Once per change, so a process kept for hours shows why without a line per sweep.
+  private logIdleReleaseHold(hold: CodexIdleReleaseHold | null, idleForMs: number): void {
+    const key = hold ? JSON.stringify(hold) : null;
+    if (key === this.loggedIdleReleaseHold) return;
+    this.loggedIdleReleaseHold = key;
+    if (!hold) return;
+    this.logger.info(
+      { threadId: this.currentThreadId, idleForMs, ...hold },
+      "Kept idle Codex app-server running",
+    );
   }
 
-  private hasWorkInFlight(): boolean {
+  private idleReleaseHold(): CodexIdleReleaseHold | null {
+    if (!this.canResumeThreadInNewProcess()) return { reason: "thread_not_resumable" };
     if (
       this.activeForegroundTurnId ||
       this.currentTurnId ||
@@ -5317,16 +5357,29 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.pendingForegroundTurnIdentification ||
       this.interruption
     ) {
-      return true;
+      return { reason: "turn_in_flight" };
     }
     if (this.pendingPermissionHandlers.size > 0 || this.asyncQuestions.pending().length > 0) {
-      return true;
+      return { reason: "permission_pending" };
     }
-    if (this.backgroundTerminalSeen) return true;
-    for (const call of this.subAgentCallsByCallId.values()) {
-      if (call.toolCall.status === "running") return true;
+    if (this.liveTerminalProcessIds.size > 0) {
+      return { reason: "terminal_running", processIds: [...this.liveTerminalProcessIds].sort() };
     }
-    return false;
+    if (this.untrackedTerminalRunning) return { reason: "untracked_terminal_running" };
+    const runningSubAgentCallIds = [...this.subAgentCallsByCallId.values()]
+      .filter((call) => call.toolCall.status === "running")
+      .map((call) => call.callId)
+      .sort();
+    if (runningSubAgentCallIds.length > 0) {
+      return { reason: "subagent_running", subAgentCallIds: runningSubAgentCallIds };
+    }
+    return null;
+  }
+
+  private canResumeThreadInNewProcess(): boolean {
+    const threadId = this.currentThreadId;
+    if (!threadId || this.ephemeral) return false;
+    return this.resumeHandle?.sessionId === threadId || this.threadWithCompletedTurn === threadId;
   }
 
   private clearPendingPermissions(options?: { preservePlanApprovals?: boolean }): void {
@@ -5735,6 +5788,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (parsed.kind !== "unknown_method" && parsed.kind !== "invalid_payload") {
       this.lastProviderActivityAt = Date.now();
     }
+    this.trackTerminalProcesses(parsed);
     const route = this.resolveCodexThreadRoute(getCodexNotificationThreadId(parsed));
     if (route.kind === "pending_sub_agent") {
       this.bufferPendingSubAgentNotification(route.threadId, parsed);
@@ -6745,7 +6799,6 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     const bufferedOutput = this.consumeOutputDelta(outputDeltas, parsed.callId);
     const resolvedOutput = parsed.output ?? bufferedOutput;
-    this.noteBackgroundTerminal(resolvedOutput);
     if (!subAgentCallId) {
       this.rememberTerminalProcessForCommand(parsed.command, resolvedOutput);
     }
@@ -6770,7 +6823,6 @@ export class CodexAppServerAgentSession implements AgentSession {
   private handleTerminalInteractionNotification(
     parsed: Extract<ParsedCodexNotification, { kind: "terminal_interaction" }>,
   ): void {
-    this.backgroundTerminalSeen = true;
     const interactionKey = [parsed.processId ?? "", parsed.stdin ?? ""].join("\u0000");
     if (!this.shouldEmitTerminalInteractionKey(interactionKey)) {
       return;
@@ -6899,7 +6951,6 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (shouldIgnoreMirroredLifecycleItem(parsed.source, parsed.item)) {
       return;
     }
-    this.noteBackgroundTerminal(parsed.item.aggregatedOutput);
     this.receiveAsyncQuestion(parsed.threadId, parsed.item);
     if (this.isUserMessageItem(parsed.item)) {
       this.handleUserMessageItem(parsed);
@@ -7225,9 +7276,69 @@ export class CodexAppServerAgentSession implements AgentSession {
     return buffered.join("");
   }
 
-  private noteBackgroundTerminal(output: unknown): void {
-    if (typeof output === "string" && extractCodexTerminalSessionId(output)) {
-      this.backgroundTerminalSeen = true;
+  /**
+   * Follows which terminals may still run inside this app-server. A command item carries its
+   * process id from start to exit; older Codex builds instead say a process kept running in
+   * the command's output, and writes into a terminal show it was running then. An exit counts
+   * only with an exit code: anything less leaves the terminal held, as before.
+   */
+  private trackTerminalProcesses(parsed: ParsedCodexNotification): void {
+    switch (parsed.kind) {
+      case "item_started": {
+        const processId = readCodexCommandProcessId(parsed.item);
+        const status = parsed.item.status;
+        if (!processId || (status !== undefined && status !== "inProgress")) return;
+        // A new start wins over an earlier exit of a process that had the same id.
+        this.exitedTerminalProcessIds.delete(processId);
+        this.liveTerminalProcessIds.add(processId);
+        if (parsed.item.id) this.terminalProcessIdByItemId.set(parsed.item.id, processId);
+        return;
+      }
+      case "item_completed": {
+        const runningId = readRunningTerminalId(parsed.item.aggregatedOutput);
+        if (runningId) {
+          this.markTerminalRunning(runningId);
+          return;
+        }
+        const itemId = parsed.item.id;
+        const processId =
+          readCodexCommandProcessId(parsed.item) ??
+          (itemId ? this.terminalProcessIdByItemId.get(itemId) : undefined);
+        // An exit code says the process ended, and a declined command never ran.
+        if (
+          processId &&
+          (typeof parsed.item.exitCode === "number" || parsed.item.status === "declined")
+        ) {
+          this.markTerminalExited(processId);
+          if (itemId) this.terminalProcessIdByItemId.delete(itemId);
+        }
+        return;
+      }
+      case "exec_command_completed": {
+        const runningId = readRunningTerminalId(parsed.output);
+        if (runningId) this.markTerminalRunning(runningId);
+        return;
+      }
+      case "terminal_interaction":
+        if (parsed.processId) this.markTerminalRunning(parsed.processId);
+        else this.untrackedTerminalRunning = true;
+        return;
+      default:
+        return;
+    }
+  }
+
+  private markTerminalRunning(processId: string): void {
+    if (this.exitedTerminalProcessIds.has(processId)) return;
+    this.liveTerminalProcessIds.add(processId);
+  }
+
+  private markTerminalExited(processId: string): void {
+    this.liveTerminalProcessIds.delete(processId);
+    this.exitedTerminalProcessIds.add(processId);
+    if (this.exitedTerminalProcessIds.size > MAX_REMEMBERED_TERMINAL_EXITS) {
+      const oldest = this.exitedTerminalProcessIds.values().next().value;
+      if (oldest !== undefined) this.exitedTerminalProcessIds.delete(oldest);
     }
   }
 

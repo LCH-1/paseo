@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import pino, { type Logger } from "pino";
 import { expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../test-utils/test-logger.js";
@@ -821,6 +822,7 @@ interface IdleCodexSession {
 
 async function withIdleCodexSession(
   runScenario: (fixture: IdleCodexSession) => Promise<void>,
+  options: { logger?: Logger } = {},
 ): Promise<void> {
   vi.useFakeTimers({ toFake: ["Date"] });
   const initial = createFakeCodexAppServer();
@@ -829,7 +831,7 @@ async function withIdleCodexSession(
   const session = new CodexAppServerAgentSession(
     { provider: "codex", cwd: process.cwd(), modeId: "auto", model: "gpt-5.4" },
     null,
-    logger,
+    options.logger ?? logger,
     async () => {
       const server = servers.shift();
       if (!server) throw new Error("Unexpected extra Codex spawn");
@@ -982,6 +984,99 @@ test("a Codex session that left a command running keeps its app-server", async (
     expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(false);
     expect(killed).not.toHaveBeenCalled();
   });
+});
+
+const backgroundBuild = {
+  threadId: "thread-1",
+  turnId: "turn-1",
+  itemId: "background-build",
+  processId: "7",
+  command: "npm run build",
+};
+
+function isCompletedBackgroundBuild(event: AgentStreamEvent): boolean {
+  return (
+    event.type === "timeline" &&
+    event.item.type === "tool_call" &&
+    event.item.callId === backgroundBuild.itemId &&
+    event.item.status === "completed"
+  );
+}
+
+test("a Codex session releases its app-server once the terminal it left running has exited", async () => {
+  await withIdleCodexSession(async ({ session, initial, events, runTurn, passTime }) => {
+    await runTurn(initial, "build in the background", () => {
+      initial.startsTerminalCommand(backgroundBuild);
+      initial.typesIntoTerminal({ ...backgroundBuild, text: "" });
+    });
+    const killed = vi.spyOn(initial.child, "kill");
+
+    passTime(IDLE_RELEASE_MS);
+    expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(false);
+    expect(killed).not.toHaveBeenCalled();
+
+    // Codex reports the command when its process exits, long after the turn ended.
+    initial.exitsTerminalCommand({ ...backgroundBuild, exitCode: 0 });
+    await expect.poll(() => events.some(isCompletedBackgroundBuild)).toBe(true);
+    passTime(IDLE_RELEASE_MS);
+    expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(true);
+    expect(killed).toHaveBeenCalled();
+  });
+});
+
+test("a Codex session keeps its app-server for a terminal it never wrote to", async () => {
+  await withIdleCodexSession(async ({ session, initial, runTurn, passTime }) => {
+    await runTurn(initial, "start the dev server", () => {
+      initial.startsTerminalCommand({ ...backgroundBuild, command: "npm run dev" });
+    });
+    const killed = vi.spyOn(initial.child, "kill");
+
+    passTime(IDLE_RELEASE_MS);
+
+    expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(false);
+    expect(killed).not.toHaveBeenCalled();
+  });
+});
+
+test("a write Codex reports after a terminal exited does not hold the app-server", async () => {
+  await withIdleCodexSession(async ({ session, initial, runTurn, passTime }) => {
+    await runTurn(initial, "run the build", () => {
+      initial.startsTerminalCommand(backgroundBuild);
+      initial.exitsTerminalCommand({ ...backgroundBuild, exitCode: 1 });
+      initial.typesIntoTerminal({ ...backgroundBuild, text: "" });
+    });
+
+    passTime(IDLE_RELEASE_MS);
+
+    expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(true);
+  });
+});
+
+test("an idle Codex app-server kept for a running terminal says why once", async () => {
+  const lines: Array<Record<string, unknown>> = [];
+  const capturing = pino(
+    { level: "info" },
+    { write: (line: string) => lines.push(JSON.parse(line)) },
+  );
+  await withIdleCodexSession(
+    async ({ session, initial, runTurn, passTime }) => {
+      await runTurn(initial, "build in the background", () => {
+        initial.startsTerminalCommand(backgroundBuild);
+      });
+
+      passTime(IDLE_RELEASE_MS);
+      await session.releaseIdleRuntime(IDLE_RELEASE_MS);
+      passTime(60_000);
+      await session.releaseIdleRuntime(IDLE_RELEASE_MS);
+
+      expect(
+        lines
+          .filter((line) => line.msg === "Kept idle Codex app-server running")
+          .map(({ threadId, reason, processIds }) => ({ threadId, reason, processIds })),
+      ).toEqual([{ threadId: "thread-1", reason: "terminal_running", processIds: ["7"] }]);
+    },
+    { logger: capturing },
+  );
 });
 
 async function withIdleCodexAgent(
