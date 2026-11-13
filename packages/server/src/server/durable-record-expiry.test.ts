@@ -214,32 +214,74 @@ test("uploads expire by their newest write after the upload retention", async ()
   expect(existsSync(foreign)).toBe(true);
 });
 
-test("the sweep runs shortly after start, then daily, and stops with the daemon", async () => {
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+test("the sweep expires creation receipts after thirty days and keeps younger ones", async () => {
   const home = await createHome();
-  const cutoffs: number[] = [];
-  const store = {
-    expireCompleted: async (cutoffMs: number) => {
-      cutoffs.push(cutoffMs);
-      return 0;
-    },
+  const directory = join(home, "creations");
+  const creations = new CreationService(directory, silentLogger);
+  let provisions = 0;
+  const provision: CreationInput["provision"] = async (id) => {
+    provisions += 1;
+    return { workspace: { ...workspace, id } };
   };
-  const stop = startDurableRecordExpiry({
-    messageReceipts: store,
-    creations: { expireCompleted: async () => 0 },
+  const old = await creations.create(workspaceCreation("old", provision));
+  const young = await creations.create(workspaceCreation("young", provision));
+  const files = (key: string, workspaceId: string | null) => [
+    `${digest(["workspace", key])}.json`,
+    `${digest(["workspace", workspaceId])}.claim`,
+  ];
+  for (const name of files("old", old.workspaceId)) {
+    await age(join(directory, name), 31 * DAY_MS);
+  }
+  for (const name of files("young", young.workspaceId)) {
+    await age(join(directory, name), 29 * DAY_MS);
+  }
+
+  const removed = await sweepDurableRecords({
+    messageReceipts: new MessageReceipts(join(home, "agent-requests")),
+    creations,
     paseoHome: home,
     logger: silentLogger,
     now: () => NOW,
   });
 
+  expect(removed).toEqual({ messageReceipts: 0, creations: 1, uploads: 0 });
+  expect((await readdir(directory)).sort()).toEqual(files("young", young.workspaceId).sort());
+  // A reconnecting client's retry gets the same workspace back instead of provisioning another.
+  expect(await creations.create(workspaceCreation("young", provision))).toEqual(young);
+  expect(provisions).toBe(2);
+});
+
+test("the sweep runs shortly after start, then daily, and stops with the daemon", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+  const home = await createHome();
+  const cutoffs: [string, number][] = [];
+  const store = (name: string) => ({
+    expireCompleted: async (cutoffMs: number) => {
+      cutoffs.push([name, cutoffMs]);
+      return 0;
+    },
+  });
+  const stop = startDurableRecordExpiry({
+    messageReceipts: store("messageReceipts"),
+    creations: store("creations"),
+    paseoHome: home,
+    logger: silentLogger,
+    now: () => NOW,
+  });
+  // Both receipt stores keep a completed receipt for thirty days.
+  const sweep = [
+    ["messageReceipts", NOW - 30 * DAY_MS],
+    ["creations", NOW - 30 * DAY_MS],
+  ];
+
   await vi.advanceTimersByTimeAsync(59_000);
   expect(cutoffs).toEqual([]);
   await vi.advanceTimersByTimeAsync(1_000);
-  await vi.waitFor(() => expect(cutoffs).toEqual([NOW - COMPLETED_RECEIPT_RETENTION_MS]));
+  await vi.waitFor(() => expect(cutoffs).toEqual(sweep));
   await vi.advanceTimersByTimeAsync(DAY_MS);
-  await vi.waitFor(() => expect(cutoffs).toHaveLength(2));
+  await vi.waitFor(() => expect(cutoffs).toEqual([...sweep, ...sweep]));
 
   stop();
   await vi.advanceTimersByTimeAsync(2 * DAY_MS);
-  expect(cutoffs).toHaveLength(2);
+  expect(cutoffs).toHaveLength(4);
 });
