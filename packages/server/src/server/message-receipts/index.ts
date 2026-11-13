@@ -41,9 +41,10 @@ export class MessageReceipts {
 
   /**
    * Removes completed receipts last written before `cutoffMs`. A completed receipt only answers a
-   * retry of the same message, and clients retry within one connection, never weeks later. A
-   * pending receipt stays: it is what stops a message of unknown outcome from being sent twice.
-   * The legacy creation receipts kept in this directory share the shape and the rule.
+   * retry of the same message; after the retention documented in docs/hub.md, reusing that message
+   * ID sends it again. A pending receipt stays: it is what stops a message of unknown outcome from
+   * being sent twice. The legacy creation receipts kept in this directory share the shape and the
+   * rule.
    */
   async expireCompleted(cutoffMs: number): Promise<number> {
     let names: string[];
