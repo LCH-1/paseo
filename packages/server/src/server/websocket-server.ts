@@ -2693,6 +2693,16 @@ export class VoiceAssistantWebSocketServer {
     );
   }
 
+  /** Latest user activity any connected client reported (epoch ms), or null when none reports. */
+  getLatestClientActivityAt(): number | null {
+    let latest: number | null = null;
+    for (const [ws, connection] of this.sessions) {
+      const at = connection.session.getClientActivity(ws)?.lastActivityAt.getTime();
+      if (at !== undefined && (latest === null || at > latest)) latest = at;
+    }
+    return latest;
+  }
+
   private getClientActivityState(session: Session, source: object): ClientPresenceState {
     const activity = session.getClientActivity(source);
     if (!activity) {

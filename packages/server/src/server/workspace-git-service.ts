@@ -87,6 +87,11 @@ const BACKGROUND_GIT_FETCH_INTERVAL_MS = 180_000;
 // credentials) fails the same way every tick. Widen the gap to this many ticks at most, and go
 // back to every tick on the first success.
 const BACKGROUND_GIT_FETCH_MAX_BACKOFF_TICKS = 5;
+// The background fetch only refreshes what the remote has. While every connected client reports
+// its user away (desktop clients count any input on the machine) for this long, fetch on one tick
+// in this many: every 15 minutes instead of every 3. The first tick after anyone is back fetches.
+const BACKGROUND_GIT_FETCH_AWAY_AFTER_MS = 15 * 60_000;
+const BACKGROUND_GIT_FETCH_AWAY_EVERY_TICKS = 5;
 const FETCH_METADATA_ECHO_TTL_MS = 5_000;
 export const WORKSPACE_GIT_OBSERVATION_REENSURE_INTERVAL_MS = 60_000;
 const FORGE_PR_STATUS_POLL_FAST_INTERVAL_MS = 20_000;
@@ -412,6 +417,8 @@ interface WorkspaceGitServiceDependencies {
   runGitCommand: typeof runGitCommand;
   getWorkspaceGitSelfHealPhaseMs: typeof getWorkspaceGitObservationReensurePhaseMs;
   createWatcherLivenessCanary: typeof createWatcherLivenessCanary;
+  /** Latest user activity any connected client reported (epoch ms), or null when none reports. */
+  getLatestClientActivityAt: () => number | null;
   now: () => Date;
 }
 
@@ -481,6 +488,7 @@ interface RepoGitTarget {
   fetchInFlight: boolean;
   fetchFailureCount: number;
   fetchTicksToSkip: number;
+  awayTicksSkipped: number;
   lastFetchErrorMessage: string | null;
   bufferedFetchMetadataEvents: FileChange[];
   recentFetchRemoteRefChanges: Map<
@@ -606,6 +614,7 @@ function buildDefaultWorkspaceGitServiceDeps(
     runGitCommand,
     getWorkspaceGitSelfHealPhaseMs: getWorkspaceGitObservationReensurePhaseMs,
     createWatcherLivenessCanary,
+    getLatestClientActivityAt: () => null,
     now: () => new Date(),
   };
 }
@@ -668,6 +677,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   >({ max: WORKSPACE_GIT_AUXILIARY_CACHE_MAX });
   private readonly checkoutDiffCache = new CheckoutDiffCache(() => this.deps.now().getTime());
   private watcherErrorCallbackCount = 0;
+  private fetchingForAwayClients = false;
   constructor(options: WorkspaceGitServiceOptions) {
     this.logger = options.logger.child({ module: "workspace-git-service" });
     this.paseoHome = options.paseoHome;
@@ -2257,6 +2267,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       fetchInFlight: false,
       fetchFailureCount: 0,
       fetchTicksToSkip: 0,
+      awayTicksSkipped: 0,
       lastFetchErrorMessage: null,
       bufferedFetchMetadataEvents: [],
       recentFetchRemoteRefChanges: new Map(),
@@ -2297,6 +2308,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         repoTarget.fetchTicksToSkip -= 1;
         return;
       }
+      if (this.deferFetchWhileAway(repoTarget)) return;
       void this.runRepoFetch(repoTarget);
     }, BACKGROUND_GIT_FETCH_INTERVAL_MS);
     void this.runRepoFetch(repoTarget);
@@ -3707,6 +3719,28 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     } finally {
       target.fetchInFlight = false;
     }
+  }
+
+  private deferFetchWhileAway(target: RepoGitTarget): boolean {
+    const lastActivityAt = this.deps.getLatestClientActivityAt();
+    const away =
+      lastActivityAt !== null &&
+      this.deps.now().getTime() - lastActivityAt >= BACKGROUND_GIT_FETCH_AWAY_AFTER_MS;
+    if (away !== this.fetchingForAwayClients) {
+      this.fetchingForAwayClients = away;
+      this.logger.info(
+        { lastActivityAt: lastActivityAt === null ? null : new Date(lastActivityAt).toISOString() },
+        away
+          ? "Background git fetch slowed while every client is away"
+          : "Background git fetch back to every tick",
+      );
+    }
+    if (!away || target.awayTicksSkipped + 1 >= BACKGROUND_GIT_FETCH_AWAY_EVERY_TICKS) {
+      target.awayTicksSkipped = 0;
+      return false;
+    }
+    target.awayTicksSkipped += 1;
+    return true;
   }
 
   private recordRepoFetchOutcome(target: RepoGitTarget, failure: RepoFetchFailure | null): void {

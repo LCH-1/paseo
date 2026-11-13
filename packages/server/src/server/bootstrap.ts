@@ -919,6 +919,7 @@ export async function createPaseoDaemon(
     worktreesRoot: config.worktreesRoot,
     deps: {
       forgeOverrides: { github },
+      getLatestClientActivityAt: () => wsServer?.getLatestClientActivityAt() ?? null,
     },
   });
   workspaceRegistry.subscribeToMutations((mutation) => {

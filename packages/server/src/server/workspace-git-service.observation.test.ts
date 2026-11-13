@@ -1004,6 +1004,74 @@ describe("WorkspaceGitService checkout observation", () => {
     service.dispose();
   });
 
+  test("the background fetch runs every fifth tick while every client is away", async () => {
+    const watcher = createWatcherHarness();
+    const logger = createLogger();
+    const fetchIntervalMs = 180_000;
+    const runGitFetch = vi.fn(async (_cwd, observer) => {
+      observer.onRefSnapshot("before");
+      observer.onRefSnapshot("after");
+      return {
+        changes: [],
+        nonRemoteRefsChanged: false,
+        remoteRefs: new Set(["origin/main"]),
+        error: null,
+      };
+    });
+    // How long ago the latest client activity was; null when no client reports any.
+    let idleForMs: number | null = 0;
+    const service = createService(
+      watcher,
+      {
+        getCheckoutSnapshotFacts: vi.fn(async (cwd: string) => ({
+          ...createCheckoutFacts(cwd),
+          remoteUrl: REMOTE_URL,
+        })),
+        hasOriginRemote: vi.fn(async () => true),
+        runGitFetch,
+        getLatestClientActivityAt: () => (idleForMs === null ? null : Date.now() - idleForMs),
+      },
+      logger,
+    );
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await vi.waitFor(() => {
+      expect(runGitFetch).toHaveBeenCalledTimes(1);
+      expect(service.getMetrics().fetchInFlightCount).toBe(0);
+    });
+
+    // Someone was active within 15 minutes: every tick fetches.
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs);
+    expect(runGitFetch).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs * 4);
+    expect(runGitFetch).toHaveBeenCalledTimes(6);
+
+    // 15 minutes without activity: four ticks pass, the fifth fetches.
+    idleForMs = 15 * 60_000;
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs * 4);
+    expect(runGitFetch).toHaveBeenCalledTimes(6);
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs);
+    expect(runGitFetch).toHaveBeenCalledTimes(7);
+    expect(vi.mocked(logger.info)).toHaveBeenCalledWith(
+      expect.objectContaining({ lastActivityAt: expect.any(String) }),
+      "Background git fetch slowed while every client is away",
+    );
+
+    // Back at the keyboard: the next tick fetches.
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs * 2);
+    expect(runGitFetch).toHaveBeenCalledTimes(7);
+    idleForMs = 0;
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs);
+    expect(runGitFetch).toHaveBeenCalledTimes(8);
+
+    // A host whose clients report no activity at all keeps the normal cadence.
+    idleForMs = null;
+    await vi.advanceTimersByTimeAsync(fetchIntervalMs);
+    expect(runGitFetch).toHaveBeenCalledTimes(9);
+
+    subscription.unsubscribe();
+    service.dispose();
+  });
+
   test("a repository config change ends a fetch backoff at the next tick", async () => {
     const watcher = createWatcherHarness();
     const fetchIntervalMs = 180_000;

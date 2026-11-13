@@ -1269,6 +1269,30 @@ describe("relay external socket reconnect behavior", () => {
     await server.close();
   });
 
+  test("reports the latest user activity any connected client reported", async () => {
+    const server = createServer();
+    expect(server.getLatestClientActivityAt()).toBeNull();
+    const first = new MockSocket();
+    const second = new MockSocket();
+    await attachRelayAndHello({ server, socket: first, clientId: "cid-activity-one" });
+    await attachRelayAndHello({ server, socket: second, clientId: "cid-activity-two" });
+    expect(server.getLatestClientActivityAt()).toBeNull();
+
+    const reported = new Map<object, Date>([
+      [first, new Date("2026-11-13T01:00:00.000Z")],
+      [second, new Date("2026-11-13T02:30:00.000Z")],
+    ]);
+    for (const session of sessionMock.instances) {
+      session.getClientActivity.mockImplementation(((source: object) => {
+        const lastActivityAt = reported.get(source);
+        return lastActivityAt ? { lastActivityAt } : null;
+      }) as never);
+    }
+    expect(server.getLatestClientActivityAt()).toBe(Date.parse("2026-11-13T02:30:00.000Z"));
+
+    await server.close();
+  });
+
   test("responds to top-level ping while provider diagnostic is still running", async () => {
     const server = createServer();
     const socket = new MockSocket();
