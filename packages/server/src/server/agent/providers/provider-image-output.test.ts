@@ -1,13 +1,27 @@
-import { existsSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import MarkdownIt from "markdown-it";
 import { projectTimelineRows } from "../timeline-projection.js";
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
   isProviderImageMarkdown,
   materializeProviderImage,
+  providerImageDirectory,
+  PROVIDER_IMAGE_RETENTION_MS,
+  pruneProviderImages,
+  removeProcessProviderImageDirectories,
   renderProviderImageOutputAsAssistantMarkdown,
+  configureProviderImageDirectory,
 } from "./provider-image-output.js";
 
 const HASH = "a".repeat(64);
@@ -113,6 +127,121 @@ describe("materializeProviderImage", () => {
     } finally {
       rmSync(secondDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("daemon provider image directory", () => {
+  let paseoHome: string;
+  let release: (() => void) | null = null;
+
+  beforeEach(() => {
+    paseoHome = mkdtempSync(path.join(os.tmpdir(), "provider-image-home-"));
+  });
+
+  afterEach(() => {
+    release?.();
+    release = null;
+    vi.resetModules();
+    removeProcessProviderImageDirectories();
+    rmSync(paseoHome, { recursive: true, force: true });
+  });
+
+  test("keeps images in one folder under the Paseo home across daemon restarts", async () => {
+    const directory = providerImageDirectory(paseoHome);
+    release = configureProviderImageDirectory(directory);
+    const first = materializeProviderImage({ data: "YWJjMTIz", mimeType: "image/png" });
+
+    // A restarted daemon is a fresh module instance with no memory of the previous folder.
+    vi.resetModules();
+    const restarted = await import("./provider-image-output.js");
+    const releaseRestarted = restarted.configureProviderImageDirectory(directory);
+    try {
+      const second = restarted.materializeProviderImage({
+        data: "YWJjMTIz",
+        mimeType: "image/png",
+      });
+
+      expect(path.dirname(first.path)).toBe(directory);
+      expect(second.path).toBe(first.path);
+      expect(readdirSync(directory)).toEqual([path.basename(first.path)]);
+    } finally {
+      releaseRestarted();
+    }
+  });
+
+  test("renders images from the daemon folder as provider image markdown", () => {
+    release = configureProviderImageDirectory(providerImageDirectory(paseoHome));
+    const item = renderProviderImageOutputAsAssistantMarkdown(
+      { data: "YWJjMTIz", mimeType: "image/png" },
+      { materialize: materializeProviderImage },
+    );
+
+    expect(item?.type === "assistant_message" && isProviderImageMarkdown(item.text.trim())).toBe(
+      true,
+    );
+    expect(
+      isProviderImageMarkdown(`![Image](/home/me/.paseo/runtime/provider-images/${HASH}.png)`),
+    ).toBe(true);
+    expect(
+      isProviderImageMarkdown(
+        `![Image](file:///C:/Users/me/.paseo/runtime/provider-images/${HASH}.png)`,
+      ),
+    ).toBe(true);
+  });
+
+  test("stops writing to a home it was released from", () => {
+    const directory = providerImageDirectory(paseoHome);
+    configureProviderImageDirectory(directory)();
+
+    const materialized = materializeProviderImage({ data: "YWJjMTIz", mimeType: "image/png" });
+
+    expect(path.dirname(materialized.path)).not.toBe(directory);
+    expect(existsSync(directory)).toBe(false);
+  });
+
+  test("removes a process's own temp folder when the process exits", () => {
+    const materialized = materializeProviderImage({ data: "YWJjMTIz", mimeType: "image/png" });
+    const tempDirectory = path.dirname(materialized.path);
+    expect(path.basename(tempDirectory)).toMatch(new RegExp(`^paseo-attachments-${process.pid}-`));
+    expect(process.listeners("exit")).toContain(removeProcessProviderImageDirectories);
+
+    removeProcessProviderImageDirectories();
+
+    expect(existsSync(tempDirectory)).toBe(false);
+  });
+
+  test("prunes images not written within the retention window", async () => {
+    const directory = providerImageDirectory(paseoHome);
+    mkdirSync(directory, { recursive: true });
+    const now = Date.parse("2026-11-13T12:00:00.000Z");
+    const day = 24 * 60 * 60 * 1000;
+    const stale = path.join(directory, `${"b".repeat(64)}.png`);
+    const fresh = path.join(directory, `${"c".repeat(64)}.webp`);
+    const foreign = path.join(directory, "notes.txt");
+    for (const file of [stale, fresh, foreign]) writeFileSync(file, "image");
+    utimesSync(stale, new Date(now - 91 * day), new Date(now - 91 * day));
+    utimesSync(fresh, new Date(now - 89 * day), new Date(now - 89 * day));
+    utimesSync(foreign, new Date(now - 400 * day), new Date(now - 400 * day));
+
+    const result = await pruneProviderImages({
+      directory,
+      maxAgeMs: PROVIDER_IMAGE_RETENTION_MS,
+      now,
+    });
+
+    expect(result).toEqual({ removedFiles: 1, removedBytes: 5, keptFiles: 1 });
+    expect(readdirSync(directory).sort()).toEqual(
+      [path.basename(fresh), path.basename(foreign)].sort(),
+    );
+  });
+
+  test("prunes nothing when the folder does not exist yet", async () => {
+    await expect(
+      pruneProviderImages({
+        directory: providerImageDirectory(paseoHome),
+        maxAgeMs: PROVIDER_IMAGE_RETENTION_MS,
+      }),
+    ).resolves.toEqual({ removedFiles: 0, removedBytes: 0, keptFiles: 0 });
   });
 });
 

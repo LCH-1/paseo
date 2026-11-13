@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import * as fsSync from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -19,14 +20,46 @@ export interface MaterializedProviderImage {
 
 const PROVIDER_IMAGE_ATTACHMENT_DIR = "paseo-attachments";
 const PROVIDER_IMAGE_ATTACHMENT_DIR_PREFIX = `${PROVIDER_IMAGE_ATTACHMENT_DIR}-`;
+const PROVIDER_IMAGE_DIR = "provider-images";
 const PRIVATE_ATTACHMENT_DIR_MODE = 0o700;
 const MATERIALIZED_IMAGE_FILE_MODE = 0o600;
+const MATERIALIZED_IMAGE_FILE_NAME = /^[0-9a-f]{64}\.[a-z0-9]+$/;
 
-let materializedImageAttachmentDir: string | null = null;
+/**
+ * How long an image the daemon has not rewritten is kept. Replay rewrites every image it
+ * renders, so an image a timeline still shows stays fresh. The rest are referenced only by path
+ * from provider-owned history (a Codex image attachment, the path Pi and OMP pass to a text-only
+ * model), so they live as long as that history is kept.
+ */
+export const PROVIDER_IMAGE_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
-function canReuseMaterializedImageAttachmentDir(dir: string): boolean {
+/** Where the daemon keeps provider images: one folder per Paseo home, reused across restarts. */
+export function providerImageDirectory(paseoHome: string): string {
+  return path.join(paseoHome, "runtime", PROVIDER_IMAGE_DIR);
+}
+
+// Set by the daemon. Anything else that imports a provider (a test, a script) writes to a temp
+// folder of its own instead of a Paseo home it was never told about.
+let configuredImageDirectory: string | null = null;
+let processImageDirectory: string | null = null;
+const processImageDirectories = new Set<string>();
+let removesProcessImageDirectoriesOnExit = false;
+
+/**
+ * Makes the daemon write provider images to `directory`. Each daemon process used to leave a new
+ * temp folder behind. Returns a function that stops using it, for in-process daemons that stop
+ * and delete their home while the process lives on.
+ */
+export function configureProviderImageDirectory(directory: string): () => void {
+  configuredImageDirectory = directory;
+  return () => {
+    if (configuredImageDirectory === directory) configuredImageDirectory = null;
+  };
+}
+
+function ensurePrivateDirectory(dir: string, options: { followLinks: boolean }): boolean {
   try {
-    const stats = fsSync.lstatSync(dir);
+    const stats = options.followLinks ? fsSync.statSync(dir) : fsSync.lstatSync(dir);
     if (!stats.isDirectory()) {
       return false;
     }
@@ -37,19 +70,94 @@ function canReuseMaterializedImageAttachmentDir(dir: string): boolean {
   }
 }
 
+/** Removes this process's temp image folders. Runs when the process exits. */
+export function removeProcessProviderImageDirectories(): void {
+  for (const dir of processImageDirectories) {
+    try {
+      fsSync.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best effort: the process is exiting.
+    }
+  }
+  processImageDirectories.clear();
+  processImageDirectory = null;
+}
+
 function getMaterializedImageAttachmentDir(): string {
-  if (
-    materializedImageAttachmentDir &&
-    canReuseMaterializedImageAttachmentDir(materializedImageAttachmentDir)
-  ) {
-    return materializedImageAttachmentDir;
+  if (configuredImageDirectory) {
+    if (!ensurePrivateDirectory(configuredImageDirectory, { followLinks: true })) {
+      fsSync.mkdirSync(configuredImageDirectory, {
+        recursive: true,
+        mode: PRIVATE_ATTACHMENT_DIR_MODE,
+      });
+      fsSync.chmodSync(configuredImageDirectory, PRIVATE_ATTACHMENT_DIR_MODE);
+    }
+    return configuredImageDirectory;
   }
 
-  materializedImageAttachmentDir = fsSync.mkdtempSync(
-    path.join(os.tmpdir(), PROVIDER_IMAGE_ATTACHMENT_DIR_PREFIX),
+  if (
+    processImageDirectory &&
+    ensurePrivateDirectory(processImageDirectory, { followLinks: false })
+  ) {
+    return processImageDirectory;
+  }
+
+  // The pid tells a cleanup tool whether the owner is still running. A killed process (test
+  // runners kill their workers) cannot remove its folder.
+  processImageDirectory = fsSync.mkdtempSync(
+    path.join(os.tmpdir(), `${PROVIDER_IMAGE_ATTACHMENT_DIR_PREFIX}${process.pid}-`),
   );
-  fsSync.chmodSync(materializedImageAttachmentDir, PRIVATE_ATTACHMENT_DIR_MODE);
-  return materializedImageAttachmentDir;
+  fsSync.chmodSync(processImageDirectory, PRIVATE_ATTACHMENT_DIR_MODE);
+  if (!removesProcessImageDirectoriesOnExit) {
+    process.once("exit", removeProcessProviderImageDirectories);
+    removesProcessImageDirectoriesOnExit = true;
+  }
+  processImageDirectories.add(processImageDirectory);
+  return processImageDirectory;
+}
+
+export interface ProviderImagePruneResult {
+  removedFiles: number;
+  removedBytes: number;
+  keptFiles: number;
+}
+
+/**
+ * Deletes images in `directory` that were last written more than `maxAgeMs` ago. Only files named
+ * the way materializeProviderImage names them are considered. Run before anything replays, so a
+ * replay cannot rewrite an image between its age check and its removal.
+ */
+export async function pruneProviderImages(input: {
+  directory: string;
+  maxAgeMs: number;
+  now?: number;
+}): Promise<ProviderImagePruneResult> {
+  const result: ProviderImagePruneResult = { removedFiles: 0, removedBytes: 0, keptFiles: 0 };
+  let entries: fsSync.Dirent[];
+  try {
+    entries = await fsPromises.readdir(input.directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return result;
+    throw error;
+  }
+  const cutoff = (input.now ?? Date.now()) - input.maxAgeMs;
+  for (const entry of entries) {
+    if (!entry.isFile() || !MATERIALIZED_IMAGE_FILE_NAME.test(entry.name)) continue;
+    const filePath = path.join(input.directory, entry.name);
+    try {
+      const stats = await fsPromises.stat(filePath);
+      if (stats.mtimeMs >= cutoff) {
+        result.keptFiles += 1;
+        continue;
+      }
+      await fsPromises.unlink(filePath);
+      result.removedFiles += 1;
+      result.removedBytes += stats.size;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw error;
+    }
+  }
+  return result;
 }
 
 function getImageExtension(mimeType: string): string {
@@ -81,9 +189,9 @@ function normalizeImageData(mimeType: string, data: string): { mimeType: string;
   return { mimeType, data };
 }
 
-// Filenames are a content hash of the bytes so re-materializing the same image
-// within a process reuses the existing temp file instead of leaking a fresh one
-// for repeated image blocks or history replay.
+// Filenames are a content hash of the bytes so re-materializing the same image, within a process
+// or after a daemon restart, reuses the existing file instead of leaking a fresh one for repeated
+// image blocks or history replay. Rewriting it also refreshes the age pruneProviderImages reads.
 export function materializeProviderImage(image: {
   data: string;
   mimeType: string | null;
@@ -100,11 +208,12 @@ export function materializeProviderImage(image: {
 }
 
 // Recognizes markdown rendered for a materialized provider image: its source is a content-hashed
-// file in the attachments dir. Matching the full <hash>.<ext> shape (not just a leading "![")
-// keeps user-authored text from being mistaken for a provider image during history replay. The
-// separator still accepts old doubled-backslash Windows history; new Windows output uses file URIs.
+// file in the daemon's image folder, or in the temp folder older releases and non-daemon processes
+// use. Matching the full <hash>.<ext> shape (not just a leading "![") keeps user-authored text
+// from being mistaken for a provider image during history replay. The separator still accepts old
+// doubled-backslash Windows history; new Windows output uses file URIs.
 const PROVIDER_IMAGE_MARKDOWN = new RegExp(
-  `^!\\[[^\\]]*\\]\\([^)]*${PROVIDER_IMAGE_ATTACHMENT_DIR}(?:-[^/\\\\)]+)?[/\\\\]+(?:[^/\\\\)]+[/\\\\]+)?[0-9a-f]{64}\\.[a-z0-9]+\\)`,
+  `^!\\[[^\\]]*\\]\\([^)]*(?:${PROVIDER_IMAGE_ATTACHMENT_DIR}(?:-[^/\\\\)]+)?|${PROVIDER_IMAGE_DIR})[/\\\\]+(?:[^/\\\\)]+[/\\\\]+)?[0-9a-f]{64}\\.[a-z0-9]+\\)`,
 );
 
 export function isProviderImageMarkdown(text: string): boolean {

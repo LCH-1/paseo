@@ -2,7 +2,7 @@ import { resolveDaemonVersion } from "./daemon-version.js";
 import os from "node:os";
 import http from "node:http";
 import path from "node:path";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import pino from "pino";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { WebSocket } from "ws";
@@ -10,6 +10,12 @@ import { WebSocket } from "ws";
 import { createPaseoDaemon, parseListenString, type PaseoDaemonConfig } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
 import { AgentManagerShuttingDownError } from "./agent/agent-manager.js";
+import {
+  materializeProviderImage,
+  providerImageDirectory,
+  PROVIDER_IMAGE_RETENTION_MS,
+  removeProcessProviderImageDirectories,
+} from "./agent/providers/provider-image-output.js";
 import { hashDaemonPassword } from "./auth.js";
 import { generateLocalPairingOffer } from "./pairing-offer.js";
 import { createTestPaseoDaemon } from "./test-utils/paseo-daemon.js";
@@ -111,6 +117,37 @@ describe("paseo daemon bootstrap", () => {
         rm(agentCwd, { recursive: true, force: true }),
       ]);
     }
+  });
+
+  test("keeps provider images under the Paseo home and prunes stale ones at startup", async () => {
+    const paseoHomeRoot = await mkdtemp(path.join(os.tmpdir(), "paseo-provider-images-"));
+    const imageDirectory = providerImageDirectory(path.join(paseoHomeRoot, ".paseo"));
+    const stale = path.join(imageDirectory, `${"b".repeat(64)}.png`);
+    const recent = path.join(imageDirectory, `${"c".repeat(64)}.png`);
+    await mkdir(imageDirectory, { recursive: true });
+    await writeFile(stale, "image");
+    await writeFile(recent, "image");
+    const staleTime = new Date(Date.now() - PROVIDER_IMAGE_RETENTION_MS - 60_000);
+    await utimes(stale, staleTime, staleTime);
+
+    const daemonHandle = await createTestPaseoDaemon({ paseoHomeRoot, cleanup: false });
+    let afterStop: string | null = null;
+    try {
+      expect(daemonHandle.paseoHome).toBe(path.join(paseoHomeRoot, ".paseo"));
+      await expect(access(stale)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(access(recent)).resolves.toBeUndefined();
+      const written = materializeProviderImage({ data: "YWJjMTIz", mimeType: "image/png" });
+      expect(path.dirname(written.path)).toBe(imageDirectory);
+    } finally {
+      await daemonHandle.close();
+      afterStop = path.dirname(
+        materializeProviderImage({ data: "YWJjMTIz", mimeType: "image/png" }).path,
+      );
+      removeProcessProviderImageDirectories();
+      await rm(paseoHomeRoot, { recursive: true, force: true });
+    }
+    // A stopped daemon's home is not written to again by the process that hosted it.
+    expect(afterStop).not.toBe(imageDirectory);
   });
 
   test("does not create a timeline directory for live timeline activity", async () => {

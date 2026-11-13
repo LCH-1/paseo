@@ -133,6 +133,12 @@ import type { RequestedSpeechProviders } from "./speech/speech-types.js";
 import { createSpeechService } from "./speech/speech-runtime.js";
 import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
+import {
+  providerImageDirectory,
+  pruneProviderImages,
+  PROVIDER_IMAGE_RETENTION_MS,
+  configureProviderImageDirectory,
+} from "./agent/providers/provider-image-output.js";
 import { logAgentStateTransitions } from "./agent/state-transition-log.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
@@ -595,6 +601,14 @@ export async function createPaseoDaemon(
       "Failed to remove obsolete agent timeline data",
     );
   });
+  const providerImages = providerImageDirectory(config.paseoHome);
+  const releaseProviderImageDirectory = configureProviderImageDirectory(providerImages);
+  // Pruned before any agent replays: replay rewrites the images a timeline still shows.
+  await pruneProviderImages({ directory: providerImages, maxAgeMs: PROVIDER_IMAGE_RETENTION_MS })
+    .then((pruned) => logger.info({ path: providerImages, ...pruned }, "Pruned provider images"))
+    .catch((error) => {
+      logger.warn({ err: error, path: providerImages }, "Failed to prune provider images");
+    });
   const bootstrapStart = performance.now();
   const elapsed = () => `${(performance.now() - bootstrapStart).toFixed(0)}ms`;
   const daemonVersion = config.daemonVersion ?? resolveDaemonVersion(import.meta.url);
@@ -1863,6 +1877,7 @@ export async function createPaseoDaemon(
     if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
       unlinkSync(listenTarget.path);
     }
+    releaseProviderImageDirectory();
   };
 
   return {
