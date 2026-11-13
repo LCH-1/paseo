@@ -499,9 +499,14 @@ test("a file classified with no parent bucket yet still gets its delete emitted"
 // Windows announces an access-time commit (a read of a file, a listing of a
 // directory) as a change with nothing changed. Each one used to fan out into
 // Git refreshes and inventory audits; the stat signature filters them.
+// The fixture writes its files just before the first event. Reading the clock a minute ahead
+// models the case that matters: an access-time report long after the last write.
+const aMinuteLater = () => Date.now() + 60_000;
+
 async function createSignatureFixture(options: {
   filterUnchangedChanges: boolean;
-  racyWindowMs: number;
+  now?: () => number;
+  maxChangeSignatures?: number;
 }) {
   const root = await mkdtemp(join(tmpdir(), "native-signature-"));
   const directory = join(root, "refs");
@@ -558,7 +563,7 @@ async function createSignatureFixture(options: {
 }
 
 test("a change that leaves a known file's stat signature alone is dropped", async () => {
-  const fixture = await createSignatureFixture({ filterUnchangedChanges: true, racyWindowMs: 0 });
+  const fixture = await createSignatureFixture({ filterUnchangedChanges: true, now: aMinuteLater });
   try {
     fixture.emitChange(fixture.file);
     await expect.poll(() => fixture.updates(fixture.file)).toBe(1);
@@ -580,7 +585,7 @@ test("a change that leaves a known file's stat signature alone is dropped", asyn
 });
 
 test("a change that leaves a known directory alone neither updates nor rescans it", async () => {
-  const fixture = await createSignatureFixture({ filterUnchangedChanges: true, racyWindowMs: 0 });
+  const fixture = await createSignatureFixture({ filterUnchangedChanges: true, now: aMinuteLater });
   try {
     fixture.emitChange(fixture.directory);
     await expect.poll(() => fixture.updates(fixture.directory)).toBe(1);
@@ -610,10 +615,8 @@ test("a change that leaves a known directory alone neither updates nor rescans i
 }, 20_000);
 
 test("a signature taken right after a write is not trusted to drop the next change", async () => {
-  const fixture = await createSignatureFixture({
-    filterUnchangedChanges: true,
-    racyWindowMs: 60_000,
-  });
+  // The real clock: the files were written moments ago, inside the racy window.
+  const fixture = await createSignatureFixture({ filterUnchangedChanges: true });
   try {
     fixture.emitChange(fixture.file);
     await expect.poll(() => fixture.updates(fixture.file)).toBe(1);
@@ -627,12 +630,38 @@ test("a signature taken right after a write is not trusted to drop the next chan
 });
 
 test("without the signature filter every change on a known file is announced", async () => {
-  const fixture = await createSignatureFixture({ filterUnchangedChanges: false, racyWindowMs: 0 });
+  const fixture = await createSignatureFixture({
+    filterUnchangedChanges: false,
+    now: aMinuteLater,
+  });
   try {
     fixture.emitChange(fixture.file);
     fixture.emitChange(fixture.file);
     expect(fixture.updates(fixture.file)).toBe(2);
     expect(fixture.metrics.nativeUnchangedChangeEventCount).toBe(0);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("the signature memory is bounded and forgets the least recently reported path", async () => {
+  const fixture = await createSignatureFixture({
+    filterUnchangedChanges: true,
+    now: aMinuteLater,
+    maxChangeSignatures: 1,
+  });
+  try {
+    fixture.emitChange(fixture.file);
+    await expect.poll(() => fixture.updates(fixture.file)).toBe(1);
+    fixture.emitChange(fixture.directory);
+    await expect.poll(() => fixture.updates(fixture.directory)).toBe(1);
+
+    // HEAD was evicted to make room, so its next report is announced once more.
+    fixture.emitChange(fixture.file);
+    await expect.poll(() => fixture.updates(fixture.file)).toBe(2);
+    fixture.emitChange(fixture.file);
+    await expect.poll(() => fixture.metrics.nativeUnchangedChangeEventCount).toBe(1);
+    expect(fixture.updates(fixture.file)).toBe(2);
   } finally {
     await fixture.close();
   }

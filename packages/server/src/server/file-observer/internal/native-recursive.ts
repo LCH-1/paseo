@@ -27,7 +27,9 @@ const FULL_AUDIT_MAX_DIRTY_MS = 5 * 60_000;
 // own modification is not trusted: another write in the same timestamp tick
 // would leave it identical (the racy case Git handles the same way).
 const CHANGE_SIGNATURE_RACY_WINDOW_MS = 3_000;
-const MAX_CHANGE_SIGNATURES = 16_384;
+// Bounds memory per watched root (a few hundred bytes per entry), least recently reported first.
+// An evicted path costs one extra announced change.
+const MAX_CHANGE_SIGNATURES = 4_096;
 
 interface DirectoryEntry {
   directories: Set<string>;
@@ -58,7 +60,7 @@ export interface NativeRecursiveOptions {
    * updates arrive as changes; FSEvents does not report them.
    */
   filterUnchangedChanges?: boolean;
-  racyWindowMs?: number;
+  maxChangeSignatures?: number;
   now?: () => number;
 }
 
@@ -99,7 +101,7 @@ class NativeRecursiveBackend implements ObservationBackend {
   // paths are harmless: a recreated file has a new identity and change time.
   private readonly changeSignatures = new Map<string, ChangeSignature>();
   private readonly filterUnchangedChanges: boolean;
-  private readonly racyWindowMs: number;
+  private readonly maxChangeSignatures: number;
   private readonly now: () => number;
   private readonly localScopes = new Set<string>();
   private readonly changeScopes = new Set<string>();
@@ -129,7 +131,7 @@ class NativeRecursiveBackend implements ObservationBackend {
     options: NativeRecursiveOptions,
   ) {
     this.filterUnchangedChanges = options.filterUnchangedChanges ?? process.platform === "win32";
-    this.racyWindowMs = options.racyWindowMs ?? CHANGE_SIGNATURE_RACY_WINDOW_MS;
+    this.maxChangeSignatures = options.maxChangeSignatures ?? MAX_CHANGE_SIGNATURES;
     this.now = options.now ?? Date.now;
   }
 
@@ -750,6 +752,8 @@ class NativeRecursiveBackend implements ObservationBackend {
     const previous = this.changeSignatures.get(path);
     if (signature && previous && !previous.racy && previous.value === signature.value) {
       this.host.metrics.nativeUnchangedChangeEventCount += 1;
+      // Keep paths that keep being reported (Git metadata) at the recent end of the bound.
+      this.rememberSignature(path, previous);
       return;
     }
     this.rememberSignature(path, signature);
@@ -768,7 +772,7 @@ class NativeRecursiveBackend implements ObservationBackend {
       stats.birthtimeMs,
     ].join(":");
     const changedAt = Math.max(stats.mtimeMs, stats.ctimeMs);
-    return { value, racy: this.now() - changedAt < this.racyWindowMs };
+    return { value, racy: this.now() - changedAt < CHANGE_SIGNATURE_RACY_WINDOW_MS };
   }
 
   private rememberSignature(path: string, signature: ChangeSignature | null): void {
@@ -776,7 +780,7 @@ class NativeRecursiveBackend implements ObservationBackend {
     this.changeSignatures.delete(path);
     if (!signature) return;
     this.changeSignatures.set(path, signature);
-    if (this.changeSignatures.size > MAX_CHANGE_SIGNATURES) {
+    if (this.changeSignatures.size > this.maxChangeSignatures) {
       const oldest = this.changeSignatures.keys().next().value;
       if (oldest !== undefined) this.changeSignatures.delete(oldest);
     }
