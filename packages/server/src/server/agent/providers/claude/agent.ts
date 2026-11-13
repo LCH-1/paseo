@@ -378,9 +378,12 @@ type ClaudeHistoryLoadReason = "history" | "turn" | "rewind";
 
 /**
  * What one transcript read produced. It is applied in one step at the end, so a turn submitted
- * while the read was in flight stays ordered after the history instead of interleaved with it.
+ * while the read was in flight stays ordered after the history instead of interleaved with it,
+ * and a read that was superseded while in flight leaves nothing of itself behind.
  */
 interface ClaudeHistoryLoadResult {
+  /** The task list as of the transcript's end; becomes the session's when the read is applied. */
+  taskState: ClaudeTaskState;
   timeline: PersistedTimelineEntry[];
   providerSubagentEvents: Extract<AgentStreamEvent, { type: "provider_subagent" }>[];
   userMessageIds: string[];
@@ -2282,7 +2285,7 @@ class ClaudeAgentSession implements AgentSession {
   private autonomousTurn: AutonomousTurnState | null = null;
   private readonly subscribers = new Set<(event: AgentStreamEvent) => void>();
   private readonly timelineAssembler = new TimelineAssembler();
-  private readonly taskState = new ClaudeTaskState();
+  private taskState = new ClaudeTaskState();
   private readonly taskProtocolSource = new ClaudeTaskProtocolSource({
     getToolInput: (toolUseId) => this.toolUseCache.get(toolUseId)?.input ?? null,
     readWorkflowResult: readClaudeWorkflowResultFile,
@@ -5348,7 +5351,6 @@ class ClaudeAgentSession implements AgentSession {
     const slicer = new ClaudeHistorySlicer(() => this.historyLoad === load);
     let historyPath: string | null = null;
     try {
-      this.taskState.reset();
       historyPath = this.resolveHistoryPath(sessionId);
       const transcript = historyPath
         ? await readClaudeTranscriptIfPresent(historyPath, slicer)
@@ -5360,14 +5362,18 @@ class ClaudeAgentSession implements AgentSession {
         );
         return;
       }
+      // Claude appends the rows of a prompt this session already sent while the transcript is
+      // read. They belong to the live turn, which Claude streams; replayed as history as well,
+      // the prompt would be listed twice.
+      const parentEntries = recordsBeforeLiveTurn(transcript.records, this.userMessageIds);
       const sidechains = await readClaudeSidechainHistory(historyPath, slicer);
       const result: ClaudeHistoryLoadResult = {
+        taskState: new ClaudeTaskState(),
         timeline: [],
         providerSubagentEvents: [],
         userMessageIds: [],
         rewindTurnAnchors: [],
       };
-      const parentEntries: ClaudeHistoryEntry[] = transcript.records;
       const replay = await this.ingestPersistedSidechains(
         parentEntries,
         sidechains,
@@ -5375,6 +5381,8 @@ class ClaudeAgentSession implements AgentSession {
         slicer,
       );
       await this.ingestPersistedHistory(parentEntries, replay, result, slicer);
+      // A read short enough to finish without a pause never checked whether it was superseded.
+      if (this.historyLoad !== load) throw new ClaudeHistoryLoadAbandonedError();
       this.applyPersistedHistory(result);
       this.logger.info(
         {
@@ -5383,6 +5391,7 @@ class ClaudeAgentSession implements AgentSession {
           reason,
           durationMs: Math.round(performance.now() - startedAt),
           transcriptBytes: transcript.bytes,
+          liveTurnRows: transcript.records.length - parentEntries.length,
           subagentFiles: sidechains.transcriptFiles,
           subagentBytes: sidechains.transcriptBytes,
           timelineItems: result.timeline.length,
@@ -5408,6 +5417,7 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   private applyPersistedHistory(result: ClaudeHistoryLoadResult): void {
+    this.taskState = result.taskState;
     // Loops, not push(...events): a long subagent replay exceeds the engine's argument limit.
     for (const event of result.providerSubagentEvents) {
       this.persistedProviderSubagentEvents.push(event);
@@ -5548,7 +5558,7 @@ class ClaudeAgentSession implements AgentSession {
       }
       return;
     }
-    const taskSnapshot = this.taskState.observe(entry);
+    const taskSnapshot = result.taskState.observe(entry);
     const items = [
       ...(taskSnapshot ? [taskSnapshot] : []),
       ...this.convertHistoryEntry(entry).map((item) =>
@@ -6302,6 +6312,23 @@ function normalizeHistoryBlocks(content: unknown): ClaudeContentChunk[] | null {
     return [content];
   }
   return null;
+}
+
+/**
+ * The transcript up to the first prompt this session sent itself. `liveUserMessageIds` holds only
+ * prompts sent since the session opened or rebound, so a row carrying one of them was written
+ * after the session started reading.
+ */
+function recordsBeforeLiveTurn(
+  records: ClaudeHistoryEntry[],
+  liveUserMessageIds: readonly string[],
+): ClaudeHistoryEntry[] {
+  if (liveUserMessageIds.length === 0) return records;
+  const live = new Set(liveUserMessageIds);
+  const firstLiveRow = records.findIndex(
+    (entry) => entry.type === "user" && typeof entry.uuid === "string" && live.has(entry.uuid),
+  );
+  return firstLiveRow < 0 ? records : records.slice(0, firstLiveRow);
 }
 
 /** The parsed transcript, or null when no transcript exists at the resolved path. */

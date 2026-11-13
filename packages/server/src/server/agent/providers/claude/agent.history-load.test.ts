@@ -1,4 +1,12 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import pino from "pino";
@@ -17,6 +25,23 @@ import { FakeClaudeSdk } from "./test-rewind-claude-sdk.js";
  */
 
 const SESSION_ID = "history-load-session";
+
+/** Private state the tests below read or drive directly. */
+interface ClaudeSessionInternals {
+  userMessageIds: string[];
+  ensurePersistedHistoryLoaded(reason: "history" | "turn" | "rewind"): Promise<void>;
+  rebindConversationSession(sessionId: string): void;
+}
+
+function internals(session: AgentSession): ClaudeSessionInternals {
+  return session as unknown as ClaudeSessionInternals;
+}
+
+function userMessageTexts(events: AgentStreamEvent[]): string[] {
+  return events.flatMap((event) =>
+    event.type === "timeline" && event.item.type === "user_message" ? [event.item.text] : [],
+  );
+}
 
 interface LogRecord {
   level: number;
@@ -75,13 +100,14 @@ describe("ClaudeAgentSession persisted history load", () => {
     }
   }
 
-  function transcriptPath(): string {
-    return path.join(claudeProjectDirSync(cwd, { configDir }), `${SESSION_ID}.jsonl`);
+  function transcriptPath(sessionId = SESSION_ID): string {
+    return path.join(claudeProjectDirSync(cwd, { configDir }), `${sessionId}.jsonl`);
   }
 
-  function writeTranscript(lines: unknown[]): void {
-    mkdirSync(path.dirname(transcriptPath()), { recursive: true });
-    writeFileSync(transcriptPath(), `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+  function writeTranscript(lines: unknown[], sessionId = SESSION_ID): void {
+    const file = transcriptPath(sessionId);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
   }
 
   function historyLogs(): LogRecord[] {
@@ -161,10 +187,104 @@ describe("ClaudeAgentSession persisted history load", () => {
     // Any read of this path fails loudly, so a read at open would leave a warning behind.
     mkdirSync(transcriptPath(), { recursive: true });
 
-    const session = await resume();
-    await session.close();
+    const opened = await resume();
+    try {
+      // A second session reads the same path on demand. By the time its read has failed, a read
+      // the first one started when it opened, earlier and identical, has failed and logged too.
+      // Closing the first session sooner would abandon such a read before it could log.
+      const reader = await resume();
+      try {
+        await drainHistory(reader);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      } finally {
+        await reader.close();
+      }
+    } finally {
+      await opened.close();
+    }
 
-    expect(historyLogs()).toEqual([]);
+    expect(historyLogs()).toEqual([
+      expect.objectContaining({
+        level: pino.levels.values.warn,
+        msg: "Failed to load Claude history from transcript",
+      }),
+    ]);
+  });
+
+  test("a read superseded by a rebind leaves nothing of the old session behind", async () => {
+    writeTranscript([
+      {
+        type: "user",
+        uuid: "first-user",
+        timestamp: "2026-11-01T00:00:00.000Z",
+        message: { role: "user", content: "first prompt" },
+      },
+    ]);
+    writeTranscript(
+      [
+        {
+          type: "user",
+          uuid: "other-user",
+          timestamp: "2026-11-01T00:00:00.000Z",
+          message: { role: "user", content: "other prompt" },
+        },
+      ],
+      "other-session",
+    );
+    const session = await resume();
+
+    try {
+      // A transcript this small is read without a single pause, the only place a read used to
+      // notice it was superseded.
+      const reading = internals(session).ensurePersistedHistoryLoaded("history");
+      internals(session).rebindConversationSession("other-session");
+      await reading;
+
+      expect(userMessageTexts(await drainHistory(session))).toEqual(["other prompt"]);
+      expect(internals(session).userMessageIds).toEqual(["other-user"]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("rewinds a reopened session whose timeline the daemon still holds", async () => {
+    writeTranscript([
+      {
+        type: "user",
+        uuid: "history-user-1",
+        timestamp: "2026-11-01T00:00:00.000Z",
+        message: { role: "user", content: "first" },
+      },
+      {
+        type: "assistant",
+        uuid: "history-assistant-1",
+        timestamp: "2026-11-01T00:00:01.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "one" }] },
+      },
+      {
+        type: "user",
+        uuid: "history-user-2",
+        timestamp: "2026-11-01T00:00:02.000Z",
+        message: { role: "user", content: "second" },
+      },
+      {
+        type: "assistant",
+        uuid: "history-assistant-2",
+        timestamp: "2026-11-01T00:00:03.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "two" }] },
+      },
+    ]);
+    const rewindSdk = new FakeClaudeSdk();
+    // Neither a replay nor a turn has read the transcript; the rewind has to.
+    const session = await resume(createClient({ rewindSdk }));
+
+    try {
+      await session.revertConversation?.({ messageId: "history-user-2" });
+    } finally {
+      await session.close();
+    }
+
+    expect(rewindSdk.recordedForks).toEqual([{ upToMessageId: "history-assistant-1" }]);
   });
 
   test("logs how long the read took and how much it read", async () => {
@@ -355,7 +475,87 @@ describe("ClaudeAgentSession persisted history load", () => {
     // The live turn's rewind target is the history's last answered turn.
     expect(rewindSdk.recordedForks).toEqual([{ upToMessageId: "history-assistant" }]);
   });
+
+  test("keeps a turn's prompt as a rewind candidate when Claude does not echo it", async () => {
+    writeTranscript([
+      {
+        type: "user",
+        uuid: "history-user",
+        timestamp: "2026-11-01T00:00:00.000Z",
+        message: { role: "user", content: "plan the work" },
+      },
+    ]);
+    const conversation = createLiveTaskConversation({ echoPrompt: false });
+    const session = await resume(createClient({ queryFactory: conversation.queryFactory }));
+
+    try {
+      await drainTurn(session, "add a task");
+      expect(internals(session).userMessageIds).toEqual([
+        "history-user",
+        conversation.userMessageIds[0],
+      ]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("does not replay as history a prompt Claude writes while the transcript is read", async () => {
+    writeTranscript([
+      {
+        type: "user",
+        uuid: "history-user",
+        timestamp: "2026-11-01T00:00:00.000Z",
+        message: { role: "user", content: "plan the work" },
+      },
+      {
+        type: "assistant",
+        uuid: "history-assistant",
+        timestamp: "2026-11-01T00:00:01.000Z",
+        // Long enough that the read is still going when Claude appends to the file.
+        message: { role: "assistant", content: [{ type: "text", text: "x".repeat(1_500_000) }] },
+      },
+    ]);
+    const liveRows = (userMessageId: string): string =>
+      [
+        {
+          type: "user",
+          uuid: userMessageId,
+          timestamp: "2026-11-01T00:01:00.000Z",
+          message: { role: "user", content: "add a task" },
+        },
+        {
+          type: "assistant",
+          uuid: "live-assistant",
+          timestamp: "2026-11-01T00:01:01.000Z",
+          message: { role: "assistant", content: [{ type: "text", text: "on it" }] },
+        },
+      ]
+        .map((row) => `${JSON.stringify(row)}\n`)
+        .join("");
+    // Claude records a prompt in the transcript as soon as it receives it.
+    const conversation = createLiveTaskConversation({
+      onPrompt: (userMessageId) => appendFileSync(transcriptPath(), liveRows(userMessageId)),
+    });
+    const session = await resume(createClient({ queryFactory: conversation.queryFactory }));
+
+    try {
+      await drainTurn(session, "add a task");
+      expect(userMessageTexts(await drainHistory(session))).toEqual(["plan the work"]);
+      expect(internals(session).userMessageIds).toEqual([
+        "history-user",
+        conversation.userMessageIds[0],
+      ]);
+    } finally {
+      await session.close();
+    }
+  });
 });
+
+async function drainTurn(session: AgentSession, prompt: string): Promise<void> {
+  for await (const event of streamSession(session, prompt)) {
+    if (event.type === "turn_failed") throw new Error(`turn failed: ${JSON.stringify(event)}`);
+  }
+}
 
 function writeLargeSession(options: {
   transcriptPath: string;
@@ -435,8 +635,10 @@ function writeLargeSession(options: {
   writeFileSync(options.transcriptPath, parentLines.join("\n"));
 }
 
-/** Claude echoes the prompt, creates a task, and answers. */
-function createLiveTaskConversation(): {
+/** Claude echoes the prompt (unless told not to), creates a task, and answers. */
+function createLiveTaskConversation(
+  options: { echoPrompt?: boolean; onPrompt?: (userMessageId: string) => void } = {},
+): {
   queryFactory: ReturnType<typeof vi.fn>;
   userMessageIds: string[];
 } {
@@ -455,6 +657,7 @@ function createLiveTaskConversation(): {
       for await (const sent of prompt) {
         const userMessageId = String((sent as { uuid?: unknown }).uuid);
         userMessageIds.push(userMessageId);
+        options.onPrompt?.(userMessageId);
         enqueue({
           type: "system",
           subtype: "init",
@@ -462,12 +665,14 @@ function createLiveTaskConversation(): {
           permissionMode: "default",
           model: "claude-sonnet-4-6",
         });
-        enqueue({
-          type: "user",
-          uuid: userMessageId,
-          session_id: SESSION_ID,
-          message: { role: "user", content: [{ type: "text", text: "add a task" }] },
-        });
+        if (options.echoPrompt !== false) {
+          enqueue({
+            type: "user",
+            uuid: userMessageId,
+            session_id: SESSION_ID,
+            message: { role: "user", content: [{ type: "text", text: "add a task" }] },
+          });
+        }
         enqueue({
           type: "assistant",
           uuid: "live-assistant",
