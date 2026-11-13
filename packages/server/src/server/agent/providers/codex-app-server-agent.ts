@@ -976,6 +976,94 @@ const CodexModelListResponseSchema = z.object({
     .optional(),
 });
 
+interface CodexCollaborationMode {
+  name: string;
+  mode?: string | null;
+  model?: string | null;
+  reasoning_effort?: string | null;
+  developer_instructions?: string | null;
+}
+
+function parseCodexCollaborationModes(response: unknown): CodexCollaborationMode[] {
+  const record = toObjectRecord(response);
+  const data = Array.isArray(record?.data) ? record.data : [];
+  return data.map((entry) => {
+    const mode = toObjectRecord(entry);
+    return {
+      name: typeof mode?.name === "string" ? mode.name : "",
+      mode: typeof mode?.mode === "string" ? mode.mode : null,
+      model: typeof mode?.model === "string" ? mode.model : null,
+      reasoning_effort: typeof mode?.reasoning_effort === "string" ? mode.reasoning_effort : null,
+      developer_instructions:
+        typeof mode?.developer_instructions === "string" ? mode.developer_instructions : null,
+    };
+  });
+}
+
+function findCodexCollaborationMode(
+  modes: readonly CodexCollaborationMode[],
+  target: "code" | "plan",
+): CodexCollaborationMode | null {
+  if (modes.length === 0) return null;
+  const findByName = (predicate: (name: string) => boolean) =>
+    modes.find((entry) => predicate(entry.name.toLowerCase()));
+
+  if (target === "plan") {
+    return findByName((name) => name.includes("plan") || name.includes("read")) ?? null;
+  }
+
+  return (
+    findByName((name) => name.includes("auto") || name.includes("code")) ??
+    modes.find((entry) => {
+      const name = entry.name.toLowerCase();
+      return !name.includes("plan") && !name.includes("read");
+    }) ??
+    modes[0] ??
+    null
+  );
+}
+
+function selectCodexServiceTiers(
+  models: readonly CodexModel[],
+  model: string | null | undefined,
+): CodexServiceTier[] {
+  const selectedModel = model
+    ? models.find((candidate) => candidate.id === model || candidate.model === model)
+    : (models.find((candidate) => candidate.isDefault) ?? models[0]);
+  return selectedModel?.serviceTiers ?? [];
+}
+
+function reconcileCodexServiceTier(
+  serviceTier: string | null,
+  tiers: readonly CodexServiceTier[],
+): string | null {
+  let reconciled = serviceTier;
+  // COMPAT(codexFastPreference): added in v0.10.0, remove after 2027-03-29 once saved Fast preferences have migrated.
+  if (reconciled === "fast" && !tiers.some((tier) => tier.id === "fast")) {
+    reconciled = tiers.find((tier) => tier.name.toLowerCase() === "fast")?.id ?? null;
+  }
+  if (reconciled !== "default" && !tiers.some((tier) => tier.id === reconciled)) {
+    reconciled = null;
+  }
+  return reconciled;
+}
+
+/** The features a new Codex session reports, from its app-server's model and mode lists. */
+function buildCodexSessionFeatures(
+  config: Pick<AgentSessionConfig, "model" | "featureValues">,
+  lists: { models: readonly CodexModel[]; collaborationModes: readonly CodexCollaborationMode[] },
+): AgentFeature[] {
+  const serviceTiers = selectCodexServiceTiers(lists.models, config.model);
+  return buildCodexFeatures({
+    serviceTiers,
+    serviceTier:
+      reconcileCodexServiceTier(readCodexServiceTier(config.featureValues), serviceTiers) ??
+      "default",
+    planModeEnabled: Boolean(config.featureValues?.plan_mode),
+    planModeAvailable: findCodexCollaborationMode(lists.collaborationModes, "plan") !== null,
+  });
+}
+
 /**
  * Read the newest `window.limit` threads Codex knows about.
  *
@@ -3541,13 +3629,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   private backgroundTerminalSeen = false;
   // A thread that has not completed a turn may not be on disk for a new process to resume.
   private threadWithCompletedTurn: string | null = null;
-  private collaborationModes: Array<{
-    name: string;
-    mode?: string | null;
-    model?: string | null;
-    reasoning_effort?: string | null;
-    developer_instructions?: string | null;
-  }> = [];
+  private collaborationModes: CodexCollaborationMode[] = [];
   private resolvedCollaborationMode: {
     mode: string;
     settings: Record<string, unknown>;
@@ -3789,22 +3871,9 @@ export class CodexAppServerAgentSession implements AgentSession {
   private async loadCollaborationModes(): Promise<void> {
     if (!this.client) return;
     try {
-      const response = toObjectRecord(await this.client.request("collaborationMode/list", {}));
-      const data = Array.isArray(response?.data) ? response.data : [];
-      this.collaborationModes = data.map((entry) => {
-        const record = toObjectRecord(entry);
-        return {
-          name: typeof record?.name === "string" ? record.name : "",
-          mode: typeof record?.mode === "string" ? record.mode : null,
-          model: typeof record?.model === "string" ? record.model : null,
-          reasoning_effort:
-            typeof record?.reasoning_effort === "string" ? record.reasoning_effort : null,
-          developer_instructions:
-            typeof record?.developer_instructions === "string"
-              ? record.developer_instructions
-              : null,
-        };
-      });
+      this.collaborationModes = parseCodexCollaborationModes(
+        await this.client.request("collaborationMode/list", {}),
+      );
     } catch (error) {
       this.logger.trace(
         {
@@ -3852,30 +3921,8 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
   }
 
-  private findCollaborationMode(target: "code" | "plan"): {
-    name: string;
-    mode?: string | null;
-    model?: string | null;
-    reasoning_effort?: string | null;
-    developer_instructions?: string | null;
-  } | null {
-    if (this.collaborationModes.length === 0) return null;
-    const findByName = (predicate: (name: string) => boolean) =>
-      this.collaborationModes.find((entry) => predicate(entry.name.toLowerCase()));
-
-    if (target === "plan") {
-      return findByName((name) => name.includes("plan") || name.includes("read")) ?? null;
-    }
-
-    return (
-      findByName((name) => name.includes("auto") || name.includes("code")) ??
-      this.collaborationModes.find((entry) => {
-        const name = entry.name.toLowerCase();
-        return !name.includes("plan") && !name.includes("read");
-      }) ??
-      this.collaborationModes[0] ??
-      null
-    );
+  private findCollaborationMode(target: "code" | "plan"): CodexCollaborationMode | null {
+    return findCodexCollaborationMode(this.collaborationModes, target);
   }
 
   private hasPlanCollaborationMode(): boolean {
@@ -3910,23 +3957,11 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private currentServiceTiers(): CodexServiceTier[] {
-    const selectedModel = this.config.model
-      ? this.speedModels.find(
-          (model) => model.id === this.config.model || model.model === this.config.model,
-        )
-      : (this.speedModels.find((model) => model.isDefault) ?? this.speedModels[0]);
-    return selectedModel?.serviceTiers ?? [];
+    return selectCodexServiceTiers(this.speedModels, this.config.model);
   }
 
   private reconcileServiceTier(): void {
-    const tiers = this.currentServiceTiers();
-    // COMPAT(codexFastPreference): added in v0.10.0, remove after 2027-03-29 once saved Fast preferences have migrated.
-    if (this.serviceTier === "fast" && !tiers.some((tier) => tier.id === "fast")) {
-      this.serviceTier = tiers.find((tier) => tier.name.toLowerCase() === "fast")?.id ?? null;
-    }
-    if (this.serviceTier !== "default" && !tiers.some((tier) => tier.id === this.serviceTier)) {
-      this.serviceTier = null;
-    }
+    this.serviceTier = reconcileCodexServiceTier(this.serviceTier, this.currentServiceTiers());
     const { fast_mode: _legacyFast, ...values } = this.config.featureValues ?? {};
     this.config.featureValues = { ...values, service_tier: this.serviceTier ?? "default" };
   }
@@ -7469,11 +7504,27 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 }
 
+// A draft's speed and plan toggles come from model/list and collaborationMode/list. Asking a
+// fresh app-server for them on every draft cost a whole session start (1.8s on Windows).
+// Their answers change with the account's plan or the Codex install, so they are kept briefly
+// and dropped whenever the provider snapshot refreshes.
+const CODEX_DRAFT_FEATURE_LISTS_TTL_MS = 10 * 60_000;
+
+interface CodexDraftFeatureLists {
+  models: CodexModel[];
+  collaborationModes: CodexCollaborationMode[];
+}
+
 export class CodexAppServerAgentClient implements AgentClient {
   readonly provider = CODEX_PROVIDER;
   readonly capabilities = CODEX_APP_SERVER_CAPABILITIES;
   private goalsEnabledPromise: Promise<boolean> | null = null;
   private autoReviewEnabledPromise: Promise<boolean> | null = null;
+  private draftFeatureLists: {
+    codexHome: string;
+    expiresAt: number;
+    lists: Promise<CodexDraftFeatureLists>;
+  } | null = null;
 
   constructor(
     private readonly logger: Logger,
@@ -7707,6 +7758,49 @@ export class CodexAppServerAgentClient implements AgentClient {
     });
   }
 
+  async listFeatures(config: AgentSessionConfig): Promise<AgentFeature[]> {
+    // As before: a draft without a model offers no toggles.
+    if (!config.model) return [];
+    return buildCodexSessionFeatures(config, await this.readDraftFeatureLists());
+  }
+
+  private readDraftFeatureLists(): Promise<CodexDraftFeatureLists> {
+    // Drafts open without a launch context, so they always ask the host's own Codex home.
+    const codexHome = resolveCodexHomeDir(buildCodexAppServerEnv(this.runtimeSettings));
+    const cached = this.draftFeatureLists;
+    if (cached && cached.codexHome === codexHome && cached.expiresAt > Date.now()) {
+      return cached.lists;
+    }
+    const entry = {
+      codexHome,
+      expiresAt: Date.now() + CODEX_DRAFT_FEATURE_LISTS_TTL_MS,
+      lists: this.fetchDraftFeatureLists(),
+    };
+    this.draftFeatureLists = entry;
+    entry.lists.catch(() => {
+      if (this.draftFeatureLists === entry) this.draftFeatureLists = null;
+    });
+    return entry.lists;
+  }
+
+  private async fetchDraftFeatureLists(): Promise<CodexDraftFeatureLists> {
+    const child = await this.spawnAppServer();
+    const client = new CodexAppServerClient(child, this.logger);
+    try {
+      await client.request("initialize", buildCodexAppServerInitializeParams());
+      client.notify("initialized", {});
+      const models =
+        CodexModelListResponseSchema.parse(await client.request("model/list", {})).data ?? [];
+      // A session treats a failed mode list as no modes, so the draft does too.
+      const collaborationModes = await client
+        .request("collaborationMode/list", {})
+        .then(parseCodexCollaborationModes, () => []);
+      return { models, collaborationModes };
+    } finally {
+      await client.dispose();
+    }
+  }
+
   async getCatalogCacheKey(_options: FetchCatalogOptions): Promise<string> {
     // This client discovers through host configuration, independent of project cwd.
     return "host";
@@ -7716,6 +7810,7 @@ export class CodexAppServerAgentClient implements AgentClient {
     _options: FetchCatalogOptions,
     context?: ProviderRefreshContext,
   ): Promise<ProviderCatalog> {
+    this.draftFeatureLists = null;
     const [models, autoReviewEnabled] = await Promise.all([
       this.fetchModelsFromAppServer(context),
       runProviderRefreshActivity(context, "version", () =>

@@ -1,8 +1,13 @@
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import pino from "pino";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
+import { AgentManager } from "../agent-manager.js";
 import type { AgentSession, AgentSessionConfig } from "../agent-sdk-types.js";
-import { CodexAppServerAgentSession } from "./codex-app-server-agent.js";
+import { CodexAppServerAgentClient, CodexAppServerAgentSession } from "./codex-app-server-agent.js";
 import {
   createFakeCodexAppServer,
   type FakeCodexAppServer,
@@ -601,6 +606,94 @@ describe("Codex app-server provider features", () => {
       collaborationMode: expect.objectContaining({
         mode: "plan",
       }),
+    });
+  });
+});
+
+describe("Codex draft features", () => {
+  const planToggle = (value: boolean) => ({
+    type: "toggle",
+    id: "plan_mode",
+    label: "Plan",
+    description: "Switch Codex into planning-only collaboration mode",
+    tooltip: "Toggle plan mode",
+    icon: "list-todo",
+    value,
+  });
+
+  async function withDraftFeatureManager(
+    runScenario: (fixture: {
+      manager: AgentManager;
+      provider: CodexAppServerAgentClient;
+      cwd: string;
+      appServerStarts: () => number;
+    }) => Promise<void>,
+  ): Promise<void> {
+    const cwd = mkdtempSync(path.join(tmpdir(), "codex-draft-features-"));
+    let starts = 0;
+    const provider = new CodexAppServerAgentClient(createTestLogger());
+    const internals = provider as unknown as {
+      goalsEnabledPromise: Promise<boolean> | null;
+      autoReviewEnabledPromise: Promise<boolean> | null;
+      spawnAppServer: () => Promise<ChildProcessWithoutNullStreams>;
+      isAvailable: () => Promise<boolean>;
+    };
+    internals.goalsEnabledPromise = Promise.resolve(false);
+    internals.autoReviewEnabledPromise = Promise.resolve(false);
+    internals.isAvailable = async () => true;
+    internals.spawnAppServer = async () => {
+      starts += 1;
+      return createFakeCodexAppServer({
+        "collaborationMode/list": () => ({ data: TEST_COLLABORATION_MODES }),
+        "model/list": () => ({ data: TEST_SPEED_MODELS }),
+      }).child;
+    };
+    const manager = new AgentManager({ clients: { codex: provider }, logger: createTestLogger() });
+    try {
+      await runScenario({ manager, provider, cwd, appServerStarts: () => starts });
+    } finally {
+      vi.useRealTimers();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }
+
+  test("drafts read speed and plan toggles from one app-server start", async () => {
+    await withDraftFeatureManager(async ({ manager, cwd, appServerStarts }) => {
+      const draft = (overrides: Partial<AgentSessionConfig> = {}) =>
+        manager.listDraftFeatures(createConfig({ cwd, ...overrides }));
+
+      // Each answer is what a new session with that config reports.
+      expect(await draft()).toEqual([speedFeature("default"), planToggle(false)]);
+      expect(await draft({ featureValues: { service_tier: "priority", plan_mode: true } })).toEqual(
+        [speedFeature("priority"), planToggle(true)],
+      );
+      expect(await draft({ model: "gpt-6-astra", featureValues: { fast_mode: true } })).toEqual([
+        speedFeature("priority"),
+        planToggle(false),
+      ]);
+      expect(
+        await draft({ model: "gpt-3.5-turbo", featureValues: { service_tier: "priority" } }),
+      ).toEqual([planToggle(false)]);
+      expect(appServerStarts()).toBe(1);
+    });
+  });
+
+  test("drafts ask Codex again after a few minutes or a provider refresh", async () => {
+    await withDraftFeatureManager(async ({ manager, provider, cwd, appServerStarts }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      await manager.listDraftFeatures(createConfig({ cwd }));
+      vi.setSystemTime(Date.now() + 9 * 60_000);
+      await manager.listDraftFeatures(createConfig({ cwd }));
+      expect(appServerStarts()).toBe(1);
+
+      vi.setSystemTime(Date.now() + 2 * 60_000);
+      await manager.listDraftFeatures(createConfig({ cwd }));
+      expect(appServerStarts()).toBe(2);
+
+      await provider.fetchCatalog({ scope: "global", force: true });
+      const startsAfterRefresh = appServerStarts();
+      await manager.listDraftFeatures(createConfig({ cwd }));
+      expect(appServerStarts()).toBe(startsAfterRefresh + 1);
     });
   });
 });
