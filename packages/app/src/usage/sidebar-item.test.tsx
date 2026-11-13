@@ -147,6 +147,6 @@ it("opens the hover card on the reports the item holds, without a reports query 
   act(() => tooltip.setOpen(true));
 
   const [row] = container!.querySelectorAll('[data-testid="sidebar-usage-detail-row"]');
-  expect(row?.textContent).toMatch(/^주간60% 사용/);
+  expect(row?.textContent).toMatch(/^주간60%/);
   expect(reportQueries.mounted).toBe(queriesWhileClosed);
 });

@@ -14,7 +14,7 @@ import { UsageSourceIcon } from "./source-icon";
 import type { UsageTone } from "./types";
 
 /** Keep the card within a normal sidebar while showing its reset date and countdown. */
-export const PINNED_USAGE_DETAILS_MAX_WIDTH = 320;
+export const PINNED_USAGE_DETAILS_MAX_WIDTH = 600;
 // A long window name ("5시간 · GPT-5.3-Codex-Spark") gives way here, keeping its period, so the
 // name column it widens for every row never takes the reset time's room.
 const WINDOW_NAME_MAX_WIDTH = 104;
@@ -237,7 +237,8 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.sm,
   },
   meter: {
-    width: 44,
+    flex: 1,
+    minWidth: 44,
     height: 6,
     borderRadius: 3,
   },

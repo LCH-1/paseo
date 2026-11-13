@@ -58,6 +58,7 @@ export function UsageSidebarItem() {
 }
 
 const OpenSidebarUsageContext = createContext<(() => void) | null>(null);
+const SidebarUsageWidthContext = createContext(320);
 
 /**
  * One owner for the footer icon and summary: both open the Usage modal over the current screen.
@@ -67,6 +68,12 @@ const OpenSidebarUsageContext = createContext<(() => void) | null>(null);
 export function UsageSidebarRoot({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [detailsWidth, setDetailsWidth] = useState(320);
+  const measureWidth = useCallback((event: LayoutChangeEvent) => {
+    const width = event.nativeEvent.layout.width;
+    // Match the footer's outer inset, including the space above its Add project button.
+    if (width > 16) setDetailsWidth(Math.min(PINNED_USAGE_DETAILS_MAX_WIDTH, width - 16));
+  }, []);
   const openUsage = useCallback(() => {
     setMounted(true);
     setOpen(true);
@@ -76,7 +83,11 @@ export function UsageSidebarRoot({ children }: { children: ReactNode }) {
 
   return (
     <OpenSidebarUsageContext.Provider value={openUsage}>
-      {children}
+      <SidebarUsageWidthContext.Provider value={detailsWidth}>
+        <View style={styles.footerWidth} onLayout={measureWidth}>
+          {children}
+        </View>
+      </SidebarUsageWidthContext.Provider>
       {mounted ? <UsageModal visible={open} onClose={closeUsage} onDismiss={unmountUsage} /> : null}
     </OpenSidebarUsageContext.Provider>
   );
@@ -109,17 +120,12 @@ function PinnedUsageTrigger({
   onPress: () => void;
 }) {
   const { sources, preferences } = summary;
-  const [detailsWidth, setDetailsWidth] = useState(PINNED_USAGE_DETAILS_MAX_WIDTH);
-  const measureWidth = useCallback((event: LayoutChangeEvent) => {
-    const width = event.nativeEvent.layout.width;
-    if (width > 0) setDetailsWidth(Math.min(PINNED_USAGE_DETAILS_MAX_WIDTH, width));
-  }, []);
+  const detailsWidth = useContext(SidebarUsageWidthContext);
   return (
     <Tooltip delayDuration={250}>
       <TooltipTrigger asChild>
         <Pressable
           onPress={onPress}
-          onLayout={measureWidth}
           accessibilityRole="button"
           accessibilityLabel={pinnedUsageLabel(label, sources)}
           style={triggerStyle}
@@ -186,6 +192,9 @@ function PinnedUsageHoverCard({
 }
 
 const styles = StyleSheet.create((theme) => ({
+  footerWidth: {
+    width: "100%",
+  },
   trigger: {
     width: "100%",
     flexDirection: "row",

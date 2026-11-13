@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
-import { clampPct, formatAmount, formatResetLabel } from "./format";
+import { clampPct, formatAmount, formatDetailedResetLabel } from "./format";
 import type { UsageBalance, UsageTone } from "./types";
 
 interface ResolvedBalance {
@@ -51,7 +51,7 @@ export function UsageBalanceBar({
   const { i18n } = useTranslation();
   const { amountText, usedPct } = resolveBalance(balance, i18n.language);
   const tone = balance.tone ?? "default";
-  const resetLabel = formatResetLabel(balance.resetsAt, retained);
+  const resetLabel = formatDetailedResetLabel(balance.resetsAt, retained);
 
   const fillStyle = useMemo<StyleProp<ViewStyle>>(
     () => [styles.fill, fillToneStyle(tone), { width: `${clampPct(usedPct ?? 0)}%` }],
@@ -64,15 +64,17 @@ export function UsageBalanceBar({
         <Text style={styles.label} numberOfLines={1}>
           {balance.label}
         </Text>
-        <Text style={styles.value}>
-          {amountText}
-          {resetLabel ? <Text style={styles.reset}>{` · ${resetLabel}`}</Text> : null}
-        </Text>
+        <Text style={styles.value}>{amountText}</Text>
       </View>
       {usedPct != null ? (
         <View style={styles.track}>
           <View style={fillStyle} />
         </View>
+      ) : null}
+      {resetLabel ? (
+        <Text style={styles.reset} testID="usage-balance-reset-detail">
+          {resetLabel}
+        </Text>
       ) : null}
     </View>
   );
@@ -100,6 +102,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   reset: {
     color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.normal,
   },
   track: {

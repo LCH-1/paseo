@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatAmount,
   formatCompactResetAt,
+  formatDetailedResetLabel,
   formatResetAt,
   formatResetIn,
   formatResetLabel,
@@ -82,6 +83,36 @@ describe("formatCompactResetAt", () => {
     for (const value of [null, undefined, "", "not a date"]) {
       expect(formatCompactResetAt(value, now)).toBeNull();
     }
+  });
+});
+
+describe("formatDetailedResetLabel", () => {
+  it("shows the exact local reset timestamp and days, hours and minutes remaining", () => {
+    expect(formatDetailedResetLabel(local(2026, 11, 14, 13, 25), false, now)).toBe(
+      `초기화 11. 14. (토) ${clock("오후 01:25", "13:25")} · 3일 2시간 25분 후`,
+    );
+    expect(formatDetailedResetLabel(new Date(now + 30_000).toISOString(), false, now)).toMatch(
+      / · 1분 후$/,
+    );
+    expect(formatDetailedResetLabel(new Date(now + HOUR).toISOString(), false, now)).toMatch(
+      / · 1시간 후$/,
+    );
+    expect(formatDetailedResetLabel(new Date(now + DAY).toISOString(), false, now)).toMatch(
+      / · 1일 후$/,
+    );
+    expect(formatDetailedResetLabel(local(2027, 1, 2, 9, 5), false, now)).toMatch(
+      /^초기화 2027\. 1\. 2\./,
+    );
+  });
+
+  it("retains past dates and distinguishes stale reports from resetting windows", () => {
+    const past = local(2026, 11, 11, 9, 0);
+    expect(formatDetailedResetLabel(past, true, now)).toMatch(
+      /^초기화 11\. 11\..* · 초기화 시각 지남$/,
+    );
+    expect(formatDetailedResetLabel(past, false, now)).toMatch(/ · 초기화 중$/);
+    for (const value of [null, undefined, "", "not a date"])
+      expect(formatDetailedResetLabel(value, false, now)).toBeNull();
   });
 });
 

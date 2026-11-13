@@ -4,7 +4,7 @@ import { Pressable, Text, View, type StyleProp, type ViewStyle } from "react-nat
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { usageCopy } from "./copy";
-import { formatDisplayPct, formatResetLabel } from "./format";
+import { formatDetailedResetLabel, formatDisplayPct, formatResetLabel } from "./format";
 import { UsageMeter } from "./meter";
 import { displayPercent, usageWindowRowLabel } from "./model";
 import type { UsageDisplayAs } from "./preferences";
@@ -48,7 +48,8 @@ export function UsageWindowBar({
     (!retained || Date.parse(window.runsOutAt) > Date.now());
   const trailing = isAtRisk
     ? `runs out ${formatResetLabel(window.runsOutAt)?.replace("resets ", "") ?? ""}`.trim()
-    : formatResetLabel(window.resetsAt, retained);
+    : null;
+  const resetDetail = formatDetailedResetLabel(window.resetsAt, retained);
 
   const value = shownPct != null ? formatDisplayPct(shownPct, displayAs) : "—";
   const accessibilityState = useMemo(() => ({ checked: pinned }), [pinned]);
@@ -56,6 +57,7 @@ export function UsageWindowBar({
     label: window.label,
     value,
     trailing,
+    resetDetail,
     isAtRisk,
     percent: shownPct ?? 0,
     tone,
@@ -77,7 +79,11 @@ export function UsageWindowBar({
     <Pressable
       onPress={onTogglePin}
       accessibilityRole="checkbox"
-      accessibilityLabel={usageWindowRowLabel({ pinLabel, value, trailing })}
+      accessibilityLabel={usageWindowRowLabel({
+        pinLabel,
+        value,
+        trailing: [trailing, resetDetail].filter(Boolean).join(" · "),
+      })}
       accessibilityState={accessibilityState}
       aria-checked={pinned}
       style={styles.row}
@@ -99,6 +105,7 @@ function WindowRowContent({
   label,
   value,
   trailing,
+  resetDetail,
   isAtRisk,
   percent,
   tone,
@@ -109,6 +116,7 @@ function WindowRowContent({
   label: string;
   value: string;
   trailing: string | null | undefined;
+  resetDetail: string | null;
   isAtRisk: boolean;
   percent: number;
   tone: UsageTone;
@@ -132,6 +140,11 @@ function WindowRowContent({
             </Text>
           </View>
           <UsageMeter percent={percent} tone={tone} />
+          {resetDetail ? (
+            <Text style={styles.resetDetail} testID="usage-window-reset-detail">
+              {resetDetail}
+            </Text>
+          ) : null}
         </View>
         {pinnable ? <UsagePinGlyph pinned={pinned} /> : null}
       </View>
@@ -215,6 +228,11 @@ const styles = StyleSheet.create((theme) => ({
   },
   reset: {
     color: theme.colors.foregroundMuted,
+    fontWeight: theme.fontWeight.normal,
+  },
+  resetDetail: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.normal,
   },
   atRisk: {

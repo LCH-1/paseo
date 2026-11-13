@@ -92,6 +92,31 @@ export function formatCompactResetAt(
   return `${year}${date.getMonth() + 1}/${date.getDate()} ${clock}`;
 }
 
+/** Exact local reset timestamp and the remaining days, hours and minutes for usage details. */
+export function formatDetailedResetLabel(
+  iso: string | null | undefined,
+  retained = false,
+  now: number = Date.now(),
+): string | null {
+  const at = formatResetAt(iso, now);
+  const instant = parseInstant(iso);
+  if (!at || instant === null) return null;
+  const remaining = instant - now;
+  if (remaining <= 0) return `초기화 ${at} · ${retained ? "초기화 시각 지남" : "초기화 중"}`;
+  const totalMinutes = Math.max(1, Math.floor(remaining / MINUTE_MS));
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+  const duration = [
+    days ? `${days}일` : "",
+    hours ? `${hours}시간` : "",
+    minutes ? `${minutes}분` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return `초기화 ${at} · ${duration} 후`;
+}
+
 /** A compact countdown in its largest whole unit; never less than a minute. */
 function aheadSpan(ms: number): string {
   if (ms < HOUR_MS) return `${Math.max(1, Math.floor(ms / MINUTE_MS))}m`;
