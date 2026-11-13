@@ -89,6 +89,8 @@ import {
 } from "./auth.js";
 import { resolveSessionAdmission } from "./session-admission-auth.js";
 import {
+  compactRuntimeMetricsForLog,
+  isNotableRuntimeMetricsWindow,
   WebSocketRuntimeMetricsWindow,
   type WebSocketRuntimeCounters,
   type WebSocketRuntimeDiagnosticSnapshot,
@@ -514,6 +516,9 @@ const WS_RUNTIME_METRICS_FLUSH_MS = 30_000;
 // A metrics window without agent output or terminal frames looks like the one before it, so up to
 // this many are merged into one line (5 minutes). The merged line still counts the whole span.
 const WS_RUNTIME_METRICS_QUIET_WINDOWS = 10;
+// Standing state (sessions, memory, agents, Git service gauges) is logged with a notable window
+// and otherwise once per this many windows; each window still logs its own measurements.
+const WS_RUNTIME_METRICS_GAUGE_WINDOWS = 10;
 const LOG_DIGEST_FLUSH_MS = 60_000;
 const UNUSED_SOCKET_MAX_LIFETIME_MS = 5_000;
 const SLOW_REQUEST_METHOD_MAX_LENGTH = 120;
@@ -609,6 +614,7 @@ export class VoiceAssistantWebSocketServer {
   private lastRuntimeMetricsSnapshot: WebSocketRuntimeDiagnosticPayload | null = null;
   private runtimeMetricsInterval: ReturnType<typeof setInterval> | null = null;
   private quietRuntimeMetricsWindows = 0;
+  private runtimeMetricsWindowsSinceGauges = Number.POSITIVE_INFINITY;
   private logDigestInterval: ReturnType<typeof setInterval> | null = null;
   private stopDurableRecordExpiry: (() => void) | null = null;
   private readonly slowRequestDigest = new RepeatDigest<SlowRequestKind>();
@@ -2673,7 +2679,18 @@ export class VoiceAssistantWebSocketServer {
       collectedAt: new Date().toISOString(),
       ...loggedMetrics,
     };
-    this.logger.info(loggedMetrics, "ws_runtime_metrics");
+    this.runtimeMetricsWindowsSinceGauges += Math.max(
+      1,
+      Math.round(runtimeMetrics.windowMs / WS_RUNTIME_METRICS_FLUSH_MS),
+    );
+    const includeGauges =
+      this.runtimeMetricsWindowsSinceGauges >= WS_RUNTIME_METRICS_GAUGE_WINDOWS ||
+      isNotableRuntimeMetricsWindow(loggedMetrics);
+    if (includeGauges) this.runtimeMetricsWindowsSinceGauges = 0;
+    this.logger.info(
+      compactRuntimeMetricsForLog(loggedMetrics, { includeGauges }),
+      "ws_runtime_metrics",
+    );
   }
 
   private getClientActivityState(session: Session, source: object): ClientPresenceState {

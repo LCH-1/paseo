@@ -222,6 +222,105 @@ export class WebSocketRuntimeMetricsWindow {
   }
 }
 
+/** Counters that move with ordinary reconnects; alone they do not make a window notable. */
+const CONNECTION_CHURN_COUNTERS: ReadonlySet<keyof WebSocketRuntimeCounters> = new Set([
+  "connectedAwaitingHello",
+  "helloResumed",
+  "helloNew",
+  "pendingDisconnected",
+  "sessionDisconnectedWaitingReconnect",
+  "sessionSocketDisconnectedAttached",
+  "sessionCleanup",
+  "relayExternalSocketAttached",
+] as const);
+const NOTABLE_EVENT_LOOP_DELAY_MS = 100;
+const NOTABLE_REQUEST_MS = 1_000;
+const NOTABLE_GIT_COMMANDS = 20;
+/** Blocks that describe standing state rather than what happened during the window. */
+const GAUGE_KEYS: ReadonlySet<string> = new Set([
+  "sessions",
+  "sockets",
+  "memory",
+  "runtime",
+  "agents",
+]);
+/** Blocks whose zero values carry no information and dominate the line. */
+const ZERO_ELIDED_KEYS: ReadonlySet<string> = new Set([
+  "counters",
+  "sessions",
+  "sockets",
+  "runtime",
+  "git",
+  "bufferedAmount",
+]);
+
+export interface RuntimeMetricsLogInput {
+  final: boolean;
+  counters: WebSocketRuntimeCounters;
+  eventLoopDelay: { maxMs: number } | null;
+  latency: Array<{ maxMs: number }>;
+  git: { commands: { submitted: number }; workspaceService?: unknown };
+}
+
+/** A window worth its full state: a stall, a slow request, a Git burst, or a rejected socket. */
+export function isNotableRuntimeMetricsWindow(payload: RuntimeMetricsLogInput): boolean {
+  if (payload.final) return true;
+  if ((payload.eventLoopDelay?.maxMs ?? 0) >= NOTABLE_EVENT_LOOP_DELAY_MS) return true;
+  if (payload.latency.some((entry) => entry.maxMs >= NOTABLE_REQUEST_MS)) return true;
+  if (payload.git.commands.submitted > NOTABLE_GIT_COMMANDS) return true;
+  return (Object.keys(payload.counters) as Array<keyof WebSocketRuntimeCounters>).some(
+    (counter) => payload.counters[counter] > 0 && !CONNECTION_CHURN_COUNTERS.has(counter),
+  );
+}
+
+/**
+ * The logged form of a metrics window. Zero counts, empty lists, and a false `final` are left
+ * out, so a missing number reads as 0 and a missing list as empty; fractional values in those
+ * blocks keep one decimal. Without gauges the standing-state blocks (sessions, sockets, memory,
+ * runtime, agents, git.workspaceService) are left out too; the window's own measurements
+ * (event loop delay, Git commands, latency, message counts) are always there. `elided` names
+ * what was left out. The diagnostics snapshot keeps the full payload.
+ */
+export function compactRuntimeMetricsForLog(
+  payload: RuntimeMetricsLogInput,
+  options: { includeGauges: boolean },
+): Record<string, unknown> {
+  const compact: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (!options.includeGauges && GAUGE_KEYS.has(key)) continue;
+    if (key === "final" && value === false) continue;
+    let next: unknown = value;
+    if (key === "git" && !options.includeGauges) {
+      const { workspaceService: _gauges, ...windowGit } = payload.git;
+      next = windowGit;
+    }
+    if (ZERO_ELIDED_KEYS.has(key)) next = elideZeros(next);
+    if (isEmptyContainer(next)) continue;
+    compact[key] = next;
+  }
+  compact.elided = options.includeGauges ? "zeros" : "zeros+gauges";
+  return compact;
+}
+
+function elideZeros(value: unknown): unknown {
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? value : Math.round(value * 10) / 10;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const kept: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    const next = elideZeros(child);
+    if (next === 0 || isEmptyContainer(next)) continue;
+    kept[key] = next;
+  }
+  return kept;
+}
+
+function isEmptyContainer(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length === 0;
+  return value !== null && typeof value === "object" && Object.keys(value).length === 0;
+}
+
 function createRuntimeCounters(): WebSocketRuntimeCounters {
   return {
     connectedAwaitingHello: 0,

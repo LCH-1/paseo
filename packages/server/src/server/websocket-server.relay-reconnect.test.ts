@@ -1218,6 +1218,57 @@ describe("relay external socket reconnect behavior", () => {
     await server.close();
   });
 
+  test("logs each window's measurements every 30 seconds and standing state every 5 minutes", async () => {
+    const { log, lines } = createCapturingLog();
+    const server = createServer({ log });
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId: "cid-runtime-metrics-gauges" });
+    const streamOneWindow = async () => {
+      sessionMock.instances[0].publish({
+        type: "agent_stream",
+        payload: {
+          agentId: "agent-1",
+          event: { type: "turn_completed", provider: "codex" },
+          timestamp: "2026-11-10T00:00:00.000Z",
+        },
+      });
+      await vi.advanceTimersByTimeAsync(30_000);
+    };
+
+    for (let window = 0; window < 11; window += 1) await streamOneWindow();
+
+    const logged = linesWithMessage(lines, "ws_runtime_metrics");
+    expect(logged).toHaveLength(11);
+    expect(logged.map((line) => line.elided)).toEqual([
+      "zeros",
+      ...Array.from({ length: 9 }, () => "zeros+gauges"),
+      "zeros",
+    ]);
+    expect(logged[0]).toHaveProperty("runtime");
+    expect(logged[0]).toHaveProperty("sessions.activeConnections", 1);
+    expect(logged[10]).toHaveProperty("sessions.activeConnections", 1);
+    for (const line of logged.slice(1, 10)) {
+      expect(line).toMatchObject({
+        windowMs: 30_000,
+        outboundAgentStreamTypesTop: [["turn_completed", 1]],
+        git: { commands: expect.any(Object) },
+      });
+      expect(line).toHaveProperty("eventLoopDelay");
+      expect(line).not.toHaveProperty("runtime");
+      expect(line).not.toHaveProperty("sessions");
+      expect(line).not.toHaveProperty("counters");
+    }
+    // Diagnostics still read the full window.
+    const getMetrics = sessionMock.instances[0].args.getWebSocketRuntimeMetrics as () => {
+      counters: Record<string, number>;
+      git: { workspaceService: unknown };
+    };
+    expect(getMetrics().counters).toMatchObject({ validationFailed: 0, helloNew: 0 });
+    expect(getMetrics().git.workspaceService).toEqual(expect.any(Object));
+
+    await server.close();
+  });
+
   test("responds to top-level ping while provider diagnostic is still running", async () => {
     const server = createServer();
     const socket = new MockSocket();

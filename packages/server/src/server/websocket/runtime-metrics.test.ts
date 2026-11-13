@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { SessionOutboundMessage, WSOutboundMessage } from "../messages.js";
 import { wrapSessionMessage } from "../messages.js";
-import { WebSocketRuntimeMetricsWindow } from "./runtime-metrics.js";
+import {
+  compactRuntimeMetricsForLog,
+  isNotableRuntimeMetricsWindow,
+  WebSocketRuntimeMetricsWindow,
+} from "./runtime-metrics.js";
 
 function createMetricsWindow(): {
   metrics: WebSocketRuntimeMetricsWindow;
@@ -220,5 +224,107 @@ describe("WebSocketRuntimeMetricsWindow", () => {
     expect(secondSnapshot.inboundMessageTypesTop).toEqual([]);
     expect(secondSnapshot.inboundSessionRequestTypesTop).toEqual([]);
     expect(secondSnapshot.latency).toEqual([]);
+  });
+});
+
+function logPayload() {
+  const { metrics, advanceClock } = createMetricsWindow();
+  metrics.recordInboundMessage("session");
+  metrics.recordRequestLatency("fetch_agent_timeline_request", 120);
+  advanceClock(30_000);
+  const window = metrics.snapshotAndReset();
+  return {
+    ...window,
+    final: false,
+    sessions: { activeConnections: 2, externalSessionKeys: 1, reconnectGraceSessions: 0 },
+    sockets: { activeSockets: 2, pendingConnections: 0 },
+    eventLoopDelay: { p50Ms: 20.1, p99Ms: 31.4, maxMs: 40.2 },
+    uptimeSeconds: 120.5,
+    memory: { rss: 1, heapTotal: 1, heapUsed: 1, external: 1, arrayBuffers: 1 },
+    runtime: { inflightRequests: 0, peakInflightRequests: 1 },
+    agents: { total: 3 },
+    git: {
+      commands: {
+        submitted: 4,
+        failed: 0,
+        operationsTop: [["status", 4]],
+        pendingProvenanceTop: [],
+      },
+      workspaceService: {
+        workspaceTargetCount: 6,
+        fetchInFlightCount: 0,
+        fileObserver: { nativeEventCount: 12, lastReconciliationDurationMs: 0.21970400214195251 },
+      },
+    },
+  };
+}
+
+describe("runtime metrics log lines", () => {
+  it("leaves out zero counts, empty lists, and a false final flag", () => {
+    const logged = compactRuntimeMetricsForLog(logPayload(), { includeGauges: true });
+
+    expect(logged).not.toHaveProperty("final");
+    expect(logged).not.toHaveProperty("counters");
+    expect(logged).not.toHaveProperty("outboundAgentStreamTypesTop");
+    expect(logged).toMatchObject({
+      windowMs: 30_000,
+      inboundMessageTypesTop: [["session", 1]],
+      latency: [expect.objectContaining({ type: "fetch_agent_timeline_request", maxMs: 120 })],
+      sessions: { activeConnections: 2, externalSessionKeys: 1 },
+      runtime: { peakInflightRequests: 1 },
+      git: {
+        commands: { submitted: 4, operationsTop: [["status", 4]] },
+        workspaceService: {
+          workspaceTargetCount: 6,
+          fileObserver: { nativeEventCount: 12, lastReconciliationDurationMs: 0.2 },
+        },
+      },
+      elided: "zeros",
+    });
+    expect((logged.git as { commands: object }).commands).not.toHaveProperty("failed");
+    expect(logged.sessions).not.toHaveProperty("reconnectGraceSessions");
+    expect(JSON.stringify(logged).length).toBeLessThan(JSON.stringify(logPayload()).length);
+  });
+
+  it("keeps the window's own measurements and leaves standing state out between gauge lines", () => {
+    const logged = compactRuntimeMetricsForLog(logPayload(), { includeGauges: false });
+
+    for (const gauge of ["sessions", "sockets", "memory", "runtime", "agents"]) {
+      expect(logged).not.toHaveProperty(gauge);
+    }
+    expect(logged.git).toEqual({ commands: { submitted: 4, operationsTop: [["status", 4]] } });
+    expect(logged).toMatchObject({
+      eventLoopDelay: { maxMs: 40.2 },
+      uptimeSeconds: 120.5,
+      elided: "zeros+gauges",
+    });
+  });
+
+  it("calls a window notable for a stall, a slow request, a Git burst, or a rejected socket", () => {
+    const calm = logPayload();
+    expect(isNotableRuntimeMetricsWindow(calm)).toBe(false);
+    expect(
+      isNotableRuntimeMetricsWindow({ ...calm, counters: { ...calm.counters, helloNew: 3 } }),
+    ).toBe(false);
+
+    expect(isNotableRuntimeMetricsWindow({ ...calm, final: true })).toBe(true);
+    expect(
+      isNotableRuntimeMetricsWindow({
+        ...calm,
+        eventLoopDelay: { p50Ms: 20, p99Ms: 90, maxMs: 214 },
+      }),
+    ).toBe(true);
+    expect(
+      isNotableRuntimeMetricsWindow({ ...calm, latency: [{ ...calm.latency[0]!, maxMs: 4_500 }] }),
+    ).toBe(true);
+    expect(
+      isNotableRuntimeMetricsWindow({
+        ...calm,
+        git: { ...calm.git, commands: { ...calm.git.commands, submitted: 21 } },
+      }),
+    ).toBe(true);
+    expect(
+      isNotableRuntimeMetricsWindow({ ...calm, counters: { ...calm.counters, originRejected: 1 } }),
+    ).toBe(true);
   });
 });
