@@ -185,8 +185,13 @@ export class CreationService {
 
   /**
    * Removes completed creation receipts last written before `cutoffMs`, with the resource claims
-   * they own. Failed receipts stay: they are a workspace's only trace of a failed agent and its
-   * restorable prompt. A receipt that is still in flight or being created is never touched.
+   * they own. The daemon passes a cutoff 30 days back (COMPLETED_RECEIPT_RETENTION_MS), so a retry
+   * of the same creation key gets the resources it made for at least 30 days after completion.
+   * Afterwards the key is a new request: one that left its IDs to the daemon creates another
+   * workspace or agent and sends its first prompt again, and one that named them gets
+   * *_id_conflict while they exist. Failed receipts stay: they are a workspace's only trace of a
+   * failed agent and its restorable prompt. A receipt that is still in flight or being created is
+   * never touched.
    */
   async expireCompleted(cutoffMs: number): Promise<number> {
     let names: string[];
