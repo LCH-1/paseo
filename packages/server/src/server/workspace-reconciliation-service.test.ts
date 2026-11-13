@@ -1612,6 +1612,7 @@ describe("WorkspaceReconciliationService", () => {
     await service.start();
     await service.reconcileNow();
     await intervals.at(0)?.();
+    mkdirSync(path.join(projectRoot, ".git"));
     projectRootWatches.at(0)?.("rename", ".git");
     await timeouts.at(0)?.();
     service.dispose();
@@ -1621,6 +1622,89 @@ describe("WorkspaceReconciliationService", () => {
       { allowObserved: true, reason: "reconcile-rescan" },
       { allowObserved: false, reason: "reconcile-watch" },
     ]);
+  });
+
+  test("a root .git event reconciles only when the entry appears, vanishes, or is replaced", async () => {
+    const projectRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-git-entry-")));
+    tempDirs.push(projectRoot);
+    const { projects, projectRegistry, workspaceRegistry } = createTestRegistries();
+    projects.set(
+      "p1",
+      createPersistedProjectRecord({
+        projectId: "p1",
+        rootPath: projectRoot,
+        kind: "non_git",
+        displayName: "entry",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    let reads = 0;
+    const timeouts: Array<() => void | Promise<void>> = [];
+    let emit: ((event: string, filename: string | null) => void) | undefined;
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: {
+        getCheckout: async (cwd) => {
+          reads += 1;
+          return createCheckout(cwd);
+        },
+      },
+      clock: {
+        setTimeout: (callback) => {
+          timeouts.push(callback);
+          return {};
+        },
+        clearTimeout: () => undefined,
+        setInterval: () => ({}),
+        clearInterval: () => undefined,
+      },
+      watchProjectRoot: (_rootPath, _options, onChange) => {
+        emit = onChange;
+        return { close: () => undefined };
+      },
+    });
+    const gitEntry = path.join(projectRoot, ".git");
+    const readsAfterEvent = async (event: string): Promise<number> => {
+      const before = reads;
+      emit?.(event, ".git");
+      await timeouts.shift()?.();
+      return reads - before;
+    };
+
+    await service.start();
+    // Nothing there yet: a stray event changes nothing.
+    expect(await readsAfterEvent("change")).toBe(0);
+
+    mkdirSync(gitEntry);
+    expect(await readsAfterEvent("rename")).toBe(1);
+
+    // Windows: Git writing inside .git, or merely reading it, reports .git itself.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    writeFileSync(path.join(gitEntry, "HEAD"), "ref: refs/heads/main\n");
+    expect(await readsAfterEvent("change")).toBe(0);
+    expect(await readsAfterEvent("change")).toBe(0);
+
+    rmSync(gitEntry, { recursive: true, force: true });
+    writeFileSync(gitEntry, "gitdir: ../main/.git/worktrees/one\n");
+    expect(await readsAfterEvent("rename")).toBe(1);
+
+    // A worktree's .git file is a pointer; rewriting it is a change.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    writeFileSync(gitEntry, "gitdir: ../main/.git/worktrees/two\n");
+    expect(await readsAfterEvent("change")).toBe(1);
+
+    rmSync(gitEntry, { force: true });
+    expect(await readsAfterEvent("rename")).toBe(1);
+
+    // An event without a name says nothing about what moved.
+    const beforeUnnamed = reads;
+    emit?.("rename", null);
+    await timeouts.shift()?.();
+    expect(reads - beforeUnnamed).toBe(1);
+    service.dispose();
   });
 
   test("backfills persisted worktree ownership from the current checkout", async () => {

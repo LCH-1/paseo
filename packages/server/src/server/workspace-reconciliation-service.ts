@@ -1,4 +1,5 @@
-import { statSync, watch as watchPath } from "node:fs";
+import { lstatSync, statSync, watch as watchPath } from "node:fs";
+import { join } from "node:path";
 import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
 import type pino from "pino";
 import type {
@@ -61,6 +62,28 @@ const watchProjectRoot: ProjectRootWatch = (rootPath, options, onChange, onError
   return watcher;
 };
 
+/**
+ * Identifies what `<root>/.git` is. The root watch exists to see a repository appear, vanish, or
+ * be replaced, so a directory is its kind and identity only: writes inside it belong to the
+ * repository metadata watcher, and Windows reports them (and every access-time commit from a
+ * plain Git read) as a change of `.git` itself. A `.git` file is a pointer whose content matters.
+ */
+export type ProjectGitEntryInspector = (rootPath: string) => string;
+
+const inspectProjectGitEntry: ProjectGitEntryInspector = (rootPath) => {
+  try {
+    const stats = lstatSync(join(rootPath, ".git"));
+    if (stats.isDirectory()) return `directory:${stats.ino}:${stats.birthtimeMs}`;
+    const kind = stats.isFile() ? "file" : "other";
+    return `${kind}:${stats.ino}:${stats.birthtimeMs}:${stats.mtimeMs}:${stats.ctimeMs}:${stats.size}`;
+  } catch (error) {
+    if (isMissingPathError(error)) return "missing";
+    const code =
+      typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
+    return `unreadable:${code}`;
+  }
+};
+
 export type ReconciliationChange =
   | { kind: "workspace_archived"; workspaceId: string; directory: string; reason: string }
   | {
@@ -92,6 +115,7 @@ export interface WorkspaceReconciliationServiceOptions {
   onWorkspaceArchived?: (workspaceId: string) => void | Promise<void>;
   onWorkspacesChanged?: (workspaceIds: string[]) => Promise<void>;
   watchProjectRoot?: ProjectRootWatch;
+  inspectProjectGitEntry?: ProjectGitEntryInspector;
   clock?: ReconciliationClock;
   rescanIntervalMs?: number;
   debounceMs?: number;
@@ -112,6 +136,13 @@ interface CachedCheckoutRead {
 
 type DirectoryState = "directory" | "missing" | "unreadable";
 
+interface ProjectRootWatchTarget {
+  rootPath: string;
+  watcher: ProjectRootWatcher;
+  /** What `.git` was when this watch last asked for a pass; null forces the next event through. */
+  gitEntry: string | null;
+}
+
 // "watch" answers a change at a project root and "boot" converges a fresh daemon, so both read
 // Git. "rescan" is the timer: it may take what a live repository watcher already knows.
 type ReconciliationTrigger = "watch" | "rescan" | "boot";
@@ -127,10 +158,11 @@ export class WorkspaceReconciliationService {
   private readonly onWorkspaceArchived: ((workspaceId: string) => void | Promise<void>) | null;
   private readonly onWorkspacesChanged: ((workspaceIds: string[]) => Promise<void>) | null;
   private readonly watchProjectRoot: ProjectRootWatch;
+  private readonly inspectProjectGitEntry: ProjectGitEntryInspector;
   private readonly clock: ReconciliationClock;
   private readonly rescanIntervalMs: number;
   private readonly debounceMs: number;
-  private readonly watchers: Array<{ rootPath: string; watcher: ProjectRootWatcher }> = [];
+  private readonly watchers: ProjectRootWatchTarget[] = [];
   private unsubscribeRegistry: (() => void) | null = null;
   private rescanTimer: ReconciliationTimer | null = null;
   private debounceTimer: ReconciliationTimer | null = null;
@@ -150,6 +182,7 @@ export class WorkspaceReconciliationService {
     this.onWorkspaceArchived = options.onWorkspaceArchived ?? null;
     this.onWorkspacesChanged = options.onWorkspacesChanged ?? null;
     this.watchProjectRoot = options.watchProjectRoot ?? watchProjectRoot;
+    this.inspectProjectGitEntry = options.inspectProjectGitEntry ?? inspectProjectGitEntry;
     this.clock = options.clock ?? systemClock;
     this.rescanIntervalMs = options.rescanIntervalMs ?? DEFAULT_RESCAN_INTERVAL_MS;
     this.debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
@@ -350,6 +383,8 @@ export class WorkspaceReconciliationService {
             ),
           );
         } catch (error) {
+          // A repository caught mid-creation fails its read; its next event has to get through.
+          this.forgetGitEntries(rootPath);
           this.logger.warn(
             { err: error, rootPath },
             "Skipped workspace reconciliation after Git read failed",
@@ -447,18 +482,21 @@ export class WorkspaceReconciliationService {
       );
       if (alreadyWatching) continue;
       try {
-        let watcher: ProjectRootWatcher;
-        watcher = this.watchProjectRoot(
+        // Read before the watch exists: a `.git` that appears in between raises an event that
+        // compares against the earlier state instead of being taken as already seen.
+        const gitEntry = this.inspectProjectGitEntry(project.rootPath);
+        let target: ProjectRootWatchTarget | null = null;
+        const watcher = this.watchProjectRoot(
           project.rootPath,
           { recursive: false },
           (_event, filename) => {
-            if (filename === null || filename.toString() === ".git") {
-              this.scheduleObservedReconciliation();
-            }
+            if (filename !== null && filename.toString() !== ".git") return;
+            if (target && !this.noteGitEntry(target, filename === null)) return;
+            this.scheduleObservedReconciliation();
           },
           (error) => {
             watcher.close();
-            const index = this.watchers.findIndex((target) => target.watcher === watcher);
+            const index = this.watchers.findIndex((candidate) => candidate.watcher === watcher);
             if (index >= 0) this.watchers.splice(index, 1);
             this.logger.warn(
               { err: error, rootPath: project.rootPath },
@@ -466,7 +504,8 @@ export class WorkspaceReconciliationService {
             );
           },
         );
-        this.watchers.push({ rootPath: project.rootPath, watcher });
+        target = { rootPath: project.rootPath, watcher, gitEntry };
+        this.watchers.push(target);
       } catch (error) {
         // The periodic reconciliation is the convergence path for roots that
         // are temporarily missing or unwatchable.
@@ -474,6 +513,22 @@ export class WorkspaceReconciliationService {
           { err: error, rootPath: project.rootPath },
           "Project root is not watchable yet",
         );
+      }
+    }
+  }
+
+  /** Records what `.git` is now and answers whether that warrants a pass. */
+  private noteGitEntry(target: ProjectRootWatchTarget, unknownChange: boolean): boolean {
+    const next = this.inspectProjectGitEntry(target.rootPath);
+    const moved = unknownChange || target.gitEntry === null || next !== target.gitEntry;
+    target.gitEntry = next;
+    return moved;
+  }
+
+  private forgetGitEntries(rootPath?: string): void {
+    for (const target of this.watchers) {
+      if (rootPath === undefined || areEquivalentPaths(target.rootPath, rootPath)) {
+        target.gitEntry = null;
       }
     }
   }
@@ -526,6 +581,8 @@ export class WorkspaceReconciliationService {
         await this.onWorkspacesChanged?.(Array.from(workspaceIds));
       }
     } catch (error) {
+      // The pass did not converge on what the root watches last saw; let the next event through.
+      this.forgetGitEntries();
       if (!this.disposed) {
         this.logger.warn({ err: error }, "Workspace reconciliation failed");
       }

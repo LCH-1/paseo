@@ -168,6 +168,8 @@ class ObservedPlacements {
   private readonly checkoutByCwd = new Map<string, ProjectCheckoutLitePayload>();
   private readonly rootByProjectId = new Map<string, string>();
   private readonly failedWatchRoots = new Set<string>();
+  // What `.git` is at each root; a real change moves it, an access-time commit does not.
+  private readonly gitEntries = new Map<string, number>();
   private readonly projectEvents: ProjectUpdate[] = [];
   private readonly workspaceEvents: string[][] = [];
   private readonly workspaceEventWaiters: Array<() => void> = [];
@@ -197,6 +199,7 @@ class ObservedPlacements {
       workspaceGitService: { getCheckout: async (cwd) => this.readCheckout(cwd) },
       logger,
       watchProjectRoot,
+      inspectProjectGitEntry: (rootPath) => `entry:${this.gitEntries.get(rootPath) ?? 0}`,
       clock: this.clock,
       debounceMs: DEBOUNCE_MS,
       rescanIntervalMs: RESCAN_INTERVAL_MS,
@@ -245,7 +248,16 @@ class ObservedPlacements {
   }
 
   change(root: string, filename: string | null): void {
+    if (filename === ".git") {
+      const rootPath = this.absolute(root);
+      this.gitEntries.set(rootPath, (this.gitEntries.get(rootPath) ?? 0) + 1);
+    }
     this.activeWatch(root)?.onChange("rename", filename);
+  }
+
+  /** Windows raises this for a `.git` that was only read or written inside. */
+  touchGit(root: string): void {
+    this.activeWatch(root)?.onChange("change", ".git");
   }
 
   makeProjectGit(projectId: string, branch = "main"): void {
@@ -459,6 +471,46 @@ describe("observed workspace placement", () => {
     observed.change("repo", null);
     await observed.advanceBy(DEBOUNCE_MS);
     expect(observed.gitReads).toBe(1);
+    observed.dispose();
+  });
+
+  test("ignores .git events that leave the entry as it was", async () => {
+    const observed = new ObservedPlacements([{ id: "project-one", root: "repo" }]);
+    await observed.start();
+
+    observed.touchGit("repo");
+    observed.touchGit("repo");
+    await observed.advanceBy(DEBOUNCE_MS);
+    expect(observed.gitReads).toBe(0);
+
+    observed.change("repo", ".git");
+    await observed.advanceBy(DEBOUNCE_MS);
+    expect(observed.gitReads).toBe(1);
+
+    observed.touchGit("repo");
+    await observed.advanceBy(DEBOUNCE_MS);
+    expect(observed.gitReads).toBe(1);
+    observed.dispose();
+  });
+
+  test("lets an unchanged .git event through after a failed pass", async () => {
+    const observed = new ObservedPlacements([
+      { id: "project-one", root: "repo", workspaces: [{ id: "workspace-one", cwd: "repo" }] },
+    ]);
+    await observed.start();
+    observed.makeProjectGit("project-one", "main");
+    observed.failNextReconciliation(new Error("registry unavailable"));
+
+    observed.change("repo", ".git");
+    await observed.advanceBy(DEBOUNCE_MS);
+    expect((await observed.placement("workspace-one"))?.kind).toBe("directory");
+
+    observed.touchGit("repo");
+    await observed.advanceBy(DEBOUNCE_MS);
+    expect(await observed.placement("workspace-one")).toMatchObject({
+      kind: "local_checkout",
+      branch: "main",
+    });
     observed.dispose();
   });
 
