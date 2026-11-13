@@ -33,6 +33,11 @@ export function runWithGitCommandPriority<T>(priority: GitProcessPriority, opera
   return gitCommandPriority.run(priority, operation);
 }
 
+/** The priority a Git command started here would get. */
+export function getGitCommandPriority(): GitProcessPriority {
+  return gitCommandPriority.getStore() ?? "normal";
+}
+
 /**
  * Names the caller in runtime metrics for Git commands that were not given a provenance of their
  * own. Wrap one read, not a subscription: timers and watchers created inside keep the label for

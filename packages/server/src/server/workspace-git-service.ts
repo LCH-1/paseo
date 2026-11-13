@@ -54,9 +54,12 @@ import {
 import {
   createRunGitCommand,
   runGitCommand,
+  runWithGitCommandPriority,
   runWithGitCommandProvenance,
   type RunGitCommand,
 } from "../utils/run-git-command.js";
+import type { GitProcessPriority } from "../utils/git-process-scheduler.js";
+import { WorkspaceRefreshAdmission } from "./workspace-refresh-admission.js";
 import { branchNameFromRef } from "../utils/worktree-metadata.js";
 import { listPaseoWorktrees, type PaseoWorktreeInfo } from "../utils/worktree.js";
 import { READ_ONLY_GIT_ENV } from "./checkout-git-utils.js";
@@ -346,7 +349,7 @@ export type WorkspaceGitBranchValidationResult = BranchCheckoutResolution;
 export type WorkspaceGitBranchSuggestion = BranchSuggestion;
 export type WorkspaceGitWorktreeInfo = PaseoWorktreeInfo;
 
-export type WorkspaceGitSnapshotOptions =
+export type WorkspaceGitSnapshotOptions = (
   | {
       force?: false;
       includeForge?: boolean;
@@ -356,7 +359,15 @@ export type WorkspaceGitSnapshotOptions =
       force: true;
       includeForge?: boolean;
       reason: string;
-    };
+    }
+) & {
+  /**
+   * "high" when a client is waiting on this read. A workspace with no snapshot yet then has its
+   * refresh admitted ahead of queued background refreshes and its Git commands run at high
+   * priority, so the workspace on screen does not wait out a startup or reconciliation burst.
+   */
+  priority?: GitProcessPriority;
+};
 
 interface WorkspaceGitRefreshRequest {
   force: boolean;
@@ -467,6 +478,8 @@ interface WorkspaceGitTarget {
   latestForgeLoadedAtMs: number | null;
   latestSnapshot: WorkspaceGitRuntimeSnapshot | null;
   latestSnapshotLoadedAtMs: number | null;
+  /** A client is waiting for this workspace's first snapshot. */
+  clientWaiting: boolean;
   latestFacts: CheckoutSnapshotFacts | null;
   factsPromise: Promise<CheckoutSnapshotFacts> | null;
   latestFingerprint: string | null;
@@ -637,10 +650,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   private readonly fileObserver: FileObserver;
   private readonly deps: WorkspaceGitServiceDependencies;
   private readonly forgeResolver: ForgeResolver;
-  private readonly workspaceRefreshLimit = pLimit({
-    concurrency: WORKSPACE_GIT_REFRESH_CONCURRENCY,
-    rejectOnClear: true,
-  });
+  private readonly workspaceRefreshLimit = new WorkspaceRefreshAdmission(
+    WORKSPACE_GIT_REFRESH_CONCURRENCY,
+  );
   private readonly workspaceObservationSetupLimit = pLimit({
     concurrency: WORKSPACE_GIT_OBSERVATION_SETUP_CONCURRENCY,
     rejectOnClear: true,
@@ -800,6 +812,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     const target = this.ensureWorkspaceTarget(cwd);
     if (!request.force && target.latestSnapshot) {
       return target.latestSnapshot;
+    }
+    if (options?.priority === "high" && !target.latestSnapshot) {
+      target.clientWaiting = true;
     }
 
     return this.requestWorkspaceSnapshot(target, request);
@@ -1313,6 +1328,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       latestForgeLoadedAtMs: null,
       latestSnapshot: null,
       latestSnapshotLoadedAtMs: null,
+      clientWaiting: false,
       latestFacts: null,
       factsPromise: null,
       latestFingerprint: null,
@@ -3352,12 +3368,17 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       }
       try {
         const runRefreshGitCommand = createRunGitCommand(`workspace-refresh:${request.reason}`);
-        const admittedSnapshot = await this.workspaceRefreshLimit(() => {
-          if (target.closed || this.workspaceTargets.get(target.cwd) !== target) {
-            return null;
-          }
-          return this.refreshSnapshot(target, request, runRefreshGitCommand);
-        });
+        const admittedSnapshot = await this.workspaceRefreshLimit.run(
+          () => {
+            if (target.closed || this.workspaceTargets.get(target.cwd) !== target) {
+              return null;
+            }
+            const refresh = () => this.refreshSnapshot(target, request, runRefreshGitCommand);
+            return target.clientWaiting ? runWithGitCommandPriority("high", refresh) : refresh();
+          },
+          () => target.clientWaiting,
+        );
+        target.clientWaiting = false;
         if (!admittedSnapshot) {
           break;
         }

@@ -3,6 +3,7 @@ import os from "node:os";
 import path, { join } from "node:path";
 import type pino from "pino";
 import type { ForgeService } from "../services/forge-service.js";
+import { getGitCommandPriority } from "../utils/run-git-command.js";
 import type {
   CheckoutSnapshotFacts,
   CheckoutStatusGit,
@@ -330,6 +331,51 @@ describe("WorkspaceGitServiceImpl", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  test("a workspace a client waits on is refreshed ahead of queued ones at high Git priority", async () => {
+    const busyCwds = Array.from({ length: WORKSPACE_GIT_REFRESH_CONCURRENCY }, (_, index) =>
+      path.resolve(`/tmp/busy-repo-${index}`),
+    );
+    const queuedCwd = path.resolve("/tmp/queued-repo");
+    const visibleCwd = path.resolve("/tmp/visible-repo");
+    const gates = new Map(busyCwds.map((cwd) => [cwd, createDeferred<CheckoutStatusGit>()]));
+    const started: Array<{ cwd: string; priority: string }> = [];
+    const getCheckoutStatus = vi.fn((cwd: string) => {
+      started.push({ cwd, priority: getGitCommandPriority() });
+      return gates.get(cwd)?.promise ?? Promise.resolve(createCheckoutStatus(cwd));
+    });
+    const service = createService({ getCheckoutStatus });
+
+    const busy = busyCwds.map((cwd) => service.getSnapshot(cwd, { includeForge: false }));
+    await vi.waitFor(() => expect(started).toHaveLength(WORKSPACE_GIT_REFRESH_CONCURRENCY));
+    const queued = service.getSnapshot(queuedCwd, { includeForge: false });
+    const background = service.getSnapshot(visibleCwd, { includeForge: false });
+    const visible = service.getSnapshot(visibleCwd, { includeForge: false, priority: "high" });
+    expect(service.getMetrics().workspaceRefreshAdmissionPendingCount).toBe(2);
+
+    gates.get(busyCwds[0]!)?.resolve(createCheckoutStatus(busyCwds[0]!));
+    await expect(visible).resolves.toMatchObject({ cwd: visibleCwd });
+    await expect(background).resolves.toMatchObject({ cwd: visibleCwd });
+    expect(started[WORKSPACE_GIT_REFRESH_CONCURRENCY]).toEqual({
+      cwd: visibleCwd,
+      priority: "high",
+    });
+    expect(started.slice(0, WORKSPACE_GIT_REFRESH_CONCURRENCY)).toEqual(
+      busyCwds.map((cwd) => ({ cwd, priority: "normal" })),
+    );
+
+    for (const cwd of busyCwds.slice(1)) gates.get(cwd)?.resolve(createCheckoutStatus(cwd));
+    await Promise.all([...busy, queued]);
+    expect(started.slice(WORKSPACE_GIT_REFRESH_CONCURRENCY)).toEqual([
+      { cwd: visibleCwd, priority: "high" },
+      { cwd: queuedCwd, priority: "normal" },
+    ]);
+
+    // Once there is a snapshot, a waiting client reads it without any Git work.
+    await service.getSnapshot(visibleCwd, { priority: "high" });
+    expect(started.filter((read) => read.cwd === visibleCwd)).toHaveLength(1);
+    service.dispose();
   });
 
   test("registerWorkspace returns a subscription without an initial snapshot contract", async () => {

@@ -238,7 +238,10 @@ export class CheckoutSession {
     const resolvedCwd = expandTilde(cwd);
 
     try {
-      const snapshot = await this.workspaceGitService.getSnapshot(resolvedCwd);
+      // A client is on this workspace; its first read goes ahead of background Git work.
+      const snapshot = await this.workspaceGitService.getSnapshot(resolvedCwd, {
+        priority: "high",
+      });
       this.host.emit({
         type: "checkout_status_response",
         payload: buildCheckoutStatusPayloadFromSnapshot({

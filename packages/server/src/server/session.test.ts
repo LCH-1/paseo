@@ -4558,7 +4558,10 @@ describe("session checkout status handling", () => {
     });
 
     expect(workspaceGitService.getSnapshot).toHaveBeenCalledTimes(1);
-    expect(workspaceGitService.getSnapshot).toHaveBeenCalledWith("/tmp/service-worktree");
+    // The client is waiting on this workspace, so its first read outranks background Git work.
+    expect(workspaceGitService.getSnapshot).toHaveBeenCalledWith("/tmp/service-worktree", {
+      priority: "high",
+    });
     expect(checkoutGitMocks.getCheckoutStatus).not.toHaveBeenCalled();
     expect(messages).toContainEqual({
       type: "checkout_status_response",
