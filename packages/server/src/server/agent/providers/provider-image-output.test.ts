@@ -96,6 +96,25 @@ describe("isProviderImageMarkdown", () => {
     expect(renderImageMarkdown(imagePath)).toBe(`\n\n![Image](${expectedSource})\n\n`);
   });
 
+  test.each([
+    ["Windows", `D:\\Paseo Data (main)\\.paseo\\runtime\\provider-images\\${HASH}.png`],
+    ["POSIX", `/home/me/Paseo (main)/.paseo/runtime/provider-images/${HASH}.png`],
+  ])("matches an image under a %s Paseo home with parentheses", (_label, imagePath) => {
+    const markdown = renderImageMarkdown(imagePath);
+
+    expect(markdown).toContain("(main\\)");
+    expect(isProviderImageMarkdown(markdown)).toBe(true);
+  });
+
+  test("matches an image whose alt text carries an escaped bracket", () => {
+    const item = renderProviderImageOutputAsAssistantMarkdown({
+      path: `/tmp/paseo-attachments/${HASH}.png`,
+      altText: "chart [v2]",
+    });
+
+    expect(item?.type === "assistant_message" && isProviderImageMarkdown(item.text)).toBe(true);
+  });
+
   test("rejects user-authored markdown that is not a materialized attachment", () => {
     // No content hash — a hand-written path, not something the writer produced.
     expect(isProviderImageMarkdown("![diagram](./paseo-attachments/notes.png)")).toBe(false);
@@ -199,6 +218,35 @@ describe("daemon provider image directory", () => {
     expect(existsSync(directory)).toBe(false);
   });
 
+  test("gives a running daemon its folder back when a daemon started after it stops", () => {
+    const first = providerImageDirectory(path.join(paseoHome, "first"));
+    const second = providerImageDirectory(path.join(paseoHome, "second"));
+    release = configureProviderImageDirectory(first);
+    const releaseSecond = configureProviderImageDirectory(second);
+    const written = () =>
+      path.dirname(materializeProviderImage({ data: "YWJjMTIz", mimeType: "image/png" }).path);
+
+    try {
+      expect(written()).toBe(second);
+    } finally {
+      releaseSecond();
+    }
+    expect(written()).toBe(first);
+  });
+
+  test("keeps the second daemon's folder when the first one stops", () => {
+    const first = providerImageDirectory(path.join(paseoHome, "first"));
+    const second = providerImageDirectory(path.join(paseoHome, "second"));
+    const releaseFirst = configureProviderImageDirectory(first);
+    release = configureProviderImageDirectory(second);
+
+    releaseFirst();
+
+    expect(
+      path.dirname(materializeProviderImage({ data: "YWJjMTIz", mimeType: "image/png" }).path),
+    ).toBe(second);
+  });
+
   test("removes a process's own temp folder when the process exits", () => {
     const materialized = materializeProviderImage({ data: "YWJjMTIz", mimeType: "image/png" });
     const tempDirectory = path.dirname(materialized.path);
@@ -233,6 +281,30 @@ describe("daemon provider image directory", () => {
     expect(readdirSync(directory).sort()).toEqual(
       [path.basename(fresh), path.basename(foreign)].sort(),
     );
+  });
+
+  test("prunes every stale image of a folder larger than one batch", async () => {
+    const directory = providerImageDirectory(paseoHome);
+    mkdirSync(directory, { recursive: true });
+    const now = Date.parse("2026-11-13T12:00:00.000Z");
+    const stale = new Date(now - 91 * 24 * 60 * 60 * 1000);
+    const names = Array.from(
+      { length: 50 },
+      (_, index) => `${index.toString(16).padStart(64, "0")}.png`,
+    );
+    for (const [index, name] of names.entries()) {
+      writeFileSync(path.join(directory, name), "image");
+      if (index % 2 === 0) utimesSync(path.join(directory, name), stale, stale);
+    }
+
+    const result = await pruneProviderImages({
+      directory,
+      maxAgeMs: PROVIDER_IMAGE_RETENTION_MS,
+      now,
+    });
+
+    expect(result).toEqual({ removedFiles: 25, removedBytes: 125, keptFiles: 25 });
+    expect(readdirSync(directory).sort()).toEqual(names.filter((_, index) => index % 2 === 1));
   });
 
   test("prunes nothing when the folder does not exist yet", async () => {

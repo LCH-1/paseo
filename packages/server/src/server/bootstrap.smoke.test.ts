@@ -145,6 +145,7 @@ describe("paseo daemon bootstrap", () => {
       );
       removeProcessProviderImageDirectories();
       await rm(paseoHomeRoot, { recursive: true, force: true });
+      await rm(daemonHandle.staticDir, { recursive: true, force: true });
     }
     // A stopped daemon's home is not written to again by the process that hosted it.
     expect(afterStop).not.toBe(imageDirectory);

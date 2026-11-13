@@ -4,6 +4,10 @@ import * as fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import {
+  ensurePrivateDirectory as ensurePrivatePaseoHomeDirectory,
+  ensurePrivateFile as ensurePrivatePaseoHomeFile,
+} from "../../private-files.js";
 import type { AgentTimelineItem } from "../agent-sdk-types.js";
 
 export interface ProviderImageOutput {
@@ -26,12 +30,16 @@ const MATERIALIZED_IMAGE_FILE_MODE = 0o600;
 const MATERIALIZED_IMAGE_FILE_NAME = /^[0-9a-f]{64}\.[a-z0-9]+$/;
 
 /**
- * How long an image the daemon has not rewritten is kept. Replay rewrites every image it
- * renders, so an image a timeline still shows stays fresh. The rest are referenced only by path
- * from provider-owned history (a Codex image attachment, the path Pi and OMP pass to a text-only
- * model), so they live as long as that history is kept.
+ * How long an image is kept after it was last written. Replay rewrites every image it renders,
+ * so an image a timeline still shows stays fresh. The rest are referenced only by path from
+ * provider-owned history (a Codex image attachment, the path Pi and OMP pass to a text-only
+ * model) and nothing rewrites them: they go this long after the prompt that attached them, the
+ * same horizon Claude and Codex conversation history is kept for.
  */
 export const PROVIDER_IMAGE_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** Ages are read this many at a time: one by one, 3,000 images held daemon startup ~0.3s. */
+const PRUNE_CONCURRENCY = 16;
 
 /** Where the daemon keeps provider images: one folder per Paseo home, reused across restarts. */
 export function providerImageDirectory(paseoHome: string): string {
@@ -39,8 +47,9 @@ export function providerImageDirectory(paseoHome: string): string {
 }
 
 // Set by the daemon. Anything else that imports a provider (a test, a script) writes to a temp
-// folder of its own instead of a Paseo home it was never told about.
-let configuredImageDirectory: string | null = null;
+// folder of its own instead of a Paseo home it was never told about. The latest registration
+// wins; when an in-process daemon stops, one still running gets its folder back.
+const configuredImageDirectories: Array<{ directory: string }> = [];
 let processImageDirectory: string | null = null;
 const processImageDirectories = new Set<string>();
 let removesProcessImageDirectoriesOnExit = false;
@@ -51,15 +60,17 @@ let removesProcessImageDirectoriesOnExit = false;
  * and delete their home while the process lives on.
  */
 export function configureProviderImageDirectory(directory: string): () => void {
-  configuredImageDirectory = directory;
+  const registration = { directory };
+  configuredImageDirectories.push(registration);
   return () => {
-    if (configuredImageDirectory === directory) configuredImageDirectory = null;
+    const index = configuredImageDirectories.indexOf(registration);
+    if (index >= 0) configuredImageDirectories.splice(index, 1);
   };
 }
 
-function ensurePrivateDirectory(dir: string, options: { followLinks: boolean }): boolean {
+function ensurePrivateDirectory(dir: string): boolean {
   try {
-    const stats = options.followLinks ? fsSync.statSync(dir) : fsSync.lstatSync(dir);
+    const stats = fsSync.lstatSync(dir);
     if (!stats.isDirectory()) {
       return false;
     }
@@ -83,23 +94,23 @@ export function removeProcessProviderImageDirectories(): void {
   processImageDirectory = null;
 }
 
-function getMaterializedImageAttachmentDir(): string {
-  if (configuredImageDirectory) {
-    if (!ensurePrivateDirectory(configuredImageDirectory, { followLinks: true })) {
-      fsSync.mkdirSync(configuredImageDirectory, {
-        recursive: true,
-        mode: PRIVATE_ATTACHMENT_DIR_MODE,
-      });
-      fsSync.chmodSync(configuredImageDirectory, PRIVATE_ATTACHMENT_DIR_MODE);
-    }
-    return configuredImageDirectory;
+interface ImageAttachmentDirectory {
+  path: string;
+  /** Under a Paseo home, where permissions are tightened only as far as the filesystem allows. */
+  inPaseoHome: boolean;
+}
+
+function getMaterializedImageAttachmentDir(): ImageAttachmentDirectory {
+  const configured = configuredImageDirectories[configuredImageDirectories.length - 1];
+  if (configured) {
+    // Like every other private folder in the Paseo home: a home on a filesystem that rejects
+    // chmod still gets its images.
+    ensurePrivatePaseoHomeDirectory(configured.directory);
+    return { path: configured.directory, inPaseoHome: true };
   }
 
-  if (
-    processImageDirectory &&
-    ensurePrivateDirectory(processImageDirectory, { followLinks: false })
-  ) {
-    return processImageDirectory;
+  if (processImageDirectory && ensurePrivateDirectory(processImageDirectory)) {
+    return { path: processImageDirectory, inPaseoHome: false };
   }
 
   // The pid tells a cleanup tool whether the owner is still running. A killed process (test
@@ -113,7 +124,7 @@ function getMaterializedImageAttachmentDir(): string {
     removesProcessImageDirectoriesOnExit = true;
   }
   processImageDirectories.add(processImageDirectory);
-  return processImageDirectory;
+  return { path: processImageDirectory, inPaseoHome: false };
 }
 
 export interface ProviderImagePruneResult {
@@ -141,22 +152,34 @@ export async function pruneProviderImages(input: {
     throw error;
   }
   const cutoff = (input.now ?? Date.now()) - input.maxAgeMs;
-  for (const entry of entries) {
-    if (!entry.isFile() || !MATERIALIZED_IMAGE_FILE_NAME.test(entry.name)) continue;
-    const filePath = path.join(input.directory, entry.name);
-    try {
-      const stats = await fsPromises.stat(filePath);
-      if (stats.mtimeMs >= cutoff) {
-        result.keptFiles += 1;
-        continue;
+  const images = entries.filter(
+    (entry) => entry.isFile() && MATERIALIZED_IMAGE_FILE_NAME.test(entry.name),
+  );
+  let next = 0;
+  const failures: unknown[] = [];
+  const pruneNext = async (): Promise<void> => {
+    // Stops at the first failure, and the caller waits for every worker: nothing is removed
+    // after this function returns and replay starts rewriting images.
+    while (failures.length === 0 && next < images.length) {
+      const filePath = path.join(input.directory, images[next++]!.name);
+      try {
+        const stats = await fsPromises.stat(filePath);
+        if (stats.mtimeMs >= cutoff) {
+          result.keptFiles += 1;
+          continue;
+        }
+        await fsPromises.unlink(filePath);
+        result.removedFiles += 1;
+        result.removedBytes += stats.size;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") failures.push(error);
       }
-      await fsPromises.unlink(filePath);
-      result.removedFiles += 1;
-      result.removedBytes += stats.size;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw error;
     }
-  }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(PRUNE_CONCURRENCY, images.length) }, () => pruneNext()),
+  );
+  if (failures.length > 0) throw failures[0];
   return result;
 }
 
@@ -201,9 +224,10 @@ export function materializeProviderImage(image: {
   const bytes = Buffer.from(normalized.data, "base64");
   const extension = getImageExtension(normalized.mimeType);
   const hash = createHash("sha256").update(bytes).digest("hex");
-  const filePath = path.join(attachmentsDir, `${hash}.${extension}`);
+  const filePath = path.join(attachmentsDir.path, `${hash}.${extension}`);
   fsSync.writeFileSync(filePath, bytes, { mode: MATERIALIZED_IMAGE_FILE_MODE });
-  fsSync.chmodSync(filePath, MATERIALIZED_IMAGE_FILE_MODE);
+  if (attachmentsDir.inPaseoHome) ensurePrivatePaseoHomeFile(filePath);
+  else fsSync.chmodSync(filePath, MATERIALIZED_IMAGE_FILE_MODE);
   return { path: filePath };
 }
 
@@ -211,9 +235,10 @@ export function materializeProviderImage(image: {
 // file in the daemon's image folder, or in the temp folder older releases and non-daemon processes
 // use. Matching the full <hash>.<ext> shape (not just a leading "![") keeps user-authored text
 // from being mistaken for a provider image during history replay. The separator still accepts old
-// doubled-backslash Windows history; new Windows output uses file URIs.
+// doubled-backslash Windows history; new Windows output uses file URIs. Alt text and source may
+// carry backslash escapes: a Paseo home such as "D:\Paseo Data (main)" puts "\)" in the source.
 const PROVIDER_IMAGE_MARKDOWN = new RegExp(
-  `^!\\[[^\\]]*\\]\\([^)]*(?:${PROVIDER_IMAGE_ATTACHMENT_DIR}(?:-[^/\\\\)]+)?|${PROVIDER_IMAGE_DIR})[/\\\\]+(?:[^/\\\\)]+[/\\\\]+)?[0-9a-f]{64}\\.[a-z0-9]+\\)`,
+  `^!\\[(?:\\\\.|[^\\]])*\\]\\((?:\\\\\\)|[^)])*(?:${PROVIDER_IMAGE_ATTACHMENT_DIR}(?:-[^/\\\\)]+)?|${PROVIDER_IMAGE_DIR})[/\\\\]+(?:[^/\\\\)]+[/\\\\]+)?[0-9a-f]{64}\\.[a-z0-9]+\\)`,
 );
 
 export function isProviderImageMarkdown(text: string): boolean {
