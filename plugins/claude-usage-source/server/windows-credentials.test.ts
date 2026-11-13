@@ -1,9 +1,21 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readWindowsCredentials, type ReadCredentials } from "./windows-credentials.js";
-import { discover, fetchUsage, profilesForProviders, resolveClaudeCredentials } from "./usage.js";
+import {
+  readWindowsCredentials,
+  readWindowsCredentialsMany,
+  snapshotReader,
+  snapshotScript,
+  type ReadSnapshots,
+} from "./windows-credentials.js";
+import {
+  discover,
+  fetchUsage,
+  profilesForProviders,
+  RecentWindowsReads,
+  resolveClaudeCredentials,
+} from "./usage.js";
 import { hashAccountKey } from "@getpaseo/plugin/server/usage";
 import { inputSchema } from "../shared/input.js";
 import {
@@ -20,12 +32,27 @@ import {
   windowsHost,
 } from "../test/windows-host.js";
 
-/** A stand-in for the PowerShell helper: every call is one process answering all its targets. */
+/**
+ * A stand-in for the PowerShell helper: every call is one process. Like the helper, it reads a
+ * login's metadata and unsplit record, then the chunks the metadata names and the metadata again.
+ */
 function helperProcess(read: (target: string) => string | null | undefined) {
   const starts: string[][] = [];
-  const readCredentials: ReadCredentials = async (targets) => {
-    starts.push(targets);
-    return targets.map((target) => read(target) ?? null);
+  const readCredentials: ReadSnapshots = async (names) => {
+    starts.push(names);
+    return names.map((name) => {
+      const meta = read(name + "#m") ?? null;
+      const snapshot = { meta, raw: read(name) ?? null, parts: null, after: null };
+      let count = 0;
+      try {
+        count = Math.round(Number(JSON.parse(meta ?? "null")?.n));
+      } catch {
+        count = 0;
+      }
+      if (meta === null || !(count >= 1 && count <= 256)) return snapshot;
+      const parts = Array.from({ length: count }, (_, index) => read(`${name}#${index}`) ?? null);
+      return { ...snapshot, parts, after: read(name + "#m") ?? null };
+    });
   };
   return { starts, readCredentials };
 }
@@ -164,15 +191,15 @@ describe("Claude Windows credentials", () => {
       "Incomplete",
     );
   });
-  it("starts one helper process for an unsplit or missing login and two for a split one", async () => {
+  it("starts one helper process for an unsplit, missing or split login", async () => {
     const value = { claudeAiOauth: { accessToken: "fixture-only" } };
     const name = "fixture/claude-code-user";
     const legacy = helperProcess((target) => (target === name ? JSON.stringify(value) : null));
-    await readWindowsCredentials("fixture", legacy.readCredentials);
-    expect(legacy.starts).toEqual([[name + "#m", name]]);
+    expect(await readWindowsCredentials("fixture", legacy.readCredentials)).toEqual(value);
+    expect(legacy.starts).toEqual([[name]]);
     const missing = helperProcess(() => null);
     expect(await readWindowsCredentials("fixture", missing.readCredentials)).toBeNull();
-    expect(missing.starts).toEqual([[name + "#m", name]]);
+    expect(missing.starts).toEqual([[name]]);
     const encoded = Buffer.from(JSON.stringify(value)).toString("base64");
     const chunks = [encoded.slice(0, 20), encoded.slice(20)];
     const split = helperProcess((target) =>
@@ -180,11 +207,96 @@ describe("Claude Windows credentials", () => {
         ? JSON.stringify({ n: 2, l: encoded.length })
         : chunks[Number(target.at(-1))],
     );
-    await readWindowsCredentials("fixture", split.readCredentials);
-    expect(split.starts).toEqual([
-      [name + "#m", name],
-      [name + "#0", name + "#1", name + "#m"],
+    expect(await readWindowsCredentials("fixture", split.readCredentials)).toEqual(value);
+    expect(split.starts).toEqual([[name]]);
+  });
+
+  it("reads several services in one helper process and retries only a login being rewritten", async () => {
+    const value = (token: string) => ({ claudeAiOauth: { accessToken: token } });
+    const encoded = Buffer.from(JSON.stringify(value("isolated-split"))).toString("base64");
+    let splitReads = 0;
+    const helper = helperProcess((target) => {
+      if (target === "plain/claude-code-user") return JSON.stringify(value("isolated-plain"));
+      if (target === "split/claude-code-user#m") {
+        splitReads++;
+        return JSON.stringify({ n: 1, l: encoded.length });
+      }
+      // The first read finds the chunk not yet written.
+      if (target === "split/claude-code-user#0") return splitReads > 2 ? encoded : null;
+      if (target === "broken/claude-code-user") return "{";
+      return null;
+    });
+    const [plain, split, missing, broken] = readWindowsCredentialsMany(
+      ["plain", "split", "missing", "broken"],
+      helper.readCredentials,
+    );
+    expect(await plain).toEqual(value("isolated-plain"));
+    expect(await split).toEqual(value("isolated-split"));
+    expect(await missing).toBeNull();
+    await expect(broken).rejects.toThrow(SyntaxError);
+    expect(helper.starts).toEqual([
+      ["plain", "split", "missing", "broken"].map((service) => service + "/claude-code-user"),
+      ["split/claude-code-user", "broken/claude-code-user"],
+      ["broken/claude-code-user"],
     ]);
+  });
+
+  it.runIf(process.platform === "win32")(
+    "the PowerShell helper reads unsplit, missing, one-chunk and two-chunk logins in one process",
+    async () => {
+      const value = { claudeAiOauth: { accessToken: "isolated-helper-script" } };
+      const encoded = Buffer.from(JSON.stringify(value)).toString("base64");
+      const meta = (n: number) => JSON.stringify({ n, l: encoded.length });
+      const held: Record<string, string> = {
+        "plain/claude-code-user": JSON.stringify(value),
+        "one/claude-code-user#m": meta(1),
+        "one/claude-code-user#0": encoded,
+        "two/claude-code-user#m": meta(2),
+        "two/claude-code-user#0": encoded.slice(0, 20),
+        "two/claude-code-user#1": encoded.slice(20),
+      };
+      // The helper's own script, with its credential reader standing in for Windows: the store
+      // is never opened.
+      const entries = Object.entries(held)
+        .map(([name, blob]) => `Store.Add("${name}","${Buffer.from(blob).toString("base64")}");`)
+        .join(" ");
+      const standIn = `using System; using System.Collections.Generic;
+public static class PaseoProviderCredentials {
+ static Dictionary<string,string> Store = new Dictionary<string,string>();
+ static PaseoProviderCredentials() { ${entries} }
+ public static object Read(string target) { string blob; return Store.TryGetValue(target, out blob) ? new {value=blob,updatedAt=0.0} : null; }
+}`;
+      const script = snapshotScript.replace(
+        /Add-Type -TypeDefinition @'[\s\S]*?'@/,
+        () => `Add-Type -TypeDefinition @'\n${standIn}\n'@`,
+      );
+      expect(script).not.toBe(snapshotScript);
+      const read = snapshotReader(script);
+      const starts: string[][] = [];
+      const counted: ReadSnapshots = (names) => {
+        starts.push(names);
+        return read(names);
+      };
+      const [plain, missing, one, two] = readWindowsCredentialsMany(
+        ["plain", "missing", "one", "two"],
+        counted,
+      );
+      expect(await plain).toEqual(value);
+      expect(await missing).toBeNull();
+      expect(await one).toEqual(value);
+      expect(await two).toEqual(value);
+      expect(starts).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  it("fails every service of a helper process that could not run, and only those", async () => {
+    const failure = new Error("Claude Windows credential store could not be read");
+    const [first, second] = readWindowsCredentialsMany(["first", "second"], async () => {
+      throw failure;
+    });
+    await expect(first).rejects.toBe(failure);
+    await expect(second).rejects.toBe(failure);
   });
   it("rejects a split login whose metadata changes while its chunks are read", async () => {
     const encoded = Buffer.from(JSON.stringify({ claudeAiOauth: {} })).toString("base64");
@@ -615,5 +727,134 @@ describe("the daemon's own Windows login", () => {
       GATEWAY,
     );
     expect(await listedServices(lookup)).toEqual([DAEMON_LOGIN]);
+  });
+});
+
+describe("Windows logins read once per renewal", () => {
+  const FIRST = "C:/fixture/batched/first";
+  const SECOND = "C:/fixture/batched/second";
+
+  /** A Windows host whose credential store is the stand-in helper, so every process is counted. */
+  function batchedHost(store: Record<string, unknown>, recent?: RecentWindowsReads) {
+    const home = mkdtempSync(join(tmpdir(), "claude-windows-batched-"));
+    onTestFinished(() => rmSync(home, { recursive: true, force: true }));
+    mkdirSync(join(home, ".paseo"));
+    writeFileSync(
+      join(home, ".paseo", "config.json"),
+      JSON.stringify(
+        providers({
+          claude: {},
+          first: { extends: "claude", env: { CLAUDE_CONFIG_DIR: FIRST } },
+          second: { extends: "claude", env: { CLAUDE_CONFIG_DIR: SECOND } },
+        }),
+      ),
+    );
+    const helper = helperProcess((name) => {
+      if (name.includes("#")) return null;
+      const held = store[name.slice(0, -"/claude-code-user".length)];
+      return held === undefined ? null : JSON.stringify(held);
+    });
+    const lookup = {
+      home,
+      env: { USERPROFILE: home },
+      platform: "win32" as const,
+      readWindowsSnapshots: helper.readCredentials,
+      recentWindowsReads: recent,
+    };
+    return { helper, lookup };
+  }
+
+  /** The vendor: profiles name each token's owner; usage rejects the tokens listed. */
+  function vendor(rejected: string[] = []) {
+    const usage: string[] = [];
+    const api: typeof fetch = async (url, init) => {
+      const token = new Headers(init?.headers).get("Authorization")?.replace("Bearer ", "") ?? "";
+      if (String(url).endsWith("/profile"))
+        return Response.json({ account: { uuid: token }, organization: { uuid: "org" } });
+      usage.push(token);
+      if (rejected.includes(token)) return new Response(null, { status: 401 });
+      return Response.json({ five_hour: { utilization: 20, resets_at: "2026-10-27T00:00:00Z" } });
+    };
+    return { api, usage };
+  }
+
+  it("a discovery reads every login it may report in one helper process, and so does a profile read", async () => {
+    const { helper, lookup } = batchedHost({
+      [DAEMON_LOGIN]: login("isolated-batched-daemon"),
+      [serviceFor(FIRST)]: login("isolated-batched-first"),
+      [serviceFor(SECOND)]: login("isolated-batched-second"),
+    });
+    const accounts = await discover({ kind: "global" }, lookup, vendor().api);
+    expect(accounts.map((account) => account.key)).toEqual([
+      "isolated-batched-daemon.org",
+      "isolated-batched-first.org",
+      "isolated-batched-second.org",
+    ]);
+    expect(helper.starts).toEqual([
+      [DAEMON_LOGIN, serviceFor(FIRST), serviceFor(SECOND)].map(
+        (service) => service + "/claude-code-user",
+      ),
+    ]);
+    const profiles = await profilesForProviders(["first", "second"], vendor().api, lookup);
+    expect(profiles.map((profile) => profile.status)).toEqual(["ready", "ready"]);
+    expect(helper.starts).toHaveLength(2);
+    expect(helper.starts[1]).toHaveLength(2);
+  });
+
+  it("a usage fetch right after a discovery uses the login it read, once and only within seconds", async () => {
+    let now = Date.parse("2026-11-13T09:00:00Z");
+    const recent = new RecentWindowsReads(5_000, () => now);
+    const { helper, lookup } = batchedHost(
+      {
+        [DAEMON_LOGIN]: login("isolated-reused-daemon"),
+        [serviceFor(FIRST)]: login("isolated-reused-first"),
+        [serviceFor(SECOND)]: login("isolated-reused-second"),
+      },
+      recent,
+    );
+    const { api, usage } = vendor();
+    const accounts = await discover({ kind: "global" }, lookup, api);
+    expect(helper.starts).toHaveLength(1);
+    for (const account of accounts)
+      expect((await fetchUsage(inputSchema.parse(account.input), api, lookup)).status).toBe(
+        "available",
+      );
+    expect(helper.starts).toHaveLength(1);
+    expect(usage).toEqual([
+      "isolated-reused-daemon",
+      "isolated-reused-first",
+      "isolated-reused-second",
+    ]);
+    // Taken once: a second fetch, such as a targeted refresh, reads the store again.
+    await fetchUsage(inputSchema.parse(accounts[0]!.input), api, lookup);
+    expect(helper.starts).toHaveLength(2);
+    // And only shortly after the discovery.
+    await discover({ kind: "global" }, lookup, api);
+    now += 5_001;
+    await fetchUsage(inputSchema.parse(accounts[0]!.input), api, lookup);
+    expect(helper.starts).toHaveLength(4);
+  });
+
+  it("a login replaced after discovery read it is read again rather than reported rejected", async () => {
+    const recent = new RecentWindowsReads();
+    const store: Record<string, unknown> = { [DAEMON_LOGIN]: login("isolated-replaced-old") };
+    const { helper, lookup } = batchedHost(store, recent);
+    const { api, usage } = vendor(["isolated-replaced-old", "isolated-still-rejected"]);
+    const input = { route: { store: "windows-credman" as const, service: DAEMON_LOGIN } };
+    await discover({ kind: "global" }, lookup, api);
+    store[DAEMON_LOGIN] = login("isolated-replaced-new");
+    expect((await fetchUsage(input, api, lookup)).status).toBe("available");
+    expect(usage).toEqual(["isolated-replaced-old", "isolated-replaced-new"]);
+    // A login the vendor rejects while the store still holds it is asked about once.
+    store[DAEMON_LOGIN] = login("isolated-still-rejected");
+    await discover({ kind: "global" }, lookup, api);
+    usage.length = 0;
+    const starts = helper.starts.length;
+    expect(await fetchUsage(input, api, lookup)).toEqual({
+      status: "unavailable",
+      problem: { kind: "rejected", status: 401, refreshedBy: "claude" },
+    });
+    expect(usage).toEqual(["isolated-still-rejected"]);
+    expect(helper.starts).toHaveLength(starts + 1);
   });
 });

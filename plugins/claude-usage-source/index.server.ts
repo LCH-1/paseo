@@ -5,6 +5,7 @@ import {
   discover,
   fetchUsage,
   profilesForProviders,
+  RecentWindowsReads,
   type ClaudeCredentialLookup,
 } from "./server/usage.js";
 import { defineRpc } from "@getpaseo/plugin";
@@ -53,12 +54,18 @@ export default function contribute(
       profiles: await profilesForProviders(providerIds, fetchApi, lookup),
     }),
   );
+  // A renewal fetches right after its discovery, so the fetch takes the login discovery just read
+  // instead of starting another PowerShell. Subscription checks above always read the store.
+  const sourceLookup: ClaudeCredentialLookup = {
+    ...lookup,
+    recentWindowsReads: lookup.recentWindowsReads ?? new RecentWindowsReads(),
+  };
   const pending = new Map<string, ReturnType<typeof discover>>();
   const sharedDiscover = (scope: UsageScope) => {
     const key = hashAccountKey(JSON.stringify(scope));
     const existing = pending.get(key);
     if (existing) return existing;
-    const request = discover(scope, lookup, fetchApi).finally(() => {
+    const request = discover(scope, sourceLookup, fetchApi).finally(() => {
       if (pending.get(key) === request) pending.delete(key);
     });
     pending.set(key, request);
@@ -71,7 +78,7 @@ export default function contribute(
     icon: "icon.svg",
     input: inputSchema,
     discover: sharedDiscover,
-    fetch: (input: UsageInput) => fetchUsage(input, fetchApi, lookup),
+    fetch: (input: UsageInput) => fetchUsage(input, fetchApi, sourceLookup),
   });
   // COMPAT(windowsUsageIdentity): preserve existing cards and pinning. The engine,
   // credential reads, profile cache and fetch cache are shared with `claude`.
@@ -98,7 +105,7 @@ export default function contribute(
     fetch: async (input) => {
       if (!(await compatibilityEnabled(lookup)))
         throw Error("Windows usage compatibility is disabled");
-      return fetchUsage(inputSchema.parse(input), fetchApi, lookup);
+      return fetchUsage(inputSchema.parse(input), fetchApi, sourceLookup);
     },
   });
   return () => {};

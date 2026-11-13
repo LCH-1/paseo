@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,7 +8,10 @@ import { configuredClaudeProviders } from "./claude-provider-config.js";
 import { inputSchema, type UsageInput } from "../shared/input.js";
 import { hashAccountKey, type UsageReport } from "@getpaseo/plugin/server/usage";
 
-vi.mock("./windows-credentials.js", () => ({ readWindowsCredentials: vi.fn(async () => null) }));
+vi.mock("./windows-credentials.js", () => ({
+  readWindowsCredentials: vi.fn(async () => null),
+  readWindowsCredentialsMany: vi.fn((services: string[]) => services.map(async () => null)),
+}));
 vi.mock("./claude-provider-config.js", () => {
   const configured = vi.fn(async () => []);
   return {
@@ -794,7 +797,7 @@ it("identifies the same credential route that fetch uses when oauthAccount is ab
   }
 });
 
-it("expires cached token profiles after five minutes", async () => {
+it("keeps a token's identity for an hour of discoveries", async () => {
   let now = 0;
   let calls = 0;
   const fetchProfile: typeof fetch = async () => {
@@ -806,9 +809,86 @@ it("expires cached token profiles after five minutes", async () => {
   await accountFor(input, fetchProfile, () => now, lookup);
   await accountFor(input, fetchProfile, () => now, lookup);
   expect(calls).toBe(1);
-  now = 300_001;
+  // Every five-minute renewal of the hour reuses it.
+  now = 3_599_999;
+  await accountFor(input, fetchProfile, () => now, lookup);
+  expect(calls).toBe(1);
+  now = 3_600_001;
   await accountFor(input, fetchProfile, () => now, lookup);
   expect(calls).toBe(2);
+});
+
+it("subscription profiles are asked again after a minute even while discovery keeps the identity", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "paseo-subscription-profile-"));
+  const providers = vi.mocked(configuredClaudeProviders);
+  providers.mockResolvedValue([{ id: "claude", env: { CLAUDE_CONFIG_DIR: directory } }]);
+  try {
+    writeClaudeCredentials(directory, "subscription-horizon-token");
+    let now = 0;
+    let calls = 0;
+    let status = "active";
+    const fetchApi: typeof fetch = async () => {
+      calls++;
+      return jsonResponse({
+        account: { uuid: "subscription-account" },
+        organization: { uuid: "org", subscription_status: status },
+      });
+    };
+    const lookup = { platform: "linux" as const, env: {}, claudeHome: directory, now: () => now };
+    await discover({ kind: "global" }, lookup, fetchApi);
+    expect(calls).toBe(1);
+    status = "canceled";
+    now = 60_000;
+    const [profile] = await profilesForProviders(["claude"], fetchApi, lookup);
+    expect(calls).toBe(2);
+    expect(profile).toMatchObject({
+      status: "ready",
+      profile: { organization: { subscription_status: "canceled" } },
+    });
+    now = 120_000;
+    await discover({ kind: "global" }, lookup, fetchApi);
+    expect(calls).toBe(2);
+  } finally {
+    providers.mockResolvedValue([]);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("discovery asks the vendor about each login at the same time and keeps their order", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "usage-parallel-identity-"));
+  try {
+    writeClaudeCredentials(directory, "parallel-claude-token");
+    mkdirSync(join(directory, ".pi", "agent"), { recursive: true });
+    writeFileSync(
+      join(directory, ".pi", "agent", "auth.json"),
+      JSON.stringify({ anthropic: { type: "oauth", access: "parallel-pi-token" } }),
+    );
+    let inFlight = 0;
+    let most = 0;
+    const fetchApi: typeof fetch = async (_url, init) => {
+      const token = new Headers(init?.headers).get("Authorization")?.replace("Bearer ", "");
+      inFlight++;
+      most = Math.max(most, inFlight);
+      // The first login's owner answers last.
+      await new Promise((resolve) =>
+        setTimeout(resolve, token === "parallel-claude-token" ? 30 : 5),
+      );
+      inFlight--;
+      return jsonResponse({ account: { uuid: token }, organization: { uuid: "org" } });
+    };
+    const accounts = await discover(
+      { kind: "global" },
+      { home: directory, claudeHome: directory, env: {}, platform: "linux" },
+      fetchApi,
+    );
+    expect(most).toBe(2);
+    expect(accounts.map((account) => account.key)).toEqual([
+      "parallel-claude-token.org",
+      "parallel-pi-token.org",
+    ]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 it.each([401, 403])(

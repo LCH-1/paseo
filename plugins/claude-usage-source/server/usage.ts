@@ -1,6 +1,10 @@
 import { discoverOmp, piAuthPath, readHarness, type StoreLookup } from "./stores.js";
 import { claudeProviders, configuredClaudeProviders } from "./claude-provider-config.js";
-import { readWindowsCredentials } from "./windows-credentials.js";
+import {
+  readWindowsCredentials,
+  readWindowsCredentialsMany,
+  type ReadSnapshots,
+} from "./windows-credentials.js";
 import type { UsageInput } from "../shared/input.js";
 import { execFile } from "node:child_process";
 import { existsSync, promises as fs } from "node:fs";
@@ -342,8 +346,45 @@ export async function readClaudeKeychainCredentials(
 
 export interface ClaudeCredentialLookup extends StoreLookup {
   readWindowsCredentials?: (service: string) => Promise<unknown | null>;
+  /** The Windows helper process; used when `readWindowsCredentials` is not given. */
+  readWindowsSnapshots?: ReadSnapshots;
+  /** Windows logins a discovery read, for the usage fetches that follow it straight away. */
+  recentWindowsReads?: RecentWindowsReads;
   readKeychainCredentials?: (service: string, account: string) => Promise<unknown | null>;
   claudeHome?: string;
+}
+
+/**
+ * The Windows logins one discovery read, kept for the usage fetches its renewal starts right after
+ * it. Each is taken once and only within a few seconds, so a fetch in a later renewal, or a
+ * targeted refresh, reads the store again.
+ */
+export class RecentWindowsReads {
+  private readonly reads = new Map<string, { at: number; value: unknown }>();
+
+  constructor(
+    readonly windowMs = 5_000,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  remember(service: string, value: unknown): void {
+    for (const [key, read] of this.reads)
+      if (this.now() - read.at > this.windowMs) this.reads.delete(key);
+    this.reads.set(service, { at: this.now(), value });
+  }
+
+  take(service: string): { value: unknown } | undefined {
+    const read = this.reads.get(service);
+    this.reads.delete(service);
+    return read && this.now() - read.at <= this.windowMs ? { value: read.value } : undefined;
+  }
+}
+
+function windowsReader(lookup: ClaudeCredentialLookup): (service: string) => Promise<unknown> {
+  return (
+    lookup.readWindowsCredentials ??
+    ((service) => readWindowsCredentials(service, lookup.readWindowsSnapshots))
+  );
 }
 
 function claudeCredentialPath(lookup: ClaudeCredentialLookup): string {
@@ -366,27 +407,57 @@ async function keychainCredentialRecord(
   return parsed.success ? toCredentialRecord(parsed.data) : null;
 }
 
+interface SharedWindowsReads {
+  lookup: ClaudeCredentialLookup;
+  /** Starts the reads of every service not read yet, in one helper process. */
+  prefetch(services: string[]): void;
+  /** What each service read so far held, for the reads that succeeded. */
+  held: Map<string, unknown>;
+}
+
 /**
- * Choosing a login's route and then resolving it read the same Windows credential, and each read
- * starts a PowerShell process. One query reads a service once; a failed read is not kept, and
- * nothing outlives the query, so a later fetch still sees the token the store holds then.
+ * Choosing a login's route and then resolving it read the same Windows credential, and each
+ * helper process costs PowerShell and a compile. One query reads a service once, and the services
+ * it knows it needs are read together; a failed read is not kept, so the query asks again.
  */
-function sharingWindowsReads(lookup: ClaudeCredentialLookup): ClaudeCredentialLookup {
-  const read = lookup.readWindowsCredentials ?? readWindowsCredentials;
+function sharingWindowsReads(lookup: ClaudeCredentialLookup): SharedWindowsReads {
   const reads = new Map<string, Promise<unknown | null>>();
-  return {
-    ...lookup,
-    readWindowsCredentials: (service) => {
-      const shared = reads.get(service);
-      if (shared) return shared;
-      const request = read(service);
+  const held = new Map<string, unknown>();
+  const prefetch = (services: string[]) => {
+    const missing = [...new Set(services)].filter((service) => !reads.has(service));
+    if (missing.length === 0) return;
+    const injected = lookup.readWindowsCredentials;
+    const requests = injected
+      ? missing.map((service) => injected(service))
+      : readWindowsCredentialsMany(missing, lookup.readWindowsSnapshots);
+    missing.forEach((service, index) => {
+      const request = requests[index]!;
       reads.set(service, request);
-      request.catch(() => {
-        if (reads.get(service) === request) reads.delete(service);
-      });
-      return request;
+      request.then(
+        (value) => held.set(service, value),
+        () => {
+          if (reads.get(service) === request) reads.delete(service);
+        },
+      );
+    });
+  };
+  return {
+    held,
+    prefetch,
+    lookup: {
+      ...lookup,
+      readWindowsCredentials: (service) => {
+        prefetch([service]);
+        return reads.get(service)!;
+      },
     },
   };
+}
+
+/** The Windows credential service Claude Code keeps a login under for this environment. */
+function windowsService(env: NodeJS.ProcessEnv): string {
+  const directory = env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? env.CLAUDE_CONFIG_DIR;
+  return `${CLAUDE_KEYCHAIN_SERVICE}${directory ? `-${hashAccountKey(directory.normalize("NFC")).slice(0, 8)}` : ""}`;
 }
 
 export async function discover(
@@ -394,7 +465,8 @@ export async function discover(
   lookup: ClaudeCredentialLookup = {},
   fetchApi: typeof fetch = fetch,
 ): Promise<UsageAccount[]> {
-  lookup = sharingWindowsReads(lookup);
+  const shared = sharingWindowsReads(lookup);
+  lookup = shared.lookup;
   if (scope.kind === "session")
     lookup = {
       ...lookup,
@@ -403,58 +475,57 @@ export async function discover(
     };
   const routes =
     scope.kind === "global"
-      ? await globalRoutes(lookup)
+      ? await globalRoutes(lookup, shared.prefetch)
       : { inputs: await sessionRoutes(scope, lookup), unclaimed: null };
-  const accounts: UsageAccount[] = [];
-  for (const input of routes.inputs) {
-    const harness = {
-      pi: "Pi",
-      omp: "OMP",
-      claude: "Claude",
-      keychain: "Claude",
-      "windows-credman": "Claude",
-    }[input.route.store];
-    // The fallback keeps a login that needs attention listed under its route. A login no provider
-    // signs in through gets none: it is an account only once the vendor says whose it is.
-    const fallback: UsageAccount[] =
-      routeKey(input) === routes.unclaimed
-        ? []
-        : [{ key: hashAccountKey(routeKey(input)), harness, input }];
-    let credentials;
-    try {
-      credentials = await resolveClaudeCredentials(input, lookup);
-    } catch {
-      accounts.push(...fallback);
-      continue;
-    }
-    if (!credentials) {
-      if (input.route.store === "windows-credman") accounts.push(...fallback);
-      continue;
-    }
-    if (credentials.expires !== undefined && credentials.expires <= (lookup.now ?? Date.now)()) {
-      accounts.push(...fallback);
-      continue;
-    }
-    try {
-      const profile = await readProfile(
-        credentials.oauth.accessToken,
-        fetchApi,
-        lookup.now ?? Date.now,
-      );
-      if ("status" in profile) accounts.push(...fallback);
-      else
-        accounts.push({
-          key: profile.key,
-          ...(profile.label ? { label: profile.label } : {}),
-          harness,
-          input,
-        });
-    } catch {
-      // Keep the login visible; fetching usage reports the vendor failure.
-      accounts.push(...fallback);
-    }
-  }
-  return accounts;
+  // Each login is identified on its own, so one slow vendor answer does not hold up the others.
+  const accounts = await Promise.all(
+    routes.inputs.map(async (input): Promise<UsageAccount[]> => {
+      const harness = {
+        pi: "Pi",
+        omp: "OMP",
+        claude: "Claude",
+        keychain: "Claude",
+        "windows-credman": "Claude",
+      }[input.route.store];
+      // The fallback keeps a login that needs attention listed under its route. A login no
+      // provider signs in through gets none: it is an account only once the vendor says whose it is.
+      const fallback: UsageAccount[] =
+        routeKey(input) === routes.unclaimed
+          ? []
+          : [{ key: hashAccountKey(routeKey(input)), harness, input }];
+      let credentials;
+      try {
+        credentials = await resolveClaudeCredentials(input, lookup);
+      } catch {
+        return fallback;
+      }
+      if (!credentials) return input.route.store === "windows-credman" ? fallback : [];
+      if (credentials.expires !== undefined && credentials.expires <= (lookup.now ?? Date.now)())
+        return fallback;
+      try {
+        const profile = await readProfile(
+          credentials.oauth.accessToken,
+          fetchApi,
+          lookup.now ?? Date.now,
+          IDENTITY_TTL_MS,
+        );
+        if ("status" in profile) return fallback;
+        return [
+          {
+            key: profile.key,
+            ...(profile.label ? { label: profile.label } : {}),
+            harness,
+            input,
+          },
+        ];
+      } catch {
+        // Keep the login visible; fetching usage reports the vendor failure.
+        return fallback;
+      }
+    }),
+  );
+  for (const [service, value] of shared.held) lookup.recentWindowsReads?.remember(service, value);
+  return accounts.flat();
 }
 
 function claudeKeychainRoute(lookup: ClaudeCredentialLookup) {
@@ -475,12 +546,10 @@ function claudeKeychainRoute(lookup: ClaudeCredentialLookup) {
 async function claudeRoute(lookup: ClaudeCredentialLookup): Promise<UsageInput> {
   if ((lookup.platform ?? process.platform) === "win32") {
     const env = lookup.env ?? process.env;
-    const directory = env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? env.CLAUDE_CONFIG_DIR;
-    const service = `${CLAUDE_KEYCHAIN_SERVICE}${directory ? `-${hashAccountKey(directory.normalize("NFC")).slice(0, 8)}` : ""}`;
+    const service = windowsService(env);
     const input = { route: { store: "windows-credman" as const, service } };
     try {
-      if ((await (lookup.readWindowsCredentials ?? readWindowsCredentials)(service)) !== null)
-        return input;
+      if ((await windowsReader(lookup)(service)) !== null) return input;
     } catch {
       return input;
     }
@@ -506,9 +575,17 @@ function routeKey(input: UsageInput): string {
   return JSON.stringify(input.route);
 }
 
-async function globalRoutes(lookup: ClaudeCredentialLookup): Promise<GlobalRoutes> {
+async function globalRoutes(
+  lookup: ClaudeCredentialLookup,
+  prefetch: SharedWindowsReads["prefetch"],
+): Promise<GlobalRoutes> {
   const { configured, builtinUnconfigured } = await claudeProviders(lookup);
   const env = lookup.env ?? process.env;
+  if ((lookup.platform ?? process.platform) === "win32")
+    prefetch([
+      windowsService(env),
+      ...configured.map((provider) => windowsService({ ...env, ...provider.env })),
+    ]);
   const daemonLogin = await claudeRoute(lookup);
   const providerLogins = await Promise.all(
     configured.map(async (provider) => {
@@ -584,10 +661,28 @@ export async function resolveClaudeCredentials(
 }
 
 async function windowsCredentialRecord(service: string, lookup: ClaudeCredentialLookup) {
-  const parsed = ClaudeCredentialsSchema.safeParse(
-    await (lookup.readWindowsCredentials ?? readWindowsCredentials)(service),
-  );
+  return windowsLogin(await windowsReader(lookup)(service));
+}
+
+function windowsLogin(stored: unknown): ClaudeCredentialRecord | null {
+  const parsed = ClaudeCredentialsSchema.safeParse(stored);
   return parsed.success ? toCredentialRecord(parsed.data) : null;
+}
+
+/**
+ * The login the discovery just before this fetch read, when it is one the fetch can use as is.
+ * An empty, unreadable or expiring login is read again instead.
+ */
+function recentLogin(
+  input: UsageInput,
+  lookup: ClaudeCredentialLookup,
+): ClaudeCredentialRecord | null {
+  if (input.route.store !== "windows-credman" || !lookup.recentWindowsReads) return null;
+  const recent = lookup.recentWindowsReads.take(input.route.service);
+  const login = recent ? windowsLogin(recent.value) : null;
+  const now = (lookup.now ?? Date.now)();
+  if (!login || (login.expires !== undefined && login.expires <= now + 60_000)) return null;
+  return login;
 }
 
 async function readCredentialFile(path: string): Promise<ClaudeCredentialRecord | null> {
@@ -612,6 +707,28 @@ export async function fetchUsage(
   input: UsageInput,
   fetchApi: typeof fetch = fetch,
   credentialLookup: ClaudeCredentialLookup = {},
+): Promise<UsageReport> {
+  const recent = recentLogin(input, credentialLookup);
+  if (!recent)
+    return usageFor(
+      input,
+      await resolveClaudeCredentials(input, credentialLookup),
+      fetchApi,
+      credentialLookup,
+    );
+  const report = await usageFor(input, recent, fetchApi, credentialLookup);
+  if (report.status !== "unavailable" || report.problem.kind !== "rejected") return report;
+  // A login replaced since discovery read it (a restore, or a refresh) is not reported rejected.
+  const current = await resolveClaudeCredentials(input, credentialLookup);
+  if (current?.oauth.accessToken === recent.oauth.accessToken) return report;
+  return usageFor(input, current, fetchApi, credentialLookup);
+}
+
+async function usageFor(
+  input: UsageInput,
+  credentials: ClaudeCredentialRecord | null,
+  fetchApi: typeof fetch,
+  credentialLookup: ClaudeCredentialLookup,
 ): Promise<UsageReport> {
   /**
    * Scoped limits carried by `limits[]`.
@@ -669,7 +786,6 @@ export async function fetchUsage(
     return ClaudeUsageResponseSchema.parse(await res.json());
   }
 
-  const credentials = await resolveClaudeCredentials(input, credentialLookup);
   if (!credentials) return missingLogin(input);
   missingLogins.delete(JSON.stringify(input.route));
   const refreshedBy =
@@ -785,7 +901,13 @@ export const accessProfileSchema = z.object({
 type ClaudeIdentity =
   | { key: string; label?: string; profile: z.output<typeof accessProfileSchema> }
   | { status: number };
+/** Subscription and billing fields are asked again after a minute. */
 const PROFILE_TTL_MS = 60_000;
+/**
+ * Whose account a token belongs to does not change while the token does, and a new token is a
+ * new cache entry, so discovery keeps a token's identity for an hour.
+ */
+const IDENTITY_TTL_MS = 3_600_000;
 const REJECTED_PROFILE_TTL_MS = 5_000;
 const PROFILE_CACHE_LIMIT = 128;
 const profileCache = new Map<
@@ -804,15 +926,18 @@ function pruneProfileCache(now: number): void {
   }
 }
 
+/** The token's profile, asked again once it is `maxAgeMs` old; a rejection is kept 5 seconds. */
 async function readProfile(
   token: string,
   fetchApi: typeof fetch,
   now: () => number,
+  maxAgeMs: number,
 ): Promise<ClaudeIdentity> {
   const tokenHash = hashAccountKey(token);
   pruneProfileCache(now());
-  const pending = profileCache.get(tokenHash);
-  if (pending) return pending.result;
+  const cached = profileCache.get(tokenHash);
+  if (cached && now() - cached.at < maxAgeMs) return cached.result;
+  profileCache.delete(tokenHash);
   while (profileCache.size >= PROFILE_CACHE_LIMIT) {
     const oldest = profileCache.keys().next().value;
     if (oldest === undefined) break;
@@ -848,7 +973,7 @@ async function readProfile(
       ...(account.email ? { label: account.email } : {}),
     };
   })();
-  profileCache.set(tokenHash, { at: now(), ttl: PROFILE_TTL_MS, result: request });
+  profileCache.set(tokenHash, { at: now(), ttl: IDENTITY_TTL_MS, result: request });
   try {
     const result = await request;
     const entry = profileCache.get(tokenHash);
@@ -868,13 +993,20 @@ export async function profilesForProviders(
 ) {
   const configured = await configuredClaudeProviders(lookup);
   const shared = sharingWindowsReads(lookup);
+  const requested = configured.filter((provider) => ids.includes(provider.id));
+  if ((lookup.platform ?? process.platform) === "win32")
+    shared.prefetch(
+      requested.map((provider) =>
+        windowsService({ ...(lookup.env ?? process.env), ...provider.env }),
+      ),
+    );
   return Promise.all(
     [...new Set(ids)].map(async (providerId) => {
       try {
-        const provider = configured.find((entry) => entry.id === providerId);
+        const provider = requested.find((entry) => entry.id === providerId);
         if (!provider) return { providerId, status: "missing" as const };
         const scoped = {
-          ...shared,
+          ...shared.lookup,
           env: { ...(lookup.env ?? process.env), ...provider.env },
           claudeHome: provider.env.CLAUDE_CONFIG_DIR ?? lookup.claudeHome,
         };
@@ -884,10 +1016,12 @@ export async function profilesForProviders(
           (credentials.expires !== undefined && credentials.expires <= (lookup.now ?? Date.now)())
         )
           return { providerId, status: "missing" as const };
+        // Subscription checks read billing fields, so they never use discovery's hour-old identity.
         const result = await readProfile(
           credentials.oauth.accessToken,
           fetchApi,
           lookup.now ?? Date.now,
+          PROFILE_TTL_MS,
         );
         return "status" in result
           ? { providerId, status: result.status }
