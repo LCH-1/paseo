@@ -37,13 +37,15 @@ interface FakeTerminalExit {
   itemId: string;
   processId: string;
   command: string;
-  exitCode: number;
+  /** Null when Codex reports the command finished without saying how its process ended. */
+  exitCode: number | null;
 }
 interface FakeTerminalInput {
   threadId: string;
   turnId: string;
   itemId: string;
-  processId: string;
+  /** Left out when Codex does not name the process it wrote to. */
+  processId?: string;
   text: string;
 }
 interface FakeLegacyPatch {
@@ -97,6 +99,8 @@ export interface FakeCodexAppServer {
   completesSilentLegacyCommand(params: FakeSilentCommand): void;
   startsTerminalCommand(params: FakeTerminalCommand): void;
   typesIntoTerminal(params: FakeTerminalInput): void;
+  /** The legacy channel's copy of a terminal write, which may name no thread. */
+  typesIntoLegacyTerminal(params: { threadId?: string; processId: string; text: string }): void;
   /** Codex reports a terminal command once its process exits, possibly turns later. */
   exitsTerminalCommand(params: FakeTerminalExit): void;
   says(params: { threadId: string; itemId?: string; text: string; chunks?: string[] }): void;
@@ -535,6 +539,16 @@ export function createFakeCodexAppServer(
         itemId: params.itemId,
         processId: params.processId,
         stdin: params.text,
+      });
+    },
+    typesIntoLegacyTerminal(params) {
+      writeNotification("codex/event/terminal_interaction", {
+        ...(params.threadId ? { threadId: params.threadId } : {}),
+        msg: {
+          type: "terminal_interaction",
+          process_id: params.processId,
+          stdin: params.text,
+        },
       });
     },
     says(params) {

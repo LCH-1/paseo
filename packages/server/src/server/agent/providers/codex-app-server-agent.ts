@@ -3499,11 +3499,80 @@ function buildCodexCustomProviderConfig(
 
 type CodexIdleReleaseHold =
   | { reason: "thread_not_resumable" | "turn_in_flight" | "permission_pending" }
-  | { reason: "terminal_running"; processIds: string[] }
+  // Each as `threadId:processId`, or the bare process id when Codex named no thread.
+  | { reason: "terminal_running"; terminals: string[] }
   | { reason: "untracked_terminal_running" }
   | { reason: "subagent_running"; subAgentCallIds: string[] };
 
 const MAX_REMEMBERED_TERMINAL_EXITS = 256;
+
+function terminalKey(threadId: string | null, id: string): string {
+  return threadId ? `${threadId}:${id}` : id;
+}
+
+/**
+ * The terminals that may still run inside one app-server; a command left running dies with
+ * the process. Codex numbers terminals within a thread, so the root thread and a sub-agent can
+ * each run a terminal with the same id, and each is followed under its own thread. A record
+ * made from a notification that named no thread could be any thread's: an exit of that id in
+ * any thread ends it, so a mirror without a thread does not hold the process forever.
+ */
+class CodexTerminalTracker {
+  private readonly live = new Set<string>();
+  // Exits already seen. A write Codex reports after the exit must not bring the terminal back.
+  private readonly exited = new Set<string>();
+  // Codex may name the process only when the command starts.
+  private readonly processIdByItem = new Map<string, string>();
+  // A terminal written to without a process id. Nothing can report its exit, so it holds the
+  // app-server until a new one starts.
+  private unnamedRunning = false;
+
+  started(threadId: string | null, processId: string, itemId: string | undefined): void {
+    const key = terminalKey(threadId, processId);
+    // A new start wins over an earlier exit of a process that had the same id.
+    this.exited.delete(key);
+    this.live.add(key);
+    if (itemId) this.processIdByItem.set(terminalKey(threadId, itemId), processId);
+  }
+
+  running(threadId: string | null, processId: string): void {
+    const key = terminalKey(threadId, processId);
+    if (!this.exited.has(key)) this.live.add(key);
+  }
+
+  runningUnnamed(): void {
+    this.unnamedRunning = true;
+  }
+
+  processIdOf(threadId: string | null, itemId: string): string | undefined {
+    return this.processIdByItem.get(terminalKey(threadId, itemId));
+  }
+
+  exitedProcess(threadId: string | null, processId: string, itemId: string | undefined): void {
+    for (const key of new Set([terminalKey(threadId, processId), processId])) {
+      this.live.delete(key);
+      this.exited.add(key);
+    }
+    while (this.exited.size > MAX_REMEMBERED_TERMINAL_EXITS) {
+      const oldest = this.exited.values().next().value;
+      if (oldest === undefined) break;
+      this.exited.delete(oldest);
+    }
+    if (itemId) this.processIdByItem.delete(terminalKey(threadId, itemId));
+  }
+
+  hold(): CodexIdleReleaseHold | null {
+    if (this.live.size > 0) return { reason: "terminal_running", terminals: [...this.live].sort() };
+    return this.unnamedRunning ? { reason: "untracked_terminal_running" } : null;
+  }
+
+  clear(): void {
+    this.live.clear();
+    this.exited.clear();
+    this.processIdByItem.clear();
+    this.unnamedRunning = false;
+  }
+}
 
 function readCodexCommandProcessId(item: { type?: string; [key: string]: unknown }): string | null {
   if (normalizeCodexThreadItemType(item.type) !== "commandExecution") return null;
@@ -3653,16 +3722,8 @@ export class CodexAppServerAgentSession implements AgentSession {
   // idle release holds nothing the session has not already read.
   private latestKnownRootTurn: { threadId: string; turnId: string } | null = null;
   private lastProviderActivityAt = 0;
-  // A command left running lives inside the app-server and dies with it, so the process is
-  // not released while idle until every terminal it reported has exited.
-  private readonly liveTerminalProcessIds = new Set<string>();
-  // Exits already seen. A write Codex reports after the exit must not bring the terminal back.
-  private readonly exitedTerminalProcessIds = new Set<string>();
-  // Codex may name the process only when the command starts.
-  private readonly terminalProcessIdByItemId = new Map<string, string>();
-  // A running terminal Codex named no process for. Nothing can report its exit, so it holds
-  // the process until a new one starts.
-  private untrackedTerminalRunning = false;
+  // The process is not released while idle until every terminal it reported has exited.
+  private readonly terminals = new CodexTerminalTracker();
   private loggedIdleReleaseHold: string | null = null;
   // A thread that has not completed a turn may not be on disk for a new process to resume.
   private threadWithCompletedTurn: string | null = null;
@@ -3800,10 +3861,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       throw this.createClosedError();
     }
     this.client = client;
-    this.liveTerminalProcessIds.clear();
-    this.exitedTerminalProcessIds.clear();
-    this.terminalProcessIdByItemId.clear();
-    this.untrackedTerminalRunning = false;
+    this.terminals.clear();
     this.loggedIdleReleaseHold = null;
     client.setUnexpectedTerminationHandler((error) => {
       this.handleUnexpectedTermination(error);
@@ -5404,10 +5462,8 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (this.pendingPermissionHandlers.size > 0 || this.asyncQuestions.pending().length > 0) {
       return { reason: "permission_pending" };
     }
-    if (this.liveTerminalProcessIds.size > 0) {
-      return { reason: "terminal_running", processIds: [...this.liveTerminalProcessIds].sort() };
-    }
-    if (this.untrackedTerminalRunning) return { reason: "untracked_terminal_running" };
+    const terminalHold = this.terminals.hold();
+    if (terminalHold) return terminalHold;
     const runningSubAgentCallIds = [...this.subAgentCallsByCallId.values()]
       .filter((call) => call.toolCall.status === "running")
       .map((call) => call.callId)
@@ -6842,6 +6898,9 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     const bufferedOutput = this.consumeOutputDelta(outputDeltas, parsed.callId);
     const resolvedOutput = parsed.output ?? bufferedOutput;
+    // An older Codex may say a process kept running only in the output it streamed.
+    const runningTerminalId = readRunningTerminalId(resolvedOutput);
+    if (runningTerminalId) this.terminals.running(parsed.threadId, runningTerminalId);
     if (!subAgentCallId) {
       this.rememberTerminalProcessForCommand(parsed.command, resolvedOutput);
     }
@@ -7331,57 +7390,40 @@ export class CodexAppServerAgentSession implements AgentSession {
         const processId = readCodexCommandProcessId(parsed.item);
         const status = parsed.item.status;
         if (!processId || (status !== undefined && status !== "inProgress")) return;
-        // A new start wins over an earlier exit of a process that had the same id.
-        this.exitedTerminalProcessIds.delete(processId);
-        this.liveTerminalProcessIds.add(processId);
-        if (parsed.item.id) this.terminalProcessIdByItemId.set(parsed.item.id, processId);
+        this.terminals.started(parsed.threadId, processId, parsed.item.id);
         return;
       }
       case "item_completed": {
         const runningId = readRunningTerminalId(parsed.item.aggregatedOutput);
         if (runningId) {
-          this.markTerminalRunning(runningId);
+          this.terminals.running(parsed.threadId, runningId);
           return;
         }
         const itemId = parsed.item.id;
         const processId =
           readCodexCommandProcessId(parsed.item) ??
-          (itemId ? this.terminalProcessIdByItemId.get(itemId) : undefined);
+          (itemId ? this.terminals.processIdOf(parsed.threadId, itemId) : undefined);
         // An exit code says the process ended, and a declined command never ran.
         if (
           processId &&
           (typeof parsed.item.exitCode === "number" || parsed.item.status === "declined")
         ) {
-          this.markTerminalExited(processId);
-          if (itemId) this.terminalProcessIdByItemId.delete(itemId);
+          this.terminals.exitedProcess(parsed.threadId, processId, itemId);
         }
         return;
       }
       case "exec_command_completed": {
+        // Output that arrived only as deltas is read where they are joined.
         const runningId = readRunningTerminalId(parsed.output);
-        if (runningId) this.markTerminalRunning(runningId);
+        if (runningId) this.terminals.running(parsed.threadId, runningId);
         return;
       }
       case "terminal_interaction":
-        if (parsed.processId) this.markTerminalRunning(parsed.processId);
-        else this.untrackedTerminalRunning = true;
+        if (parsed.processId) this.terminals.running(parsed.threadId, parsed.processId);
+        else this.terminals.runningUnnamed();
         return;
       default:
         return;
-    }
-  }
-
-  private markTerminalRunning(processId: string): void {
-    if (this.exitedTerminalProcessIds.has(processId)) return;
-    this.liveTerminalProcessIds.add(processId);
-  }
-
-  private markTerminalExited(processId: string): void {
-    this.liveTerminalProcessIds.delete(processId);
-    this.exitedTerminalProcessIds.add(processId);
-    if (this.exitedTerminalProcessIds.size > MAX_REMEMBERED_TERMINAL_EXITS) {
-      const oldest = this.exitedTerminalProcessIds.values().next().value;
-      if (oldest !== undefined) this.exitedTerminalProcessIds.delete(oldest);
     }
   }
 

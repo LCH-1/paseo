@@ -1055,6 +1055,97 @@ test("a write Codex reports after a terminal exited does not hold the app-server
   });
 });
 
+test("a sub-agent terminal exiting does not end the root terminal that has the same id", async () => {
+  await withIdleCodexSession(async ({ session, initial, runTurn, passTime }) => {
+    const rootTerminal = { ...backgroundBuild, processId: "4242" };
+    // Codex numbers terminals within a thread, so a sub-agent's can reuse the root's id.
+    const childTerminal = {
+      ...rootTerminal,
+      threadId: "thread-child",
+      itemId: "child-tests",
+      command: "npm test",
+    };
+    await runTurn(initial, "build in the background", () => {
+      initial.startsTerminalCommand(rootTerminal);
+      initial.typesIntoTerminal({ ...rootTerminal, text: "" });
+      initial.startsTerminalCommand(childTerminal);
+      initial.exitsTerminalCommand({ ...childTerminal, exitCode: 0 });
+      initial.typesIntoTerminal({ ...rootTerminal, text: "" });
+    });
+    const killed = vi.spyOn(initial.child, "kill");
+
+    passTime(IDLE_RELEASE_MS);
+
+    expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(false);
+    expect(killed).not.toHaveBeenCalled();
+  });
+});
+
+test("a terminal exit also ends the legacy copy of its write that named no thread", async () => {
+  await withIdleCodexSession(async ({ session, initial, runTurn, passTime }) => {
+    await runTurn(initial, "run the build", () => {
+      initial.startsTerminalCommand(backgroundBuild);
+      initial.typesIntoTerminal({ ...backgroundBuild, text: "" });
+      initial.typesIntoLegacyTerminal({ processId: backgroundBuild.processId, text: "" });
+      initial.exitsTerminalCommand({ ...backgroundBuild, exitCode: 0 });
+    });
+
+    passTime(IDLE_RELEASE_MS);
+
+    expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(true);
+  });
+});
+
+test("a legacy command that said it kept running only in its streamed output keeps the app-server", async () => {
+  await withIdleCodexSession(async ({ session, initial, runTurn, passTime }) => {
+    await runTurn(initial, "start the dev server", () => {
+      // The end notification repeats none of the output the command streamed.
+      initial.runsLegacyCommand({
+        threadId: "thread-1",
+        callId: "dev-server",
+        command: "npm run dev",
+        output: "Process running with session ID 9",
+      });
+    });
+    const killed = vi.spyOn(initial.child, "kill");
+
+    passTime(IDLE_RELEASE_MS);
+
+    expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(false);
+    expect(killed).not.toHaveBeenCalled();
+  });
+});
+
+test("a terminal Codex reports finished without an exit code keeps the app-server", async () => {
+  await withIdleCodexSession(async ({ session, initial, runTurn, passTime }) => {
+    await runTurn(initial, "build in the background", () => {
+      initial.startsTerminalCommand(backgroundBuild);
+      // Without an exit code nothing says the process ended rather than the command.
+      initial.exitsTerminalCommand({ ...backgroundBuild, exitCode: null });
+    });
+    const killed = vi.spyOn(initial.child, "kill");
+
+    passTime(IDLE_RELEASE_MS);
+
+    expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(false);
+    expect(killed).not.toHaveBeenCalled();
+  });
+});
+
+test("a write into a terminal Codex named no process for keeps the app-server", async () => {
+  await withIdleCodexSession(async ({ session, initial, runTurn, passTime }) => {
+    await runTurn(initial, "answer the prompt", () => {
+      initial.typesIntoTerminal({ ...backgroundBuild, processId: undefined, text: "y\n" });
+    });
+    const killed = vi.spyOn(initial.child, "kill");
+
+    passTime(IDLE_RELEASE_MS);
+
+    expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(false);
+    expect(killed).not.toHaveBeenCalled();
+  });
+});
+
 test("an idle Codex app-server kept for a running terminal says why once", async () => {
   const lines: Array<Record<string, unknown>> = [];
   const capturing = pino(
@@ -1075,8 +1166,8 @@ test("an idle Codex app-server kept for a running terminal says why once", async
       expect(
         lines
           .filter((line) => line.msg === "Kept idle Codex app-server running")
-          .map(({ threadId, reason, processIds }) => ({ threadId, reason, processIds })),
-      ).toEqual([{ threadId: "thread-1", reason: "terminal_running", processIds: ["7"] }]);
+          .map(({ threadId, reason, terminals }) => ({ threadId, reason, terminals })),
+      ).toEqual([{ threadId: "thread-1", reason: "terminal_running", terminals: ["thread-1:7"] }]);
     },
     { logger: capturing },
   );
@@ -1119,6 +1210,29 @@ test("an idle-released Codex session rereads a thread another client continued",
       expect(replacement.requests().map((request) => request.method)).toContain("thread/read");
     },
     { replacementHandlers: resumesThreadEndingWith("turn-1", "turn-from-another-client") },
+  );
+});
+
+function isTurnStarted(event: AgentStreamEvent): boolean {
+  return event.type === "turn_started";
+}
+
+test("a Codex session whose app-server died mid-turn rereads the thread when it reconnects", async () => {
+  await withIdleCodexSession(
+    async ({ session, initial, replacement, events, runTurn }) => {
+      const interrupted = session.run("first prompt");
+      await initial.waitForTurnStart();
+      initial.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      await expect.poll(() => events.some(isTurnStarted)).toBe(true);
+      initial.child.emit("exit", 17, null);
+      await expect(interrupted).rejects.toThrow("exited with code 17");
+
+      // The thread still ends with the turn the crash cut short, which only a reread settles.
+      await runTurn(replacement, "second prompt");
+
+      expect(replacement.requests().map((request) => request.method)).toContain("thread/read");
+    },
+    { replacementHandlers: resumesThreadEndingWith("turn-1") },
   );
 });
 
