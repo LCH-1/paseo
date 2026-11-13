@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 // Named like the p-limit rejection it replaces, which callers already treat as a shutdown signal.
 class WorkspaceRefreshAdmissionClearedError extends Error {
   constructor() {
@@ -32,11 +34,15 @@ export class WorkspaceRefreshAdmission {
   }
 
   run<T>(task: () => T | PromiseLike<T>, urgent: () => boolean): Promise<T> {
+    // A queued refresh starts from whichever refresh freed its slot. Run it in its own caller's
+    // async context, as p-limit did: Git priority and provenance travel there, and would
+    // otherwise pass from one refresh to the next.
+    const inCallerContext = AsyncLocalStorage.snapshot();
     return new Promise<T>((resolve, reject) => {
       const start = () => {
         this.active += 1;
         void Promise.resolve()
-          .then(task)
+          .then(() => inCallerContext(task))
           .then(resolve, reject)
           .finally(() => {
             this.active -= 1;
