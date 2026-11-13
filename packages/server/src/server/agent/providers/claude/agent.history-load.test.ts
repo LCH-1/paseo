@@ -247,6 +247,25 @@ describe("ClaudeAgentSession persisted history load", () => {
     }
   });
 
+  test("a read in flight when the session closes stops without applying anything", async () => {
+    writeTranscript([
+      {
+        type: "user",
+        uuid: "closed-user",
+        timestamp: "2026-11-01T00:00:00.000Z",
+        message: { role: "user", content: "prompt of a closed session" },
+      },
+    ]);
+    const session = await resume();
+
+    const reading = internals(session).ensurePersistedHistoryLoaded("history");
+    await session.close();
+    await reading;
+
+    expect(internals(session).userMessageIds).toEqual([]);
+    expect(historyLogs()).toEqual([]);
+  });
+
   test("rewinds a reopened session whose timeline the daemon still holds", async () => {
     writeTranscript([
       {
