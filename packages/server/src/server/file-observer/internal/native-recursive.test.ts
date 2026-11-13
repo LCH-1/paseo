@@ -552,8 +552,10 @@ async function createSignatureFixture(options: {
     file,
     metrics,
     backend,
+    events,
     updates,
     emitChange: (path: string) => notifications.emit("change", "change", path),
+    emitRename: (path: string) => notifications.emit("change", "rename", path),
     close: async () => {
       active = false;
       await backend.close();
@@ -655,6 +657,32 @@ test("a change that leaves a known directory alone neither updates nor rescans i
     await writeFile(join(fixture.directory, "feature"), "b".repeat(41));
     fixture.emitChange(fixture.directory);
     await expect.poll(() => fixture.updates(fixture.directory)).toBe(2);
+  } finally {
+    await fixture.close();
+  }
+}, 20_000);
+
+test("a change verified only after its file is gone announces no update behind the delete", async () => {
+  const fixture = await createSignatureFixture({ filterUnchangedChanges: true, now: aMinuteLater });
+  const eventsFor = (path: string) =>
+    fixture.events.filter((event) => event.path === path).map((event) => event.type);
+  try {
+    await rm(fixture.file);
+    // The stat of the removal's event settles first...
+    fixture.emitRename(fixture.file);
+    await expect.poll(() => eventsFor(fixture.file)).toEqual(["delete"]);
+    // ...and the change reported just before the removal is verified only now. An update queued
+    // after the delete would merge with it into an update of a file that no longer exists.
+    fixture.emitChange(fixture.file);
+    await expect.poll(() => fixture.backend.getDiagnostics().pendingClassificationCount).toBe(0);
+    expect(fixture.updates(fixture.file)).toBe(0);
+    await expect
+      .poll(() => fixture.backend.getDiagnostics().pendingReconciliationWorkCount, {
+        timeout: 10_000,
+      })
+      .toBe(0);
+    expect(fixture.updates(fixture.file)).toBe(0);
+    expect(eventsFor(fixture.file).at(-1)).toBe("delete");
   } finally {
     await fixture.close();
   }

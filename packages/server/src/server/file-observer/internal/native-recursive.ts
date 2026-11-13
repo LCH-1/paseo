@@ -748,12 +748,22 @@ class NativeRecursiveBackend implements ObservationBackend {
     knownDirectory: boolean,
   ): Promise<void> {
     let signature: ChangeSignature | null = null;
+    let missing = false;
     try {
       signature = this.signatureOf(await stat(path));
-    } catch {
-      // Missing or unreadable: the scoped audit decides what happened.
+    } catch (error) {
+      // Unreadable (a locked file on Windows) is announced and left to the scoped audit.
+      missing = isMissingPathError(error);
     }
     if (!this.host.isActive() || this.host.isIgnored(path)) return;
+    if (missing) {
+      // Gone before the stat. The stat of its removal event may have settled first and announced
+      // the delete; an update queued now would merge with it into an update of a missing file.
+      // A scan of the parent announces the delete if no removal event did.
+      this.rememberSignature(path, null);
+      this.requestAudit(scope);
+      return;
+    }
     const previous = this.changeSignatures.get(path);
     if (signature && previous && !previous.racy && previous.value === signature.value) {
       this.host.metrics.nativeUnchangedChangeEventCount += 1;
