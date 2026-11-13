@@ -7,10 +7,7 @@ export function addAttachOptions(cmd: Command): Command {
 }
 import { connectToDaemon } from "../../utils/client.js";
 import { waitForStop } from "../../utils/wait-for-stop.js";
-import {
-  fetchProjectedTimelineItems,
-  LIVE_HISTORY_FETCH_TIMEOUT_MS,
-} from "../../utils/timeline.js";
+import { createTimelineFollower, LIVE_HISTORY_FETCH_TIMEOUT_MS } from "../../utils/timeline.js";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import type { AgentStreamEventPayload } from "@getpaseo/protocol/messages";
 
@@ -128,14 +125,34 @@ export async function runAttachCommand(
     console.log(`Fetching history for agent ${resolvedId.substring(0, 7)}...`);
     console.log(`(Press Ctrl+C to detach)\n`);
 
+    const follower = createTimelineFollower({
+      client,
+      agentId: resolvedId,
+      onMessage: (message) => {
+        if (message.type === "agent.timeline.replacement") {
+          console.log("\n[Timeline replaced; earlier output is no longer current]");
+        } else if (message.type === "agent.timeline.subscription_restored") {
+          console.log("\n[Reconnected; live output resumed. Events may have been missed.]");
+        } else if (message.type === "agent.timeline.error") {
+          console.error(`Timeline observation stopped: ${message.payload.error}`);
+        } else {
+          printStreamEvent(message.payload.event);
+        }
+      },
+      // Rows a refresh reread that were never printed here, such as turns another client ran.
+      onCatchUp: (entries) => {
+        for (const entry of entries) {
+          printTimelineItem(entry.item);
+        }
+      },
+      onCatchUpError: (error) => {
+        console.warn("Warning: failed to fetch the replaced timeline", error);
+      },
+    });
+
     // Print existing output from timeline fetch.
     try {
-      const timelineItems = await fetchProjectedTimelineItems({
-        client,
-        agentId: resolvedId,
-        timeoutMs: LIVE_HISTORY_FETCH_TIMEOUT_MS,
-      });
-      for (const item of timelineItems) {
+      for (const item of await follower.readHistory(LIVE_HISTORY_FETCH_TIMEOUT_MS)) {
         printTimelineItem(item);
       }
     } catch (error) {
@@ -143,17 +160,7 @@ export async function runAttachCommand(
     }
 
     // Subscribe to new events
-    const unsubscribe = client.subscribeAgentTimeline(resolvedId, (message) => {
-      if (message.type === "agent.timeline.replacement") {
-        console.log("\n[Timeline replaced; earlier output is no longer current]");
-      } else if (message.type === "agent.timeline.subscription_restored") {
-        console.log("\n[Reconnected; live output resumed. Events may have been missed.]");
-      } else if (message.type === "agent.timeline.error") {
-        console.error(`Timeline observation stopped: ${message.payload.error}`);
-      } else {
-        printStreamEvent(message.payload.event);
-      }
-    });
+    const unsubscribe = client.subscribeAgentTimeline(resolvedId, follower.receive);
 
     await unsubscribe.ready;
     console.log(`Attached to agent ${resolvedId.substring(0, 7)}.`);

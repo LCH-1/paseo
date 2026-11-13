@@ -3,6 +3,7 @@ import { connectToDaemon } from "../../utils/client.js";
 import { waitForStop } from "../../utils/wait-for-stop.js";
 import type { CommandError, CommandOptions } from "../../output/index.js";
 import {
+  createTimelineFollower,
   fetchProjectedTimelineItems,
   LIVE_HISTORY_FETCH_TIMEOUT_MS,
 } from "../../utils/timeline.js";
@@ -333,14 +334,61 @@ async function runFollowMode({
 }: FollowModeInput): Promise<void> {
   const DEFAULT_FOLLOW_TAIL = 10;
   const tailCount = parseTailCount(options.tail) ?? DEFAULT_FOLLOW_TAIL;
+  const writer = createFollowTranscriptWriter(undefined, options.filter);
+  const follower = createTimelineFollower({
+    client,
+    agentId,
+    sinceTimestampMs,
+    onMessage: (message) => {
+      if (message.type === "agent.timeline.replacement") {
+        writer.end();
+        console.log("\n[Timeline replaced; earlier output is no longer current]");
+        return;
+      }
+
+      if (message.type === "agent.timeline.error") {
+        writer.end();
+        console.error(`Timeline observation stopped: ${message.payload.error}`);
+        return;
+      }
+      if (message.type === "agent.timeline.subscription_restored") {
+        writer.end();
+        console.log("\n[Reconnected; live output resumed. Events may have been missed.]");
+        return;
+      }
+      if (message.payload.event.type === "timeline") {
+        const matchesSince =
+          sinceTimestampMs === undefined ||
+          Date.parse(message.payload.timestamp) >= sinceTimestampMs;
+        if (!matchesSince) {
+          return;
+        }
+        const item = message.payload.event.item;
+        writer.push(item, message.payload.event.turnId);
+      } else if (
+        message.payload.event.type === "turn_completed" ||
+        message.payload.event.type === "turn_failed" ||
+        message.payload.event.type === "turn_canceled"
+      ) {
+        writer.end();
+      }
+    },
+    // A refresh announces the history it reread instead of streaming it, so rows this follow
+    // never printed, such as turns another client ran, arrive here.
+    onCatchUp: (entries) => {
+      for (const entry of entries) {
+        writer.push(entry.item, entry.turnId);
+      }
+    },
+    onCatchUpError: (error) => {
+      console.warn("Warning: failed to fetch the replaced timeline", error);
+    },
+  });
 
   // First, get existing timeline.
   let existingItems: AgentTimelineItem[] = [];
   try {
-    existingItems = await fetchAgentTimelineItems(client, agentId, {
-      timeoutMs: LIVE_HISTORY_FETCH_TIMEOUT_MS,
-      sinceTimestampMs,
-    });
+    existingItems = await follower.readHistory(LIVE_HISTORY_FETCH_TIMEOUT_MS);
   } catch (error) {
     console.warn("Warning: failed to fetch existing timeline", error);
   }
@@ -362,41 +410,7 @@ async function runFollowMode({
   const tailLabel =
     tailCount === 0 ? "no history" : `last ${tailCount} entr${tailCount === 1 ? "y" : "ies"}`;
 
-  const writer = createFollowTranscriptWriter(undefined, options.filter);
-
-  const unsubscribe = client.subscribeAgentTimeline(agentId, (message) => {
-    if (message.type === "agent.timeline.replacement") {
-      writer.end();
-      console.log("\n[Timeline replaced; earlier output is no longer current]");
-      return;
-    }
-
-    if (message.type === "agent.timeline.error") {
-      writer.end();
-      console.error(`Timeline observation stopped: ${message.payload.error}`);
-      return;
-    }
-    if (message.type === "agent.timeline.subscription_restored") {
-      writer.end();
-      console.log("\n[Reconnected; live output resumed. Events may have been missed.]");
-      return;
-    }
-    if (message.payload.event.type === "timeline") {
-      const matchesSince =
-        sinceTimestampMs === undefined || Date.parse(message.payload.timestamp) >= sinceTimestampMs;
-      if (!matchesSince) {
-        return;
-      }
-      const item = message.payload.event.item;
-      writer.push(item, message.payload.event.turnId);
-    } else if (
-      message.payload.event.type === "turn_completed" ||
-      message.payload.event.type === "turn_failed" ||
-      message.payload.event.type === "turn_canceled"
-    ) {
-      writer.end();
-    }
-  });
+  const unsubscribe = client.subscribeAgentTimeline(agentId, follower.receive);
 
   await unsubscribe.ready;
   console.log(`\n--- Following logs (${tailLabel}; Ctrl+C to stop) ---\n`);
