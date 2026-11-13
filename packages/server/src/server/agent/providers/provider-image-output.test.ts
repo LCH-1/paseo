@@ -115,6 +115,31 @@ describe("isProviderImageMarkdown", () => {
     expect(item?.type === "assistant_message" && isProviderImageMarkdown(item.text)).toBe(true);
   });
 
+  test("matches alt text that ends in a lone backslash, as the plain alt text did", () => {
+    expect(isProviderImageMarkdown(`![a\\](/tmp/paseo-attachments/${HASH}.png)`)).toBe(true);
+    expect(isProviderImageMarkdown(`![a\\\\\\](/tmp/paseo-attachments/${HASH}.png)`)).toBe(true);
+  });
+
+  test("answers at once for text whose alt text holds a long run of backslashes", () => {
+    // Replay checks every text block of a tool result row, and a regular expression cannot be
+    // sliced: a match that took seconds held every agent, terminal and request on the daemon.
+    const rejected = [
+      `![${"\\a".repeat(56)}](https://example.com/a.png)`,
+      `![${"C:\\Users\\me\\proj".repeat(12)}](./shot.png)`,
+    ];
+    const accepted = renderProviderImageOutputAsAssistantMarkdown({
+      path: `/tmp/paseo-attachments/${HASH}.png`,
+      altText: "C:\\Users\\me\\proj ".repeat(40),
+    });
+
+    const startedAt = performance.now();
+    expect(rejected.map((text) => isProviderImageMarkdown(text))).toEqual([false, false]);
+    expect(accepted?.type === "assistant_message" && isProviderImageMarkdown(accepted.text)).toBe(
+      true,
+    );
+    expect(performance.now() - startedAt).toBeLessThan(100);
+  });
+
   test("rejects user-authored markdown that is not a materialized attachment", () => {
     // No content hash — a hand-written path, not something the writer produced.
     expect(isProviderImageMarkdown("![diagram](./paseo-attachments/notes.png)")).toBe(false);

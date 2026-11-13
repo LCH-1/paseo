@@ -237,8 +237,12 @@ export function materializeProviderImage(image: {
 // from being mistaken for a provider image during history replay. The separator still accepts old
 // doubled-backslash Windows history; new Windows output uses file URIs. Alt text and source may
 // carry backslash escapes: a Paseo home such as "D:\Paseo Data (main)" puts "\)" in the source.
+// In the alt text a backslash always starts an escape, except a lone one right before the closing
+// bracket, which the plain alt text older readers matched may end in. Letting a backslash be read
+// either way made a failed match try every split of a run of them, so about 50 backslashes held
+// the daemon for seconds. In the source only "\)" reads two ways, and the shorter way fails at once.
 const PROVIDER_IMAGE_MARKDOWN = new RegExp(
-  `^!\\[(?:\\\\.|[^\\]])*\\]\\((?:\\\\\\)|[^)])*(?:${PROVIDER_IMAGE_ATTACHMENT_DIR}(?:-[^/\\\\)]+)?|${PROVIDER_IMAGE_DIR})[/\\\\]+(?:[^/\\\\)]+[/\\\\]+)?[0-9a-f]{64}\\.[a-z0-9]+\\)`,
+  `^!\\[(?:\\\\[\\s\\S]|[^\\]\\\\])*\\\\?\\]\\((?:\\\\\\)|[^)])*(?:${PROVIDER_IMAGE_ATTACHMENT_DIR}(?:-[^/\\\\)]+)?|${PROVIDER_IMAGE_DIR})[/\\\\]+(?:[^/\\\\)]+[/\\\\]+)?[0-9a-f]{64}\\.[a-z0-9]+\\)`,
 );
 
 export function isProviderImageMarkdown(text: string): boolean {
