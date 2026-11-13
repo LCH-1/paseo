@@ -311,7 +311,7 @@ describe("runtime metrics log lines", () => {
     expect(
       isNotableRuntimeMetricsWindow({
         ...calm,
-        eventLoopDelay: { p50Ms: 20, p99Ms: 90, maxMs: 214 },
+        eventLoopDelay: { ...calm.eventLoopDelay, maxMs: 214 },
       }),
     ).toBe(true);
     expect(
