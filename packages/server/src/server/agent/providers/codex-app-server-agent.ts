@@ -505,6 +505,7 @@ interface PersistedSubAgentRoute {
 interface CodexThreadHistoryProjection {
   timeline: PersistedTimelineEntry[];
   subAgentRoutes: PersistedSubAgentRoute[];
+  latestTurnId: string | null;
 }
 
 function mergeCodexConfiguredDefaults(
@@ -2233,7 +2234,14 @@ async function loadCodexThreadHistoryTimeline(params: {
         : [];
     },
   );
-  return { timeline, subAgentRoutes };
+  return { timeline, subAgentRoutes, latestTurnId: readLatestCodexTurnId(response) };
+}
+
+/** The id of a thread's newest turn in a thread/read or thread/resume response, if it has one. */
+function readLatestCodexTurnId(response: unknown): string | null {
+  const turns = toObjectRecord(toObjectRecord(response)?.thread)?.turns;
+  const latest = Array.isArray(turns) ? toObjectRecord(turns.at(-1)) : null;
+  return typeof latest?.id === "string" && latest.id ? latest.id : null;
 }
 
 function readCodexThread(client: CodexAppServerClientLike, threadId: string): Promise<unknown> {
@@ -3641,6 +3649,9 @@ export class CodexAppServerAgentSession implements AgentSession {
   private closed = false;
   private idleRelease: Promise<void> | null = null;
   private releasedWhileIdle = false;
+  // The newest root turn this session read or ran. A thread that still ends with it after an
+  // idle release holds nothing the session has not already read.
+  private latestKnownRootTurn: { threadId: string; turnId: string } | null = null;
   private lastProviderActivityAt = 0;
   // A command left running lives inside the app-server and dies with it, so the process is
   // not released while idle until every terminal it reported has exited.
@@ -3814,9 +3825,15 @@ export class CodexAppServerAgentSession implements AgentSession {
       await this.loadCollaborationModes();
       await this.loadSkills();
 
+      let historyReread = false;
       if (this.currentThreadId) {
-        await this.ensureThreadLoaded();
-        await this.loadPersistedHistory(this.client);
+        const resumedLatestTurnId = await this.ensureThreadLoaded();
+        historyReread = !this.keepsHistoryAfterIdleRelease(resumedLatestTurnId);
+        if (historyReread) {
+          await this.loadPersistedHistory(this.client);
+        } else {
+          this.pendingSubAgentNotificationsByThreadId.clear();
+        }
         await this.applyDefaultModelAndThinking();
       }
 
@@ -3827,7 +3844,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (this.releasedWhileIdle) {
         this.releasedWhileIdle = false;
         this.logger.info(
-          { threadId: this.currentThreadId },
+          { threadId: this.currentThreadId, historyReread },
           "Restarted Codex app-server after idle release",
         );
       }
@@ -3846,6 +3863,28 @@ export class CodexAppServerAgentSession implements AgentSession {
       }
       throw error;
     }
+  }
+
+  /**
+   * After an idle release the session still holds the thread's sub-agent routes and rewind
+   * positions; disposing the process cleared none of them. Reading the whole thread and every
+   * child again is what slowed the first message after a release on long chats. Read it anyway
+   * when the resumed thread does not end with the turn this session last saw: another client
+   * may have continued it.
+   */
+  private keepsHistoryAfterIdleRelease(resumedLatestTurnId: string | null): boolean {
+    const known = this.latestKnownRootTurn;
+    return (
+      this.releasedWhileIdle &&
+      resumedLatestTurnId !== null &&
+      known?.threadId === this.currentThreadId &&
+      known.turnId === resumedLatestTurnId
+    );
+  }
+
+  private rememberLatestRootTurn(turnId: string | null | undefined): void {
+    const threadId = this.currentThreadId;
+    this.latestKnownRootTurn = threadId && turnId ? { threadId, turnId } : null;
   }
 
   private async loadResolvedWorkspaceWrite(): Promise<void> {
@@ -4115,6 +4154,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       },
     });
     const { timeline, subAgentRoutes } = history;
+    this.rememberLatestRootTurn(history.latestTurnId);
     this.subAgentCallsByCallId.clear();
     this.subAgentCallIdByChildThreadId.clear();
     this.pendingSubAgentNotificationsByThreadId.clear();
@@ -4185,8 +4225,9 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
   }
 
-  private async ensureThreadLoaded(): Promise<void> {
-    if (!this.client || !this.currentThreadId) return;
+  /** Resolves to the newest turn of the thread when this call resumed it, otherwise null. */
+  private async ensureThreadLoaded(): Promise<string | null> {
+    if (!this.client || !this.currentThreadId) return null;
     const params: Record<string, unknown> = { threadId: this.currentThreadId };
     const developerInstructions = composeSystemPromptParts(
       this.config.systemPrompt,
@@ -4203,10 +4244,11 @@ export class CodexAppServerAgentSession implements AgentSession {
       const loaded = toObjectRecord(await this.client.request("thread/loaded/list", {}));
       const ids = Array.isArray(loaded?.data) ? loaded.data : [];
       if (ids.includes(this.currentThreadId)) {
-        return;
+        return null;
       }
       const response = await this.client.request("thread/resume", params);
       this.rememberResolvedSandboxPolicy(response);
+      return readLatestCodexTurnId(response);
     } catch (error) {
       const threadId = this.currentThreadId;
       const message = error instanceof Error ? error.message : String(error);
@@ -4221,7 +4263,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         const response = await this.client.request("thread/resume", params);
         this.rememberResolvedSandboxPolicy(response);
         this.logger.info({ threadId }, "Unarchived Codex thread to restore active Paseo agent");
-        return;
+        return null;
       }
       this.logger.warn({ error, threadId }, "Failed to resume persisted Codex thread");
       throw new Error(`Failed to resume Codex thread ${threadId}: ${message}`, { cause: error });
@@ -6495,6 +6537,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       return;
     }
     this.currentTurnId = parsed.turnId;
+    this.rememberLatestRootTurn(parsed.turnId);
     const pendingIdentification = this.pendingForegroundTurnIdentification;
     if (
       pendingIdentification &&

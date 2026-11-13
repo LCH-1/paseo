@@ -822,11 +822,14 @@ interface IdleCodexSession {
 
 async function withIdleCodexSession(
   runScenario: (fixture: IdleCodexSession) => Promise<void>,
-  options: { logger?: Logger } = {},
+  options: {
+    logger?: Logger;
+    replacementHandlers?: Parameters<typeof createFakeCodexAppServer>[0];
+  } = {},
 ): Promise<void> {
   vi.useFakeTimers({ toFake: ["Date"] });
   const initial = createFakeCodexAppServer();
-  const replacement = createFakeCodexAppServer();
+  const replacement = createFakeCodexAppServer(options.replacementHandlers);
   const servers = [initial, replacement];
   const session = new CodexAppServerAgentSession(
     { provider: "codex", cwd: process.cwd(), modeId: "auto", model: "gpt-5.4" },
@@ -1076,6 +1079,46 @@ test("an idle Codex app-server kept for a running terminal says why once", async
       ).toEqual([{ threadId: "thread-1", reason: "terminal_running", processIds: ["7"] }]);
     },
     { logger: capturing },
+  );
+});
+
+function resumesThreadEndingWith(...turnIds: string[]) {
+  return {
+    "thread/resume": () => ({
+      thread: { id: "thread-1", turns: turnIds.map((id) => ({ id, items: [] })) },
+    }),
+  };
+}
+
+test("an idle-released Codex session resumes without rereading a thread it already holds", async () => {
+  await withIdleCodexSession(
+    async ({ session, initial, replacement, runTurn, passTime }) => {
+      await runTurn(initial, "first prompt");
+      passTime(IDLE_RELEASE_MS);
+      expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(true);
+
+      await runTurn(replacement, "second prompt");
+
+      const methods = replacement.requests().map((request) => request.method);
+      expect(methods).toContain("thread/resume");
+      expect(methods).not.toContain("thread/read");
+    },
+    { replacementHandlers: resumesThreadEndingWith("turn-1") },
+  );
+});
+
+test("an idle-released Codex session rereads a thread another client continued", async () => {
+  await withIdleCodexSession(
+    async ({ session, initial, replacement, runTurn, passTime }) => {
+      await runTurn(initial, "first prompt");
+      passTime(IDLE_RELEASE_MS);
+      expect(await session.releaseIdleRuntime(IDLE_RELEASE_MS)).toBe(true);
+
+      await runTurn(replacement, "second prompt");
+
+      expect(replacement.requests().map((request) => request.method)).toContain("thread/read");
+    },
+    { replacementHandlers: resumesThreadEndingWith("turn-1", "turn-from-another-client") },
   );
 });
 
