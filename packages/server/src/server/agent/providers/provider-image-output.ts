@@ -237,16 +237,25 @@ export function materializeProviderImage(image: {
 // from being mistaken for a provider image during history replay. The separator still accepts old
 // doubled-backslash Windows history; new Windows output uses file URIs. Alt text and source may
 // carry backslash escapes: a Paseo home such as "D:\Paseo Data (main)" puts "\)" in the source.
-// In the alt text a backslash always starts an escape, except a lone one right before the closing
-// bracket, which the plain alt text older readers matched may end in. Letting a backslash be read
-// either way made a failed match try every split of a run of them, so about 50 backslashes held
-// the daemon for seconds. In the source only "\)" reads two ways, and the shorter way fails at once.
-const PROVIDER_IMAGE_MARKDOWN = new RegExp(
-  `^!\\[(?:\\\\[\\s\\S]|[^\\]\\\\])*\\\\?\\]\\((?:\\\\\\)|[^)])*(?:${PROVIDER_IMAGE_ATTACHMENT_DIR}(?:-[^/\\\\)]+)?|${PROVIDER_IMAGE_DIR})[/\\\\]+(?:[^/\\\\)]+[/\\\\]+)?[0-9a-f]{64}\\.[a-z0-9]+\\)`,
-);
+// In the source only "\)" reads two ways, and the shorter way fails at once.
+const PROVIDER_IMAGE_SOURCE = `\\((?:\\\\\\)|[^)])*(?:${PROVIDER_IMAGE_ATTACHMENT_DIR}(?:-[^/\\\\)]+)?|${PROVIDER_IMAGE_DIR})[/\\\\]+(?:[^/\\\\)]+[/\\\\]+)?[0-9a-f]{64}\\.[a-z0-9]+\\)`;
+
+// Each pattern lets the alt text end in one place only. A failed match rescans the rest of the text
+// for a source wherever the alt text can end, so one pattern accepting both kinds below held the
+// daemon for seconds on text repeating "\](". Reading a backslash two ways made a failed match try
+// every split of a run of backslashes, and took as long.
+const PROVIDER_IMAGE_MARKDOWN = [
+  // Alt text as this writer escapes it: a backslash always escapes the next character, so the alt
+  // text ends at the first "]" no backslash escapes.
+  new RegExp(`^!\\[(?:\\\\[\\s\\S]|[^\\]\\\\])*\\]${PROVIDER_IMAGE_SOURCE}`),
+  // Plain alt text, as older readers matched it: up to the first "]", even one after a lone
+  // backslash.
+  new RegExp(`^!\\[[^\\]]*\\]${PROVIDER_IMAGE_SOURCE}`),
+];
 
 export function isProviderImageMarkdown(text: string): boolean {
-  return PROVIDER_IMAGE_MARKDOWN.test(text.trimStart());
+  const markdown = text.trimStart();
+  return PROVIDER_IMAGE_MARKDOWN.some((pattern) => pattern.test(markdown));
 }
 
 interface RenderProviderImageOutputOptions {

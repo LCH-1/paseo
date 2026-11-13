@@ -140,6 +140,23 @@ describe("isProviderImageMarkdown", () => {
     expect(performance.now() - startedAt).toBeLessThan(100);
   });
 
+  test("answers at once for text that closes and reopens its alt text many times", () => {
+    // Every "\](" was a place the alt text could end, and each one rescanned the rest of the
+    // text for a source: 30KB of them held the daemon for a quarter of a second.
+    const rejected = [`![${"\\](".repeat(10_000)}x`, `![${"a\\](b".repeat(10_000)}`];
+    const accepted = renderProviderImageOutputAsAssistantMarkdown({
+      path: `/tmp/paseo-attachments/${HASH}.png`,
+      altText: "](".repeat(10_000),
+    });
+
+    const startedAt = performance.now();
+    expect(rejected.map((text) => isProviderImageMarkdown(text))).toEqual([false, false]);
+    expect(accepted?.type === "assistant_message" && isProviderImageMarkdown(accepted.text)).toBe(
+      true,
+    );
+    expect(performance.now() - startedAt).toBeLessThan(100);
+  });
+
   test("rejects user-authored markdown that is not a materialized attachment", () => {
     // No content hash — a hand-written path, not something the writer produced.
     expect(isProviderImageMarkdown("![diagram](./paseo-attachments/notes.png)")).toBe(false);
