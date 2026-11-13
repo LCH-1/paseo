@@ -1072,6 +1072,46 @@ describe("WorkspaceGitService checkout observation", () => {
     service.dispose();
   });
 
+  test("repositories registered together fetch fifteen seconds apart", async () => {
+    const watcher = createWatcherHarness();
+    const otherRepo = path.resolve("/tmp/paseo-observation-other-repo");
+    const fetchedAt = new Map<string, number[]>();
+    const runGitFetch = vi.fn(async (cwd: string, observer) => {
+      fetchedAt.set(cwd, [...(fetchedAt.get(cwd) ?? []), Date.now()]);
+      observer.onRefSnapshot("before");
+      observer.onRefSnapshot("after");
+      return { changes: [], nonRemoteRefsChanged: false, remoteRefs: new Set(), error: null };
+    });
+    const service = createService(watcher, {
+      getCheckoutSnapshotFacts: vi.fn(async (cwd: string) => ({
+        ...createCheckoutFacts(cwd),
+        remoteUrl: REMOTE_URL,
+      })),
+      hasOriginRemote: vi.fn(async () => true),
+      runGitFetch,
+    });
+    const startedAt = Date.now();
+    const first = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    const second = service.registerWorkspace({ cwd: otherRepo }, vi.fn());
+    await vi.waitFor(() => expect(runGitFetch).toHaveBeenCalledTimes(1));
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(runGitFetch).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(runGitFetch).toHaveBeenCalledTimes(4);
+
+    const offsets = [REPO_CWD, otherRepo].map((cwd) =>
+      (fetchedAt.get(cwd) ?? []).map((at) => Math.round((at - startedAt) / 1_000)),
+    );
+    const [firstOffsets, secondOffsets] = offsets;
+    expect(secondOffsets?.[0]! - firstOffsets?.[0]!).toBeGreaterThanOrEqual(15);
+    expect(secondOffsets?.[1]! - firstOffsets?.[1]!).toBeGreaterThanOrEqual(15);
+
+    first.unsubscribe();
+    second.unsubscribe();
+    service.dispose();
+  });
+
   test("a repository config change ends a fetch backoff at the next tick", async () => {
     const watcher = createWatcherHarness();
     const fetchIntervalMs = 180_000;

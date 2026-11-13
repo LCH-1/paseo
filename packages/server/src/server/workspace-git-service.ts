@@ -92,6 +92,9 @@ const BACKGROUND_GIT_FETCH_MAX_BACKOFF_TICKS = 5;
 // in this many: every 15 minutes instead of every 3. The first tick after anyone is back fetches.
 const BACKGROUND_GIT_FETCH_AWAY_AFTER_MS = 15 * 60_000;
 const BACKGROUND_GIT_FETCH_AWAY_EVERY_TICKS = 5;
+// Repositories registered together (all of them, when the daemon starts) would otherwise fetch in
+// the same second every tick and spawn their Git processes in one burst.
+const BACKGROUND_GIT_FETCH_STAGGER_MS = 15_000;
 const FETCH_METADATA_ECHO_TTL_MS = 5_000;
 export const WORKSPACE_GIT_OBSERVATION_REENSURE_INTERVAL_MS = 60_000;
 const FORGE_PR_STATUS_POLL_FAST_INTERVAL_MS = 20_000;
@@ -485,6 +488,7 @@ interface RepoGitTarget {
   fallbackPollQuietTickCount: number;
   recovery: WatchRecoveryState;
   intervalId: NodeJS.Timeout | null;
+  fetchStartTimer: NodeJS.Timeout | null;
   fetchInFlight: boolean;
   fetchFailureCount: number;
   fetchTicksToSkip: number;
@@ -678,6 +682,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   private readonly checkoutDiffCache = new CheckoutDiffCache(() => this.deps.now().getTime());
   private watcherErrorCallbackCount = 0;
   private fetchingForAwayClients = false;
+  private nextFetchStartSlotAtMs = 0;
   constructor(options: WorkspaceGitServiceOptions) {
     this.logger = options.logger.child({ module: "workspace-git-service" });
     this.paseoHome = options.paseoHome;
@@ -2264,6 +2269,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       fallbackPollQuietTickCount: 0,
       recovery: { attemptCount: 0, timer: null, establishedAt: null },
       intervalId: null,
+      fetchStartTimer: null,
       fetchInFlight: false,
       fetchFailureCount: 0,
       fetchTicksToSkip: 0,
@@ -2303,15 +2309,35 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     if (!hasOrigin) {
       return;
     }
-    repoTarget.intervalId = setInterval(() => {
-      if (repoTarget.fetchTicksToSkip > 0) {
-        repoTarget.fetchTicksToSkip -= 1;
+    const startFetching = () => {
+      repoTarget.fetchStartTimer = null;
+      if (repoTarget.closed || this.repoTargets.get(repoGitRoot) !== repoTarget) {
         return;
       }
-      if (this.deferFetchWhileAway(repoTarget)) return;
+      repoTarget.intervalId = setInterval(() => {
+        if (repoTarget.fetchTicksToSkip > 0) {
+          repoTarget.fetchTicksToSkip -= 1;
+          return;
+        }
+        if (this.deferFetchWhileAway(repoTarget)) return;
+        void this.runRepoFetch(repoTarget);
+      }, BACKGROUND_GIT_FETCH_INTERVAL_MS);
       void this.runRepoFetch(repoTarget);
-    }, BACKGROUND_GIT_FETCH_INTERVAL_MS);
-    void this.runRepoFetch(repoTarget);
+    };
+    const startDelayMs = this.claimFetchStartSlot();
+    if (startDelayMs > 0) {
+      repoTarget.fetchStartTimer = setTimeout(startFetching, startDelayMs);
+    } else {
+      startFetching();
+    }
+  }
+
+  /** Spaces fetch schedules started close together; returns how long this one should wait. */
+  private claimFetchStartSlot(): number {
+    const now = this.deps.now().getTime();
+    const startAt = Math.max(now, this.nextFetchStartSlotAtMs);
+    this.nextFetchStartSlotAtMs = startAt + BACKGROUND_GIT_FETCH_STAGGER_MS;
+    return startAt - now;
   }
 
   private async startRepoMetadataObservation(
@@ -3973,6 +3999,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     if (target.intervalId) {
       clearInterval(target.intervalId);
       target.intervalId = null;
+    }
+    if (target.fetchStartTimer) {
+      clearTimeout(target.fetchStartTimer);
+      target.fetchStartTimer = null;
     }
     if (target.fallbackPollTimer) {
       clearTimeout(target.fallbackPollTimer);
