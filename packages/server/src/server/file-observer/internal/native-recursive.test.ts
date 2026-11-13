@@ -10,9 +10,14 @@ import { createObserverPaths } from "./paths.js";
 
 // Native watchers may coalesce file removals into change notifications. Keep the
 // filesystem real while controlling which notifications reach reconciliation.
-test.each(["existing", "new"])(
-  "shallow scans recover coalesced deletes of %s files in nested scopes",
-  async (population) => {
+test.each([
+  ["existing", false],
+  ["new", false],
+  ["existing", true],
+  ["new", true],
+])(
+  "shallow scans recover coalesced deletes of %s files in nested scopes (signature filter %s)",
+  async (population, filterUnchangedChanges) => {
     const root = await mkdtemp(join(tmpdir(), "native-scopes-"));
     const paths = createObserverPaths(process.platform);
     const removed = [
@@ -50,6 +55,7 @@ test.each(["existing", "new"])(
           on: (event, onError) => notifications.on(event, onError),
         };
       },
+      { filterUnchangedChanges },
     );
     try {
       await backend.start();
@@ -60,6 +66,8 @@ test.each(["existing", "new"])(
       await Promise.all(removed.map((path) => rm(path)));
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
       for (const path of removed) notifications.emit("change", "change", path);
+      // With the signature filter a change on a known path settles a stat first.
+      await vi.waitFor(() => expect(backend.getDiagnostics().pendingClassificationCount).toBe(0));
       await vi.advanceTimersByTimeAsync(8_000);
       vi.useRealTimers();
       await expect
@@ -485,5 +493,147 @@ test("a file classified with no parent bucket yet still gets its delete emitted"
     await backend.close();
     await observer.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Windows announces an access-time commit (a read of a file, a listing of a
+// directory) as a change with nothing changed. Each one used to fan out into
+// Git refreshes and inventory audits; the stat signature filters them.
+async function createSignatureFixture(options: {
+  filterUnchangedChanges: boolean;
+  racyWindowMs: number;
+}) {
+  const root = await mkdtemp(join(tmpdir(), "native-signature-"));
+  const directory = join(root, "refs");
+  const file = join(root, "HEAD");
+  await mkdir(directory);
+  await writeFile(join(directory, "main"), "a".repeat(41));
+  await writeFile(file, "ref: refs/heads/main\n");
+  const paths = createObserverPaths(process.platform);
+  const events: FileChange[] = [];
+  const notifications = new EventEmitter();
+  const observer = createFileObserver();
+  let active = true;
+  const metrics = observer.getDiagnostics();
+  const backend = createNativeRecursiveBackend(
+    {
+      root,
+      metrics,
+      isActive: () => active,
+      isIgnored: () => false,
+      isPathInside: paths.isInside,
+      queueEvent: (type, path) => events.push({ type, path }),
+      fail: (error) => {
+        throw error;
+      },
+    },
+    paths,
+    (_root, listener) => {
+      notifications.on("change", listener);
+      return {
+        close: () => notifications.removeAllListeners(),
+        on: (event, onError) => notifications.on(event, onError),
+      };
+    },
+    options,
+  );
+  await backend.start();
+  const updates = (path: string) =>
+    events.filter((event) => event.type === "update" && event.path === path).length;
+  return {
+    root,
+    directory,
+    file,
+    metrics,
+    backend,
+    updates,
+    emitChange: (path: string) => notifications.emit("change", "change", path),
+    close: async () => {
+      active = false;
+      await backend.close();
+      await observer.close();
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+test("a change that leaves a known file's stat signature alone is dropped", async () => {
+  const fixture = await createSignatureFixture({ filterUnchangedChanges: true, racyWindowMs: 0 });
+  try {
+    fixture.emitChange(fixture.file);
+    await expect.poll(() => fixture.updates(fixture.file)).toBe(1);
+
+    // Access-time commit: nothing about the file moved.
+    fixture.emitChange(fixture.file);
+    await expect.poll(() => fixture.metrics.nativeUnchangedChangeEventCount).toBe(1);
+    expect(fixture.updates(fixture.file)).toBe(1);
+
+    // A same-size rewrite moves the change time and must still be announced.
+    await new Promise((done) => setTimeout(done, 50));
+    await writeFile(fixture.file, "ref: refs/heads/mair\n");
+    fixture.emitChange(fixture.file);
+    await expect.poll(() => fixture.updates(fixture.file)).toBe(2);
+    expect(fixture.metrics.nativeUnchangedChangeEventCount).toBe(1);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a change that leaves a known directory alone neither updates nor rescans it", async () => {
+  const fixture = await createSignatureFixture({ filterUnchangedChanges: true, racyWindowMs: 0 });
+  try {
+    fixture.emitChange(fixture.directory);
+    await expect.poll(() => fixture.updates(fixture.directory)).toBe(1);
+    await expect
+      .poll(() => fixture.backend.getDiagnostics().pendingReconciliationWorkCount, {
+        timeout: 10_000,
+      })
+      .toBe(0);
+    const scansBefore = fixture.metrics.nativeShallowScanCount;
+    const reconciliationsBefore = fixture.metrics.reconciliationCount;
+
+    fixture.emitChange(fixture.directory);
+    await expect.poll(() => fixture.metrics.nativeUnchangedChangeEventCount).toBe(1);
+    expect(fixture.updates(fixture.directory)).toBe(1);
+    expect(fixture.backend.getDiagnostics().pendingReconciliationWorkCount).toBe(0);
+    expect(fixture.metrics.nativeShallowScanCount).toBe(scansBefore);
+    expect(fixture.metrics.reconciliationCount).toBe(reconciliationsBefore);
+
+    // A new entry moves the directory's modification time.
+    await new Promise((done) => setTimeout(done, 50));
+    await writeFile(join(fixture.directory, "feature"), "b".repeat(41));
+    fixture.emitChange(fixture.directory);
+    await expect.poll(() => fixture.updates(fixture.directory)).toBe(2);
+  } finally {
+    await fixture.close();
+  }
+}, 20_000);
+
+test("a signature taken right after a write is not trusted to drop the next change", async () => {
+  const fixture = await createSignatureFixture({
+    filterUnchangedChanges: true,
+    racyWindowMs: 60_000,
+  });
+  try {
+    fixture.emitChange(fixture.file);
+    await expect.poll(() => fixture.updates(fixture.file)).toBe(1);
+    // Within the racy window another write could share the timestamp tick.
+    fixture.emitChange(fixture.file);
+    await expect.poll(() => fixture.updates(fixture.file)).toBe(2);
+    expect(fixture.metrics.nativeUnchangedChangeEventCount).toBe(0);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("without the signature filter every change on a known file is announced", async () => {
+  const fixture = await createSignatureFixture({ filterUnchangedChanges: false, racyWindowMs: 0 });
+  try {
+    fixture.emitChange(fixture.file);
+    fixture.emitChange(fixture.file);
+    expect(fixture.updates(fixture.file)).toBe(2);
+    expect(fixture.metrics.nativeUnchangedChangeEventCount).toBe(0);
+  } finally {
+    await fixture.close();
   }
 });

@@ -1,4 +1,4 @@
-import { type Dirent, watch } from "node:fs";
+import { type Dirent, type Stats, watch } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { BackendDiagnostics, ObservationBackend, ObservationHost } from "./contracts.js";
@@ -19,6 +19,15 @@ const OPTIONAL_AUDIT_MAX_DIRTY_MS = 8_000;
 const FULL_AUDIT_QUIET_MS = 30_000;
 const FULL_AUDIT_MIN_INTERVAL_MS = 30_000;
 const FULL_AUDIT_MAX_DIRTY_MS = 5 * 60_000;
+// Windows reports a last-access time update as a change. NTFS commits access
+// times at most once an hour per entry, so merely reading a file or listing a
+// directory announces a change that changed nothing, and each one fanned out
+// into Git refreshes and audits. A change whose stat signature matches the one
+// already announced is dropped. A signature taken within this window of its
+// own modification is not trusted: another write in the same timestamp tick
+// would leave it identical (the racy case Git handles the same way).
+const CHANGE_SIGNATURE_RACY_WINDOW_MS = 3_000;
+const MAX_CHANGE_SIGNATURES = 16_384;
 
 interface DirectoryEntry {
   directories: Set<string>;
@@ -42,12 +51,34 @@ type WatchDirectory = (
 const watchDirectory: WatchDirectory = (root, listener) =>
   watch(root, { recursive: true }, listener);
 
+export interface NativeRecursiveOptions {
+  /**
+   * Drop a change on a known path whose stat signature has not moved since the
+   * last event announced for it. On by default on Windows, where access-time
+   * updates arrive as changes; FSEvents does not report them.
+   */
+  filterUnchangedChanges?: boolean;
+  racyWindowMs?: number;
+  now?: () => number;
+}
+
+interface ChangeSignature {
+  value: string;
+  racy: boolean;
+}
+
+interface StatJob {
+  path: string;
+  run: () => Promise<void>;
+}
+
 export function createNativeRecursiveBackend(
   host: ObservationHost,
   paths: ObserverPaths,
   observe: WatchDirectory = watchDirectory,
+  options: NativeRecursiveOptions = {},
 ): ObservationBackend {
-  return new NativeRecursiveBackend(host, paths, observe);
+  return new NativeRecursiveBackend(host, paths, observe, options);
 }
 
 class NativeRecursiveBackend implements ObservationBackend {
@@ -63,10 +94,13 @@ class NativeRecursiveBackend implements ObservationBackend {
   private directories = new Set<string>();
   private entries = new Map<string, DirectoryEntry>();
   private readonly classifications = new Set<Promise<void>>();
-  private readonly classificationQueue: Array<{
-    path: string;
-    onPresent: (isDirectory: boolean) => void;
-  }> = [];
+  private readonly classificationQueue: StatJob[] = [];
+  // Last stat signature announced to consumers per path. Entries for deleted
+  // paths are harmless: a recreated file has a new identity and change time.
+  private readonly changeSignatures = new Map<string, ChangeSignature>();
+  private readonly filterUnchangedChanges: boolean;
+  private readonly racyWindowMs: number;
+  private readonly now: () => number;
   private readonly localScopes = new Set<string>();
   private readonly changeScopes = new Set<string>();
   private readonly recursiveScopes = new Set<string>();
@@ -92,7 +126,12 @@ class NativeRecursiveBackend implements ObservationBackend {
     private readonly host: ObservationHost,
     private readonly paths: ObserverPaths,
     private readonly observe: WatchDirectory,
-  ) {}
+    options: NativeRecursiveOptions,
+  ) {
+    this.filterUnchangedChanges = options.filterUnchangedChanges ?? process.platform === "win32";
+    this.racyWindowMs = options.racyWindowMs ?? CHANGE_SIGNATURE_RACY_WINDOW_MS;
+    this.now = options.now ?? Date.now;
+  }
 
   async start(): Promise<void> {
     this.watchRoot();
@@ -148,6 +187,7 @@ class NativeRecursiveBackend implements ObservationBackend {
     this.orphanFiles.clear();
     this.directories.clear();
     this.entries.clear();
+    this.changeSignatures.clear();
   }
 
   private watchRoot(): void {
@@ -164,15 +204,19 @@ class NativeRecursiveBackend implements ObservationBackend {
       if (this.host.isIgnored(path)) return;
       const scope = path === this.host.root ? this.host.root : dirname(path);
       const knownDirectory = this.directories.has(path);
-      this.requestChangeAudit(scope);
       if (eventType === "change") {
         this.host.metrics.nativeChangeEventCount += 1;
-        this.host.queueEvent("update", path);
-        if (knownDirectory) this.requestAudit(path, true);
-        if (knownDirectory || this.files.has(path)) return;
+        if (knownDirectory || this.files.has(path)) {
+          if (this.filterUnchangedChanges) this.verifyChange(path, scope, knownDirectory);
+          else this.acceptChange(path, scope, knownDirectory);
+          return;
+        }
         // A coalesced creation can arrive only as a change. Classify unknown
         // paths so later deletion scans can find them in the inventory.
+        this.requestChangeAudit(scope);
+        this.host.queueEvent("update", path);
       } else {
+        this.requestChangeAudit(scope);
         this.host.metrics.nativeRenameEventCount += 1;
         if (knownDirectory) this.requestAudit(scope);
       }
@@ -185,7 +229,7 @@ class NativeRecursiveBackend implements ObservationBackend {
             this.files.add(path);
             entry.files.add(path);
           } else {
-            // No inventory for the parent yet. startClassification already
+            // No inventory for the parent yet. runClassification already
             // announced this as a create, so it must stay findable for a
             // matching delete: track it directly until a scoped audit builds
             // the bucket and adopts it (see orphanFiles above).
@@ -673,6 +717,71 @@ class NativeRecursiveBackend implements ObservationBackend {
     this.safetyAuditLastDirtyAt = null;
   }
 
+  private acceptChange(path: string, scope: string, knownDirectory: boolean): void {
+    this.requestChangeAudit(scope);
+    this.host.queueEvent("update", path);
+    if (knownDirectory) this.requestAudit(path, true);
+  }
+
+  private verifyChange(path: string, scope: string, knownDirectory: boolean): void {
+    if (this.classificationQueue.length >= MAX_QUEUED_CLASSIFICATIONS) {
+      this.acceptChange(path, scope, knownDirectory);
+      return;
+    }
+    this.classificationQueue.push({
+      path,
+      run: () => this.runChangeVerification(path, scope, knownDirectory),
+    });
+    this.pumpClassifications();
+  }
+
+  private async runChangeVerification(
+    path: string,
+    scope: string,
+    knownDirectory: boolean,
+  ): Promise<void> {
+    let signature: ChangeSignature | null = null;
+    try {
+      signature = this.signatureOf(await stat(path));
+    } catch {
+      // Missing or unreadable: the scoped audit decides what happened.
+    }
+    if (!this.host.isActive() || this.host.isIgnored(path)) return;
+    const previous = this.changeSignatures.get(path);
+    if (signature && previous && !previous.racy && previous.value === signature.value) {
+      this.host.metrics.nativeUnchangedChangeEventCount += 1;
+      return;
+    }
+    this.rememberSignature(path, signature);
+    this.acceptChange(path, scope, knownDirectory);
+  }
+
+  private signatureOf(stats: Stats): ChangeSignature {
+    // An access-time commit leaves all of these alone. A write moves the change
+    // time even when it keeps the size and restores the modification time.
+    const value = [
+      stats.isDirectory() ? "d" : "f",
+      stats.mtimeMs,
+      stats.ctimeMs,
+      stats.size,
+      stats.ino,
+      stats.birthtimeMs,
+    ].join(":");
+    const changedAt = Math.max(stats.mtimeMs, stats.ctimeMs);
+    return { value, racy: this.now() - changedAt < this.racyWindowMs };
+  }
+
+  private rememberSignature(path: string, signature: ChangeSignature | null): void {
+    if (!this.filterUnchangedChanges) return;
+    this.changeSignatures.delete(path);
+    if (!signature) return;
+    this.changeSignatures.set(path, signature);
+    if (this.changeSignatures.size > MAX_CHANGE_SIGNATURES) {
+      const oldest = this.changeSignatures.keys().next().value;
+      if (oldest !== undefined) this.changeSignatures.delete(oldest);
+    }
+  }
+
   private classify(path: string, onPresent: (isDirectory: boolean) => void): void {
     if (this.classificationQueue.length >= MAX_QUEUED_CLASSIFICATIONS) {
       // Shed load onto the scoped audit, which reads the directory once instead
@@ -680,7 +789,7 @@ class NativeRecursiveBackend implements ObservationBackend {
       this.requestAudit(dirname(path));
       return;
     }
-    this.classificationQueue.push({ path, onPresent });
+    this.classificationQueue.push({ path, run: () => this.runClassification(path, onPresent) });
     this.pumpClassifications();
   }
 
@@ -701,31 +810,40 @@ class NativeRecursiveBackend implements ObservationBackend {
     ) {
       const next = this.classificationQueue.shift();
       if (!next) return;
-      this.startClassification(next.path, next.onPresent);
+      this.startStatJob(next);
     }
   }
 
-  private startClassification(path: string, onPresent: (isDirectory: boolean) => void): void {
+  private startStatJob(job: StatJob): void {
+    let running!: Promise<void>;
+    running = job.run().finally(() => {
+      this.classifications.delete(running);
+      if (this.host.isActive()) this.pumpClassifications();
+    });
+    this.classifications.add(running);
+  }
+
+  private runClassification(
+    path: string,
+    onPresent: (isDirectory: boolean) => void,
+  ): Promise<void> {
     this.host.metrics.nativeClassificationCount += 1;
-    let classification!: Promise<void>;
-    classification = stat(path)
+    return stat(path)
       .then((stats) => {
         this.host.queueEvent("create", path);
+        // Consumers now know this state; a later change has to move it to count.
+        this.rememberSignature(path, this.signatureOf(stats));
         if (this.host.isActive() && !this.host.isIgnored(path)) onPresent(stats.isDirectory());
         return undefined;
       })
       .catch((error: unknown) => {
         if (isMissingPathError(error)) {
+          this.changeSignatures.delete(path);
           this.host.queueEvent("delete", path);
           return;
         }
         this.host.fail(toError(error));
-      })
-      .finally(() => {
-        this.classifications.delete(classification);
-        if (this.host.isActive()) this.pumpClassifications();
       });
-    this.classifications.add(classification);
   }
 
   private assertWithinLimit(entryCount: number): void {

@@ -43,6 +43,8 @@ export interface FileObserverDiagnostics {
   nativePathlessEventCount: number;
   nativeClassificationCount: number;
   nativeShallowScanCount: number;
+  /** Changes dropped because the path's stat signature did not move (Windows access-time updates). */
+  nativeUnchangedChangeEventCount: number;
   lastReconciliationDurationMs: number;
   maxReconciliationDurationMs: number;
 }
@@ -170,6 +172,7 @@ function createObserverMetrics(): ObserverMetrics {
     nativePathlessEventCount: 0,
     nativeClassificationCount: 0,
     nativeShallowScanCount: 0,
+    nativeUnchangedChangeEventCount: 0,
     lastReconciliationDurationMs: 0,
     maxReconciliationDurationMs: 0,
   };

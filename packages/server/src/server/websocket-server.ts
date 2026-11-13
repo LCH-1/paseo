@@ -321,6 +321,7 @@ function createFallbackWorkspaceGitService(): WorkspaceGitService {
         nativePathlessEventCount: 0,
         nativeClassificationCount: 0,
         nativeShallowScanCount: 0,
+        nativeUnchangedChangeEventCount: 0,
         lastReconciliationDurationMs: 0,
         maxReconciliationDurationMs: 0,
       },
