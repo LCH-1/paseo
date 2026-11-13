@@ -34,6 +34,9 @@ import type { UsageReportEntry, UsageView } from "./types";
 // Poll without bypassing the daemon's five-minute source cache. Explicit refresh
 // uses forceRefresh to fetch a source before that cache expires.
 const REPORTS_STALE_TIME_MS = 60_000;
+// The daemon renews its cache behind a poll that lands in the cache's last minute, so
+// polling at least once a minute means no poll waits for the vendor. A longer interval
+// would make polls wait again and leave the gauges up to twice as old.
 const REPORTS_REFRESH_INTERVAL_MS = 60_000;
 
 /** Every report list of a host: its own and each agent's. */
