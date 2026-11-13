@@ -27,9 +27,11 @@ const FULL_AUDIT_MAX_DIRTY_MS = 5 * 60_000;
 // own modification is not trusted: another write in the same timestamp tick
 // would leave it identical (the racy case Git handles the same way).
 const CHANGE_SIGNATURE_RACY_WINDOW_MS = 3_000;
-// Bounds memory per watched root (a few hundred bytes per entry), least recently reported first.
-// An evicted path costs one extra announced change.
-const MAX_CHANGE_SIGNATURES = 4_096;
+// Bounds memory per watched root, least recently reported first. An entry costs about 700 bytes
+// with Windows paths (the joined path string dominates), so a full root holds about 0.7 MB; every
+// watched working tree and Git directory has its own. The paths that keep reporting (Git metadata,
+// files an agent keeps rereading) stay; an evicted path costs one extra announced change.
+const MAX_CHANGE_SIGNATURES = 1_024;
 
 interface DirectoryEntry {
   directories: Set<string>;
