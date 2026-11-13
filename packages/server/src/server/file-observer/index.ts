@@ -66,7 +66,7 @@ export function createFileObserver(): FileObserver {
   const paths = createObserverPaths(platform);
   const createBackend: CreateObservationBackend =
     platform === "darwin" || platform === "win32"
-      ? (host) => createNativeRecursiveBackend(host, paths)
+      ? (host) => createNativeRecursiveBackend(host, paths, undefined, { platform })
       : (host) => createLinuxBackend(host, paths);
   return new FileObserverService(createBackend, paths);
 }

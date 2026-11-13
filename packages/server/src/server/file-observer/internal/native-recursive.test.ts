@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test, vi } from "vitest";
@@ -504,7 +504,8 @@ test("a file classified with no parent bucket yet still gets its delete emitted"
 const aMinuteLater = () => Date.now() + 60_000;
 
 async function createSignatureFixture(options: {
-  filterUnchangedChanges: boolean;
+  filterUnchangedChanges?: boolean;
+  platform?: NodeJS.Platform;
   now?: () => number;
   maxChangeSignatures?: number;
 }) {
@@ -583,6 +584,51 @@ test("a change that leaves a known file's stat signature alone is dropped", asyn
     await fixture.close();
   }
 });
+
+test("a same-size rewrite that restores the modification time is told apart by its change time", async () => {
+  const fixture = await createSignatureFixture({ filterUnchangedChanges: true, now: aMinuteLater });
+  // A whole second an hour ago: every filesystem stores it exactly, so only the change time moves.
+  const modifiedAt = new Date(Math.floor(Date.now() / 1_000) * 1_000 - 3_600_000);
+  try {
+    await utimes(fixture.file, modifiedAt, modifiedAt);
+    fixture.emitChange(fixture.file);
+    await expect.poll(() => fixture.updates(fixture.file)).toBe(1);
+
+    await new Promise((done) => setTimeout(done, 50));
+    await writeFile(fixture.file, "ref: refs/heads/mair\n");
+    await utimes(fixture.file, modifiedAt, modifiedAt);
+    const rewritten = await stat(fixture.file);
+    expect(rewritten.mtimeMs).toBe(modifiedAt.getTime());
+    expect(rewritten.size).toBe("ref: refs/heads/main\n".length);
+
+    fixture.emitChange(fixture.file);
+    await expect.poll(() => fixture.updates(fixture.file)).toBe(2);
+    expect(fixture.metrics.nativeUnchangedChangeEventCount).toBe(0);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test.each([
+  { platform: "win32", dropped: 1 },
+  { platform: "darwin", dropped: 0 },
+] as const)(
+  "the signature filter is on by default only on Windows ($platform)",
+  async ({ platform, dropped }) => {
+    const fixture = await createSignatureFixture({ platform, now: aMinuteLater });
+    try {
+      fixture.emitChange(fixture.file);
+      await expect.poll(() => fixture.updates(fixture.file)).toBe(1);
+      fixture.emitChange(fixture.file);
+      await expect
+        .poll(() => fixture.updates(fixture.file) + fixture.metrics.nativeUnchangedChangeEventCount)
+        .toBe(2);
+      expect(fixture.metrics.nativeUnchangedChangeEventCount).toBe(dropped);
+    } finally {
+      await fixture.close();
+    }
+  },
+);
 
 test("a change that leaves a known directory alone neither updates nor rescans it", async () => {
   const fixture = await createSignatureFixture({ filterUnchangedChanges: true, now: aMinuteLater });

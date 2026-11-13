@@ -60,6 +60,8 @@ export interface NativeRecursiveOptions {
    * updates arrive as changes; FSEvents does not report them.
    */
   filterUnchangedChanges?: boolean;
+  /** Decides the filter's default; the platform the daemon runs on unless a test says otherwise. */
+  platform?: NodeJS.Platform;
   maxChangeSignatures?: number;
   now?: () => number;
 }
@@ -130,7 +132,8 @@ class NativeRecursiveBackend implements ObservationBackend {
     private readonly observe: WatchDirectory,
     options: NativeRecursiveOptions,
   ) {
-    this.filterUnchangedChanges = options.filterUnchangedChanges ?? process.platform === "win32";
+    this.filterUnchangedChanges =
+      options.filterUnchangedChanges ?? (options.platform ?? process.platform) === "win32";
     this.maxChangeSignatures = options.maxChangeSignatures ?? MAX_CHANGE_SIGNATURES;
     this.now = options.now ?? Date.now;
   }
