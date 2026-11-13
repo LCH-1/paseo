@@ -410,6 +410,30 @@ describe("WorkspaceGitServiceImpl", () => {
     service.dispose();
   });
 
+  test("a waiting client keeps its priority for the extra pass its request queued", async () => {
+    const visibleCwd = path.resolve("/tmp/visible-repo");
+    const firstPass = createDeferred<CheckoutStatusGit>();
+    const passes: string[] = [];
+    const getCheckoutStatus = vi.fn((cwd: string) => {
+      passes.push(getGitCommandPriority());
+      return passes.length === 1 ? firstPass.promise : Promise.resolve(createCheckoutStatus(cwd));
+    });
+    const service = createService({ getCheckoutStatus });
+
+    const background = service.getSnapshot(visibleCwd, { includeForge: false });
+    await vi.waitFor(() => expect(passes).toHaveLength(1));
+    // The client also wants the pull request, which the pass under way does not load: its answer
+    // comes from a second pass of the same refresh loop.
+    const visible = service.getSnapshot(visibleCwd, { priority: "high" });
+    firstPass.resolve(createCheckoutStatus(visibleCwd));
+    await Promise.all([background, visible]);
+
+    expect(passes).toEqual(["normal", "high"]);
+    await service.getSnapshot(visibleCwd, { force: true, reason: "test", includeForge: false });
+    expect(passes.at(-1)).toBe("normal");
+    service.dispose();
+  });
+
   test("registerWorkspace returns a subscription without an initial snapshot contract", async () => {
     const service = createService();
 

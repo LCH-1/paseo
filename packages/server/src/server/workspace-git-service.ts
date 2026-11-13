@@ -478,7 +478,10 @@ interface WorkspaceGitTarget {
   latestForgeLoadedAtMs: number | null;
   latestSnapshot: WorkspaceGitRuntimeSnapshot | null;
   latestSnapshotLoadedAtMs: number | null;
-  /** A client is waiting for this workspace's first snapshot. */
+  /**
+   * A client is waiting for this workspace's first snapshot. It waits on the whole refresh loop,
+   * so this holds until the loop ends, including a pass queued for work the client asked for.
+   */
   clientWaiting: boolean;
   latestFacts: CheckoutSnapshotFacts | null;
   factsPromise: Promise<CheckoutSnapshotFacts> | null;
@@ -3242,6 +3245,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
 
     const promise = this.runWorkspaceRefreshLoop(target, request).finally(() => {
+      // A waiting client resolves with this loop, however many passes it took.
+      target.clientWaiting = false;
       const state = target.refreshState;
       if (state.status === "in-flight" && state.promise === promise) {
         target.refreshState = { status: "idle" };
@@ -3382,7 +3387,6 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
           },
           () => target.clientWaiting,
         );
-        target.clientWaiting = false;
         if (!admittedSnapshot) {
           break;
         }
