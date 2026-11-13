@@ -49,6 +49,7 @@ import { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { renderPromptAttachmentAsText } from "../prompt-attachments.js";
 import { composeSystemPromptParts } from "../system-prompt.js";
@@ -3400,9 +3401,18 @@ function buildCodexCustomProviderConfig(
   };
 }
 
+// A sub-agent card's log is rebuilt from the child's history on every child event. Codex
+// children run for hours, so the log keeps only the newest activity (as Claude's does).
+const CODEX_SUB_AGENT_LOG_MAX_ITEMS = 200;
+const CODEX_SUB_AGENT_LOG_MAX_CHARS = 32_000;
+// Projection only needs the tail the log can show, not the child's whole history.
+const CODEX_SUB_AGENT_LOG_SOURCE_ITEMS = CODEX_SUB_AGENT_LOG_MAX_ITEMS * 2;
+
 interface CodexSubAgentCallState {
   callId: string;
   toolCall: ToolCallTimelineItem;
+  /** The card subscribers last received for this call, from any emitting path. */
+  lastEmittedCard?: ToolCallTimelineItem;
   parentCallId: string | null;
   parentSubagentId: string | null;
   activityItemIds: Set<string>;
@@ -5621,7 +5631,15 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.persistedProviderSubagentEvents.push(event);
       return;
     }
+    this.rememberEmittedSubAgentCard(event);
     this.notifySubscribers(event);
+  }
+
+  private rememberEmittedSubAgentCard(event: AgentStreamEvent): void {
+    if (event.type !== "timeline" || event.item.type !== "tool_call") return;
+    if (event.item.detail.type !== "sub_agent") return;
+    const state = this.subAgentCallsByCallId.get(event.item.callId);
+    if (state) state.lastEmittedCard = event.item;
   }
 
   private notifySubscribers(event: AgentStreamEvent): void {
@@ -6086,7 +6104,11 @@ export class CodexAppServerAgentSession implements AgentSession {
     const childTimeline = this.getSubAgentChildTimeline(state);
     const log =
       childTimeline.length > 0
-        ? curateAgentActivity(childTimeline, { labelAssistantMessages: true })
+        ? curateAgentActivity(childTimeline.slice(-CODEX_SUB_AGENT_LOG_SOURCE_ITEMS), {
+            labelAssistantMessages: true,
+            maxItems: CODEX_SUB_AGENT_LOG_MAX_ITEMS,
+            maxChars: CODEX_SUB_AGENT_LOG_MAX_CHARS,
+          })
         : "";
     let resolvedStatus = status ?? state.toolCall.status;
     if (
@@ -6120,10 +6142,16 @@ export class CodexAppServerAgentSession implements AgentSession {
           };
     state.toolCall = nextToolCall;
     if (state.parentCallId && state.parentCallId !== callId) {
+      // The parent's log is built from its child items, so an unchanged card changes nothing.
+      const parent = this.subAgentCallsByCallId.get(state.parentCallId);
+      if (isDeepStrictEqual(parent?.childItems.get(state.callId), nextToolCall)) return;
       this.upsertSubAgentChildItem(state.parentCallId, state.callId, nextToolCall);
       this.emitSubAgentActivityUpdate(state.parentCallId);
       return;
     }
+    // A child's tool going from running to completed usually leaves the log as it was.
+    // Resending the same card makes every window redo its timeline for nothing.
+    if (isDeepStrictEqual(state.lastEmittedCard, nextToolCall)) return;
     this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item: nextToolCall });
   }
 

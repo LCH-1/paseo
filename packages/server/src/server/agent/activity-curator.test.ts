@@ -325,6 +325,21 @@ second line'`,
     expect(result).toContain("Message 4");
   });
 
+  it("keeps the newest entries that fit in maxChars", () => {
+    const timeline: AgentTimelineItem[] = [
+      { type: "user_message", text: "Oldest ".repeat(10).trim() },
+      { type: "assistant_message", text: "A".repeat(40) },
+      { type: "user_message", text: "Newest" },
+    ];
+
+    expect(curateAgentActivity(timeline, { maxChars: 100 })).toBe(
+      `[Earlier activity omitted]\n${"A".repeat(40)}\n[User] Newest`,
+    );
+    expect(curateAgentActivity(timeline, { maxChars: 1_000 })).toBe(
+      `[User] ${"Oldest ".repeat(10).trim()}\n${"A".repeat(40)}\n[User] Newest`,
+    );
+  });
+
   it("returns a default message when timeline is empty", () => {
     expect(curateAgentActivity([])).toBe("No activity to display.");
   });

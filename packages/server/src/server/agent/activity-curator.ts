@@ -13,9 +13,12 @@ const MAX_TOOL_SUMMARY_CHARS = 200;
 const MAX_FORK_CONTEXT_CHARS = 100_000;
 const MAX_FORK_METADATA_CHARS = 1_000;
 const FORK_HISTORY_OMITTED = "[Earlier chat history omitted]\n";
+const ACTIVITY_OMITTED = "[Earlier activity omitted]\n";
 
 interface ActivityCuratorOptions {
   maxItems?: number;
+  /** Keep the newest entries that fit in this many characters. 0 or unset keeps everything. */
+  maxChars?: number;
   labelAssistantMessages?: boolean;
   includeKinds?: readonly AgentTimelineItem["type"][];
   includeExternalToolInput?: boolean;
@@ -205,9 +208,10 @@ export function curateAgentActivity(
   options?: ActivityCuratorOptions,
 ): string {
   const entries = curateAgentActivityEntries(timeline, options);
-  return entries.length > 0
-    ? entries.map((entry) => entry.text).join("\n")
-    : "No activity to display.";
+  if (entries.length === 0) return "No activity to display.";
+  return options?.maxChars && options.maxChars > 0
+    ? fitNewestEntries(entries, options.maxChars, ACTIVITY_OMITTED)
+    : entries.map((entry) => entry.text).join("\n");
 }
 
 interface ForkCursorBoundary {
@@ -290,12 +294,12 @@ function buildForkContextText(input: {
   return `<chat-history-summary>\n${header.join("\n")}\n\n${input.body}\n</chat-history-summary>`;
 }
 
-function fitForkContextEntries(entries: ActivityEntry[], budget: number): string {
+function fitNewestEntries(entries: ActivityEntry[], budget: number, omitted: string): string {
   const length = entries.reduce((total, entry) => total + entry.text.length + 1, -1);
   if (length <= budget) return entries.map((entry) => entry.text).join("\n");
 
   const selected: string[] = [];
-  let remaining = budget - FORK_HISTORY_OMITTED.length;
+  let remaining = budget - omitted.length;
   for (let index = entries.length - 1; index >= 0; index--) {
     const text = entries[index]!.text;
     const size = text.length + (selected.length > 0 ? 1 : 0);
@@ -311,7 +315,7 @@ function fitForkContextEntries(entries: ActivityEntry[], budget: number): string
     selected.push(text);
     remaining -= size;
   }
-  return FORK_HISTORY_OMITTED + selected.toReversed().join("\n");
+  return omitted + selected.toReversed().join("\n");
 }
 
 export function buildAgentForkContextAttachment(input: {
@@ -340,7 +344,9 @@ export function buildAgentForkContextAttachment(input: {
   const metadata = { agentTitle: input.agentTitle, cwd: input.cwd };
   const budget = MAX_FORK_CONTEXT_CHARS - buildForkContextText({ body: "", ...metadata }).length;
   const body =
-    entries.length > 0 ? fitForkContextEntries(entries, budget) : "No chat history to display.";
+    entries.length > 0
+      ? fitNewestEntries(entries, budget, FORK_HISTORY_OMITTED)
+      : "No chat history to display.";
   return {
     attachment: {
       type: "text",

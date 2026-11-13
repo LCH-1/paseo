@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 import type {
   AgentClient,
@@ -16,6 +17,7 @@ import type {
   AgentSessionConfig,
   AgentSlashCommand,
   AgentStreamEvent,
+  ToolCallTimelineItem,
 } from "../agent-sdk-types.js";
 import {
   buildCodexAppServerEnv,
@@ -3347,7 +3349,7 @@ describe("Codex app-server provider", () => {
         id: "settled-child-thread",
         status: "completed",
       });
-      expect(events.at(-1)).toMatchObject({
+      expect(events.findLast((event) => event.type === "timeline")).toMatchObject({
         type: "timeline",
         item: {
           callId: "call-settled-child",
@@ -3752,6 +3754,117 @@ describe("Codex app-server provider", () => {
           type: "sub_agent",
           log: "[Assistant] Still on the same card.",
         },
+      });
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("keeps a long-running child's card log to its newest activity", async () => {
+    const appServer = createFakeCodexAppServer();
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    try {
+      const resultPromise = session.run("Delegate the investigation.");
+      await appServer.waitForTurnStart();
+      appServer.startsSubAgent({
+        callId: "spawn-child-long",
+        threadId: "child-thread-long",
+        agentPath: "/root/long-child",
+      });
+      // About 120KB of child messages, the size of cards seen after hours of child work.
+      for (let step = 0; step < 300; step += 1) {
+        appServer.says({
+          threadId: "child-thread-long",
+          itemId: `long-child-message-${step}`,
+          text: `Step ${step}: ${"checked ".repeat(50)}`,
+        });
+      }
+      appServer.completeTurn();
+
+      const result = await resultPromise;
+      const card = result.timeline.findLast(
+        (item) => item.type === "tool_call" && item.callId === "spawn-child-long",
+      );
+      if (card?.type !== "tool_call" || card.detail.type !== "sub_agent") {
+        throw new Error("Expected the child card");
+      }
+      expect({
+        withinLimit: card.detail.log.length <= 32_000,
+        marksOmission: card.detail.log.startsWith("[Earlier activity omitted]\n"),
+        keepsNewest: card.detail.log.endsWith(
+          `[Assistant] Step 299: ${"checked ".repeat(50).trim()}`,
+        ),
+        dropsOldest: card.detail.log.includes("Step 0:"),
+      }).toEqual({ withinLimit: true, marksOmission: true, keepsNewest: true, dropsOldest: false });
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("sends a child card again only when it changed", async () => {
+    const appServer = createFakeCodexAppServer();
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+    const cards: ToolCallTimelineItem[] = [];
+    session.subscribe((event) => {
+      if (
+        event.type === "timeline" &&
+        event.item.type === "tool_call" &&
+        event.item.callId === "spawn-child-quiet"
+      ) {
+        cards.push(event.item);
+      }
+    });
+
+    try {
+      const resultPromise = session.run("Delegate the investigation.");
+      await appServer.waitForTurnStart();
+      appServer.startsSubAgent({
+        callId: "spawn-child-quiet",
+        threadId: "child-thread-quiet",
+        agentPath: "/root/quiet-child",
+      });
+      for (const command of ["npm test", "npm run lint"]) {
+        appServer.startsTerminalCommand({
+          threadId: "child-thread-quiet",
+          turnId: "child-turn",
+          itemId: `child-${command}`,
+          processId: `process-${command}`,
+          command,
+        });
+        appServer.completesCommand({
+          threadId: "child-thread-quiet",
+          callId: `child-${command}`,
+          command,
+          output: "ok",
+        });
+      }
+      appServer.says({
+        threadId: "child-thread-quiet",
+        itemId: "quiet-child-message",
+        text: "Both pass.",
+      });
+      appServer.completeTurn({ threadId: "child-thread-quiet" });
+      appServer.completeTurn();
+      await resultPromise;
+
+      const repeated = cards.filter((card, index) => isDeepStrictEqual(card, cards[index - 1]));
+      expect(repeated).toEqual([]);
+      expect(cards.at(-1)).toMatchObject({
+        status: "completed",
+        detail: { type: "sub_agent", log: expect.stringContaining("[Assistant] Both pass.") },
       });
       appServer.assertNoErrors();
     } finally {
