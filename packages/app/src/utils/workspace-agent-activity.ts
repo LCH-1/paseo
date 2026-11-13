@@ -1,6 +1,6 @@
 import type { Agent, WorkspaceDescriptor } from "@/stores/session-store";
 import { isWorkspaceRootAgent } from "@/subagents/policies";
-import { deriveSidebarStateBucket } from "./sidebar-agent-state";
+import { aggregateSidebarStateBuckets, deriveSidebarStateBucket } from "./sidebar-agent-state";
 
 export interface WorkspaceAgentActivity {
   agentId: string;
@@ -32,6 +32,23 @@ function workspaceAgentStatus(agent: Agent): Agent["status"] {
   return agent.status === "running" ? "idle" : agent.status;
 }
 
+function mergeWorkspaceRootActivity(
+  current: WorkspaceAgentActivity,
+  incoming: WorkspaceAgentActivity,
+): WorkspaceAgentActivity {
+  const status = aggregateSidebarStateBuckets([current.status, incoming.status]);
+  const incomingStatusTimeWins =
+    status === incoming.status &&
+    (current.status !== status ||
+      !current.enteredAt ||
+      (incoming.enteredAt && incoming.enteredAt > current.enteredAt));
+  return {
+    agentId: incoming.agentId,
+    status,
+    enteredAt: incomingStatusTimeWins ? incoming.enteredAt : current.enteredAt,
+  };
+}
+
 export function buildWorkspaceAgentActivityIndex(
   agents: ReadonlyMap<string, Agent>,
   previous?: ReadonlyMap<string, WorkspaceAgentActivity>,
@@ -47,10 +64,8 @@ export function buildWorkspaceAgentActivityIndex(
 
     const enteredAt = agent.attentionTimestamp ?? agent.updatedAt;
     const latestActivityAt = latestActivityAtByWorkspaceId.get(agent.workspaceId);
-    if (latestActivityAt && enteredAt <= latestActivityAt) {
-      continue;
-    }
-    latestActivityAtByWorkspaceId.set(agent.workspaceId, enteredAt);
+    const isLatest = !latestActivityAt || enteredAt > latestActivityAt;
+    if (isLatest) latestActivityAtByWorkspaceId.set(agent.workspaceId, enteredAt);
 
     const status = deriveSidebarStateBucket({
       status: workspaceAgentStatus(agent),
@@ -58,11 +73,20 @@ export function buildWorkspaceAgentActivityIndex(
       requiresAttention: agent.requiresAttention,
       attentionReason: agent.attentionReason,
     });
-    activityByWorkspaceId.set(agent.workspaceId, {
-      agentId: agent.id,
-      status,
-      enteredAt,
-    });
+    const current = activityByWorkspaceId.get(agent.workspaceId);
+    if (!current) {
+      activityByWorkspaceId.set(agent.workspaceId, { agentId: agent.id, status, enteredAt });
+      continue;
+    }
+    // Provider identity follows the latest root; another root's permission still needs attention.
+    activityByWorkspaceId.set(
+      agent.workspaceId,
+      mergeWorkspaceRootActivity(current, {
+        agentId: isLatest ? agent.id : current.agentId,
+        status,
+        enteredAt,
+      }),
+    );
   }
 
   for (const [workspaceId, activity] of activityByWorkspaceId) {

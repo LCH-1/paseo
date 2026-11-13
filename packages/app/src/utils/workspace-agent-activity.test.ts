@@ -104,6 +104,53 @@ describe("workspace agent activity index", () => {
     expect(result.get("workspace-error")?.status).toBe("failed");
   });
 
+  it("keeps permission status from an older root while retaining the latest provider representative", () => {
+    const permission = agent({
+      id: "permission",
+      workspaceId: "workspace-a",
+      pendingPermissionCount: 1,
+      updatedAt: "2026-06-01T10:00:00Z",
+    });
+    const latest = agent({
+      id: "latest",
+      workspaceId: "workspace-a",
+      status: "running",
+      updatedAt: "2026-06-01T10:05:00Z",
+    });
+    const first = buildWorkspaceAgentActivityIndex(
+      new Map([
+        [permission.id, permission],
+        [latest.id, latest],
+      ]),
+    );
+    const reversed = buildWorkspaceAgentActivityIndex(
+      new Map([
+        [latest.id, latest],
+        [permission.id, permission],
+      ]),
+    );
+    expect(first.get("workspace-a")).toEqual({
+      agentId: "latest",
+      status: "needs_input",
+      enteredAt: permission.updatedAt,
+    });
+    expect(reversed).toEqual(first);
+    const cleared = {
+      ...permission,
+      pendingPermissions: [],
+      updatedAt: new Date("2026-06-01T10:06:00Z"),
+    };
+    expect(
+      buildWorkspaceAgentActivityIndex(
+        new Map([
+          [latest.id, latest],
+          [cleared.id, cleared],
+        ]),
+        first,
+      ).get("workspace-a"),
+    ).toMatchObject({ agentId: "permission", status: "running", enteredAt: latest.updatedAt });
+  });
+
   it("keeps the latest active root agent for each workspace", () => {
     const index = buildWorkspaceAgentActivityIndex(
       new Map([

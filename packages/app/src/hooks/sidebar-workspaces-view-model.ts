@@ -187,6 +187,14 @@ function deriveEffectiveWorkspaceStatus(input: {
   pendingCreateAttempts?: Record<string, PendingCreateAttempt>;
   workspaceAgentActivity?: ReadonlyMap<string, WorkspaceAgentActivity>;
 }): EffectiveWorkspaceStatus {
+  const rootAgentActivity = input.workspaceAgentActivity?.get(input.workspace.id);
+  if (
+    rootAgentActivity &&
+    aggregateSidebarStateBuckets([input.workspace.status, rootAgentActivity.status]) !==
+      input.workspace.status
+  ) {
+    return rootAgentActivity;
+  }
   if (input.workspace.status !== "done") {
     return { status: input.workspace.status, enteredAt: input.workspace.statusEnteredAt };
   }
@@ -200,7 +208,6 @@ function deriveEffectiveWorkspaceStatus(input: {
     return { status: "running", enteredAt: pendingStartedAt };
   }
 
-  const rootAgentActivity = input.workspaceAgentActivity?.get(input.workspace.id);
   if (rootAgentActivity && rootAgentActivity.status !== "done") {
     return rootAgentActivity;
   }

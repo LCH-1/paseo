@@ -798,6 +798,61 @@ function projectWorkspace(id: string, status: WorkspaceDescriptor["status"]): Wo
 }
 
 describe("deriveProjectStatusBucket", () => {
+  it.each(["done", "running", "attention", "failed"] as const)(
+    "prioritizes a live permission over a delayed %s workspace",
+    (status) => {
+      const enteredAt = new Date("2026-11-13T00:00:00Z");
+      const descriptor = projectWorkspace("ws-1", status);
+      const activity = new Map([
+        ["ws-1", { agentId: "permission-root", status: "needs_input" as const, enteredAt }],
+      ]);
+      const entry = createSidebarWorkspaceEntry({
+        serverId: "srv",
+        workspace: descriptor,
+        workspaceAgentActivity: activity,
+      });
+      expect(entry.statusBucket).toBe("needs_input");
+      expect(entry.statusEnteredAt).toEqual(enteredAt);
+      expect(
+        deriveProjectStatusBucket({
+          workspaces: [workspacePlacement({ workspaceId: "ws-1" })],
+          sessions: {
+            srv: { workspaces: new Map([["ws-1", descriptor]]), workspaceAgentActivity: activity },
+          },
+        }),
+      ).toBe("needs_input");
+      const cleared = createSidebarWorkspaceEntry({
+        serverId: "srv",
+        workspace: projectWorkspace("ws-1", "attention"),
+        workspaceAgentActivity: new Map([
+          ["ws-1", { agentId: "permission-root", status: "attention", enteredAt }],
+        ]),
+      });
+      expect(cleared.statusBucket).toBe("attention");
+    },
+  );
+
+  it("retains server-owned child and terminal activity when local root activity is lower priority", () => {
+    expect(
+      createSidebarWorkspaceEntry({
+        serverId: "srv",
+        workspace: projectWorkspace("ws-1", "needs_input"),
+        workspaceAgentActivity: new Map([
+          ["ws-1", { agentId: "root", status: "done", enteredAt: null }],
+        ]),
+      }).statusBucket,
+    ).toBe("needs_input");
+    expect(
+      createSidebarWorkspaceEntry({
+        serverId: "srv",
+        workspace: projectWorkspace("ws-1", "running"),
+        workspaceAgentActivity: new Map([
+          ["ws-1", { agentId: "root", status: "attention", enteredAt: null }],
+        ]),
+      }).statusBucket,
+    ).toBe("running");
+  });
+
   it("is done when the project has no workspaces", () => {
     expect(deriveProjectStatusBucket({ workspaces: [], sessions: {} })).toBe("done");
   });
