@@ -915,21 +915,23 @@ test("concurrent host queries share one discovery and one fetch per account", as
   expect(fetches).toBe(1);
 });
 
+/** Lets work a query started behind its answer finish. */
+const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 test("host discovery is reused while its reports are cached and renewed before they are fetched again", async () => {
   let now = 0;
   let login = "first";
-  let discoveries = 0;
-  const fetched: unknown[] = [];
+  const events: string[] = [];
   const registry = new UsageSourceRegistry(() => now);
   registry.register(
     source({
       id: "source",
       discover: async () => {
-        discoveries++;
+        events.push(`discover:${login}`);
         return [{ key: "account", input: login }];
       },
       fetch: async (input) => {
-        fetched.push(input);
+        events.push(`fetch:${String(input)}`);
         return { status: "available", windows: [] };
       },
     }),
@@ -938,14 +940,269 @@ test("host discovery is reused while its reports are cached and renewed before t
   login = "second";
   now = 66_000;
   await registry.listReports();
-  now = 299_999;
+  now = 239_999;
   await registry.listReports();
-  expect(discoveries).toBe(1);
-  expect(fetched).toEqual(["first"]);
+  expect(events).toEqual(["discover:first", "fetch:first"]);
+  // The last minute of the window renews it, reading the store before fetching with its login.
+  now = 240_000;
+  await registry.listReports();
+  await settle();
+  expect(events).toEqual(["discover:first", "fetch:first", "discover:second", "fetch:second"]);
   now = 300_000;
   await registry.listReports();
+  expect(events).toHaveLength(4);
+  // A window that ends without a query is renewed before the next query is answered.
+  login = "third";
+  now = 1_000_000;
+  await registry.listReports();
+  expect(events.slice(4)).toEqual(["discover:third", "fetch:third"]);
+});
+
+test("a query near the end of the cache window is answered from the cache while the window is renewed", async () => {
+  let now = 0;
+  let value = "old";
+  let discoveries = 0;
+  let releaseStore = () => {};
+  let releaseVendor = () => {};
+  const store = new Promise<void>((resolve) => {
+    releaseStore = resolve;
+  });
+  const vendor = new Promise<void>((resolve) => {
+    releaseVendor = resolve;
+  });
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "source",
+      discover: async () => {
+        discoveries++;
+        if (discoveries > 1) await store;
+        return [{ key: "account", input: {} }];
+      },
+      fetch: async () => {
+        const label = value;
+        if (label === "new") await vendor;
+        return { status: "available", windows: [{ id: "window", label }] };
+      },
+    }),
+  );
+  const [first] = await registry.listReports();
+  value = "new";
+  now = 250_000;
+  const answers: string[] = [];
+  const answered = await registry.listReports({ onReport: (entry) => answers.push(entry.id) });
+  // Neither the login store nor the vendor has answered yet, and the query waited for neither.
+  expect(answered).toEqual([first]);
+  expect(answers).toEqual(["source:account"]);
   expect(discoveries).toBe(2);
-  expect(fetched).toEqual(["first", "second"]);
+  // Queries while the renewal runs neither wait nor start another one.
+  now = 260_000;
+  expect(await registry.listReports()).toEqual([first]);
+  releaseStore();
+  await settle();
+  expect(await registry.listReports()).toEqual([first]);
+  expect(discoveries).toBe(2);
+  releaseVendor();
+  await settle();
+  const [renewed] = await registry.listReports();
+  expect(renewed?.report).toEqual({
+    status: "available",
+    windows: [{ id: "window", label: "new" }],
+  });
+  // Fetched once the store had answered, with the login it named.
+  expect(renewed?.fetchedAt).toBe(new Date(260_000).toISOString());
+});
+
+test("a report older than the cache window is never answered; the query waits for a new fetch", async () => {
+  let now = 0;
+  let value = "old";
+  let release = () => {};
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "source",
+      discover: async () => [{ key: "account", input: {} }],
+      fetch: async () => {
+        const label = value;
+        if (label === "new")
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        return { status: "available", windows: [{ id: "window", label }] };
+      },
+    }),
+  );
+  await registry.listReports();
+  value = "new";
+  now = 300_000;
+  let answered = false;
+  const query = registry.listReports().then((reports) => {
+    answered = true;
+    return reports;
+  });
+  await settle();
+  expect(answered).toBe(false);
+  release();
+  const [renewed] = await query;
+  expect(renewed?.fetchedAt).toBe(new Date(300_000).toISOString());
+  expect(renewed?.report).toEqual({
+    status: "available",
+    windows: [{ id: "window", label: "new" }],
+  });
+});
+
+test.each([1, 4])(
+  "%i app windows polling every minute never wait and cost one discovery per five minutes, even after a report was refreshed alone",
+  async (windows) => {
+    let now = 0;
+    let discoveries = 0;
+    const fetched: string[] = [];
+    const registry = new UsageSourceRegistry(() => now);
+    registry.register(
+      source({
+        id: "source",
+        // Each takes its time after the query that started it has had its chance to answer.
+        discover: async () => {
+          discoveries++;
+          await settle();
+          now += 1_000;
+          return ["a", "b"].map((key) => ({ key, input: key }));
+        },
+        fetch: async (input) => {
+          fetched.push(String(input));
+          await settle();
+          now += 500;
+          return { status: "available", windows: [] };
+        },
+      }),
+    );
+    await registry.listReports();
+    // A targeted refresh puts one account a minute behind the other.
+    now = 60_000;
+    await registry.listReports({ reportIds: ["source:b"], forceRefresh: true });
+    discoveries = 0;
+    fetched.length = 0;
+    const waits: number[] = [];
+    // The windows poll a quarter of a minute apart, each once a minute, for an hour.
+    for (let tick = 8; tick < 8 + 4 * 60; tick++) {
+      if (tick % 4 >= windows) continue;
+      now = Math.max(now, tick * 15_000);
+      const asked = now;
+      await registry.listReports();
+      waits.push(now - asked);
+      for (let step = 0; step < 4; step++) await settle();
+    }
+    expect(waits.filter((wait) => wait > 0)).toEqual([]);
+    // Each discovery renews both accounts; none is spent on one whose window ended alone.
+    expect(fetched).toHaveLength(2 * discoveries);
+    // Renewing a minute early would take 15 discoveries in the hour instead of 12.
+    expect(discoveries).toBeLessThanOrEqual(12);
+  },
+);
+
+test("a forced refresh during a background renewal waits for a discovery started after it", async () => {
+  let now = 0;
+  const store = ["a"];
+  const answers: Array<() => void> = [];
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "source",
+      discover: () => {
+        // The login store is read when the discovery starts, not when it answers.
+        const accounts = store.map((key) => ({ key, input: key }));
+        return new Promise((resolve) => {
+          answers.push(() => resolve(accounts));
+        });
+      },
+    }),
+  );
+  const first = registry.listReports();
+  answers[0]!();
+  await first;
+  now = 250_000;
+  expect((await registry.listReports()).map((report) => report.id)).toEqual(["source:a"]);
+  expect(answers).toHaveLength(2);
+  store.push("b");
+  const forced = registry.listReports({ forceRefresh: true });
+  answers[1]!();
+  await vi.waitFor(() => expect(answers).toHaveLength(3));
+  answers[2]!();
+  expect((await forced).map((report) => report.id)).toEqual(["source:a", "source:b"]);
+});
+
+test("an agent's report is renewed behind its answer near the end of the cache window", async () => {
+  let now = 0;
+  let value = 1;
+  const registry = new UsageSourceRegistry(() => now, 300_000, undefined, {
+    hasAgent: () => true,
+    usageSession: () => ({ provider: "codex", env: {}, sessionKey: "launch" }),
+  });
+  registry.register({
+    id: "codex",
+    label: "Codex",
+    discover: async (scope) => (scope.kind === "session" ? [{ key: "same", input: "agent" }] : []),
+    fetch: async () => ({
+      status: "available",
+      windows: [{ id: "w", label: "w", usedPct: value }],
+    }),
+  });
+  const usedPct = async () => {
+    const [entry] = await registry.listReports({ agentId: "agent" });
+    return entry?.report.status === "available" ? entry.report.windows[0]?.usedPct : undefined;
+  };
+  expect(await usedPct()).toBe(1);
+  value = 2;
+  now = 250_000;
+  expect(await usedPct()).toBe(1);
+  await settle();
+  expect(await usedPct()).toBe(2);
+});
+
+test("each renewal logs one line with how long discovery and fetching took", async () => {
+  let now = 0;
+  const lines: unknown[][] = [];
+  const registry = new UsageSourceRegistry(() => now, 300_000, {
+    warn: () => {},
+    info: (...args: unknown[]) => {
+      lines.push(args);
+    },
+  });
+  registry.register({
+    ...source({
+      id: "source",
+      discover: async () => {
+        now += 400;
+        return ["a", "b"].map((key) => ({ key, input: key }));
+      },
+      fetch: async () => {
+        now += 250;
+        return { status: "available", windows: [] };
+      },
+    }),
+    cacheGroup: "group",
+  });
+  await registry.listReports();
+  await settle();
+  now = 250_000;
+  await registry.listReports();
+  await settle();
+  await registry.listReports({ forceRefresh: true });
+  await settle();
+  expect(lines).toEqual([
+    [
+      { group: "group", reason: "expired", discoveryMs: 400, fetchMs: 500, reports: 2 },
+      "Usage source group renewed",
+    ],
+    [
+      { group: "group", reason: "due", discoveryMs: 400, fetchMs: 500, reports: 2 },
+      "Usage source group renewed",
+    ],
+    [
+      { group: "group", reason: "forced", discoveryMs: 400, fetchMs: 500, reports: 2 },
+      "Usage source group renewed",
+    ],
+  ]);
 });
 
 test("an account added to the host appears on a forced refresh or once the cache window ends", async () => {
@@ -962,7 +1219,8 @@ test("an account added to the host appears on a forced refresh or once the cache
     (await registry.listReports({ forceRefresh })).map((report) => report.id);
   expect(await ids()).toEqual([]);
   accounts.push("a");
-  now = 299_999;
+  // The window's last minute renews it ahead of its end; see the renewal tests.
+  now = 239_999;
   expect(await ids()).toEqual([]);
   now = 300_000;
   expect(await ids()).toEqual(["source:a"]);
@@ -972,7 +1230,7 @@ test("an account added to the host appears on a forced refresh or once the cache
   expect(await ids(true)).toEqual(["source:a", "source:b"]);
 });
 
-test("a report whose cache expires on its own is rediscovered before it is fetched again", async () => {
+test("a renewal fetches every report of its group, so a report refreshed alone rejoins the group's window", async () => {
   let now = 0;
   let discoveries = 0;
   const fetched: unknown[] = [];
@@ -997,11 +1255,12 @@ test("a report whose cache expires on its own is rediscovered before it is fetch
   now = 300_000;
   await registry.listReports();
   expect(discoveries).toBe(2);
-  // The discovery is 100 seconds old here, but report "a" has just left the fetch cache.
+  expect(fetched).toEqual(["a", "b", "a", "a", "b"]);
+  // Report "a" was fetched with "b" above, so its own window does not end here.
   now = 400_000;
   await registry.listReports();
-  expect(discoveries).toBe(3);
-  expect(fetched).toEqual(["a", "b", "a", "b", "a"]);
+  expect(discoveries).toBe(2);
+  expect(fetched).toHaveLength(5);
 });
 
 test("a failed host discovery keeps the accounts and is asked again by the next query", async () => {
@@ -1106,13 +1365,14 @@ test("sources in one cache group are discovered together, so a forced refresh ca
     cacheGroup: "group",
   });
   await registry.listReports();
+  expect(asked).toEqual(["all", "some"]);
+  // "all:own" is younger than the others here, and it belongs to one of the two sources.
   now = 100_000;
   await registry.listReports({ reportIds: ["all:own"], forceRefresh: true });
   now = 300_000;
   await registry.listReports();
   expect(asked).toEqual(["all", "some", "all", "some"]);
-  // Only "all:own" has left the fetch cache here, and it belongs to one of the two sources.
-  now = 400_000;
+  now = 600_000;
   held = new Promise((resolve) => {
     release = resolve;
   });

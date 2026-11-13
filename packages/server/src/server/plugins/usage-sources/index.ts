@@ -66,6 +66,21 @@ interface RunningHostDiscovery {
 /** Sources that share a cache group read the same logins, so the host asks them together. */
 type HostGroup = string | UsageSource;
 
+/**
+ * Whether the cache answers a host query. "due": it answers, and the group is renewed behind the
+ * answer because its cache window is about to end. "expired": the query waits for a renewal.
+ */
+type HostGroupState = "fresh" | "due" | "expired";
+
+/** Why a host group was renewed, as logged. */
+type RenewalReason = "forced" | Exclude<HostGroupState, "fresh">;
+
+/**
+ * "cached": a report inside its cache window is answered from the cache. "forced": fetched again.
+ * "renewed": a forced query's report its group renewal is fetching, so that fetch answers it.
+ */
+type FetchMode = "cached" | "forced" | "renewed";
+
 /** Owns account identity, ordered logins for each account, and the five-minute fetch cache. */
 export class UsageSourceRegistry {
   private readonly sources = new Map<string, UsageSource>();
@@ -76,13 +91,24 @@ export class UsageSourceRegistry {
   private readonly cache = new Map<string, { at: number; entry: UsageReportEntry }>();
   private readonly successful = new Map<string, NonNullable<UsageReportEntry["lastSuccessful"]>>();
   private readonly pending = new Map<string, Promise<UsageReportEntry>>();
+  /** When the host queries of the last cache window arrived, oldest first; forced ones excluded. */
+  private readonly hostQueries: number[] = [];
 
   constructor(
     private readonly now: () => number = Date.now,
     private readonly ttlMs = 300_000,
-    private readonly logger: Pick<Logger, "warn"> = { warn: console.warn },
+    private readonly logger: Pick<Logger, "warn"> & Partial<Pick<Logger, "info">> = {
+      warn: console.warn,
+    },
     private readonly agents: AgentUsageLookup = { hasAgent: () => false, usageSession: () => null },
     private readonly deadlineMs = 20_000,
+    /**
+     * A query in the last part of the cache window, at most this long, is answered from the cache
+     * and renews it in the background, so a client polling at least this often never waits for
+     * the vendor. No report older than the cache window is ever answered: Aster treats one over
+     * six minutes old (five here plus its own minute) as unknown.
+     */
+    private readonly renewAheadMs = Math.min(60_000, ttlMs / 5),
   ) {}
 
   register(source: UsageSource): void {
@@ -119,6 +145,8 @@ export class UsageSourceRegistry {
     this.pruneAgents();
     let ids: string[];
     let reports = this.known;
+    // A report its host group renews is fetched only by that renewal, right after its discovery.
+    let renewedByGroup = new Set<string>();
     if (options.agentId !== undefined) {
       ids = await this.discoverAgent(options.agentId);
       reports = this.byAgent.get(options.agentId)?.reports ?? new Map();
@@ -127,13 +155,19 @@ export class UsageSourceRegistry {
     } else {
       await this.discoverHost(options.forceRefresh);
       ids = [...this.known.keys()];
+      for (const found of this.hostReports()) for (const id of found.keys()) renewedByGroup.add(id);
     }
+    const mode = (id: string): FetchMode => {
+      if (!options.forceRefresh) return "cached";
+      return renewedByGroup.has(id) ? "renewed" : "forced";
+    };
+    const renewAhead = (id: string) => options.reportIds === undefined && !renewedByGroup.has(id);
     return Promise.all(
       [...new Set(ids)].flatMap((id) => {
         const known = reports.get(id);
         if (!known) return [];
         return [
-          this.fetchId(id, known, options.forceRefresh).then((entry) => {
+          this.fetchId(id, known, mode(id), renewAhead(id)).then((entry) => {
             options.onReport?.(entry);
             return entry;
           }),
@@ -183,66 +217,174 @@ export class UsageSourceRegistry {
 
   /**
    * Asks each source for the host's accounts. Concurrent queries share one answer, and a source's
-   * answer is reused for as long as the fetch cache still serves every report it produced.
+   * answer is reused for as long as the fetch cache still serves every report it produced. Near
+   * the end of that window a query is still answered from the cache while the group is renewed.
    */
   private async discoverHost(forceRefresh = false): Promise<void> {
+    if (!forceRefresh) this.noteHostQuery();
     const groups = new Set([...this.sources.values()].map(hostGroup));
     await Promise.all([...groups].map((group) => this.discoverHostGroup(group, forceRefresh)));
     this.mergeKnown();
   }
 
   private discoverHostGroup(group: HostGroup, forceRefresh: boolean): Promise<unknown> {
+    const sources = [...this.sources.values()].filter((source) => hostGroup(source) === group);
     const running = this.discovering.get(group);
     if (running) {
-      if (!forceRefresh) return running.current;
+      // A renewal running behind earlier answers is joined only once the cache cannot answer.
+      if (!forceRefresh)
+        return this.hostGroupState(sources) === "expired" ? running.current : Promise.resolve();
       // The running discovery may have read the login store before this query was made, and its
       // answer would then be reused for the whole cache window. Forced queries that arrive while
       // it runs share one discovery that starts after it.
       running.next ??= running.current.then(() => this.discoverHostGroup(group, true));
       return running.next;
     }
-    const sources = [...this.sources.values()].filter((source) => hostGroup(source) === group);
-    if (!forceRefresh && sources.every((source) => this.hasFreshDiscovery(source)))
-      return Promise.resolve();
+    const state = forceRefresh ? "forced" : this.hostGroupState(sources);
+    if (state === "fresh") return Promise.resolve();
+    const renewal = this.renewHostGroup(group, sources, state);
+    if (state !== "due") return renewal;
+    renewal.catch((err: unknown) =>
+      this.logger.warn({ group: groupName(group), err }, "Usage source renewal failed"),
+    );
+    return Promise.resolve();
+  }
+
+  /**
+   * Discovers a group's accounts again, then fetches its reports again with the logins that
+   * discovery just read. The group's reports are fetched together so they share one cache window:
+   * a report fetched on its own (a targeted refresh) would otherwise expire apart from the others
+   * and cost the group a second discovery in every window.
+   */
+  private renewHostGroup(
+    group: HostGroup,
+    sources: UsageSource[],
+    reason: RenewalReason,
+  ): Promise<unknown> {
+    const renew = async () => {
+      const startedAt = this.now();
+      const answered = await Promise.all(
+        sources.map((source) => this.rediscoverHostSource(source)),
+      );
+      this.mergeKnown();
+      const discoveredAt = this.now();
+      const fetches = sources.flatMap((source, index) =>
+        this.refetchHostSource(source, reason === "forced" || answered[index] === true),
+      );
+      if (sources.length > 0)
+        void this.logRenewal(group, reason, discoveredAt - startedAt, discoveredAt, fetches);
+    };
     const started: RunningHostDiscovery = {
       // Settles after the entry is gone, so a discovery chained on it starts a new one.
-      current: Promise.all(sources.map((source) => this.rediscoverHostSource(source))).finally(
-        () => {
-          if (this.discovering.get(group) === started) this.discovering.delete(group);
-        },
-      ),
+      current: renew().finally(() => {
+        if (this.discovering.get(group) === started) this.discovering.delete(group);
+      }),
     };
     this.discovering.set(group, started);
     return started.current;
   }
 
-  private async rediscoverHostSource(source: UsageSource): Promise<void> {
-    const at = this.now();
+  /** Whether the source answered. One that failed or was replaced keeps what it said before. */
+  private async rediscoverHostSource(source: UsageSource): Promise<boolean> {
     const reports = await this.discoverSource(source, { kind: "global" });
-    if (this.sources.get(source.id) !== source) return;
+    if (this.sources.get(source.id) !== source) return false;
     if (reports) {
-      this.defaults.set(source, { at, reports });
-      return;
+      // Timed from the answer, like the fetches after it, so the query that started a renewal
+      // and those at the same pace after it never find the new window ending under them.
+      this.defaults.set(source, { at: this.now(), reports });
+      return true;
     }
     // A failed store read does not confirm removal: keep the accounts and ask again.
     const found = this.defaults.get(source);
     if (found) found.stale = true;
+    return false;
   }
 
-  private hasFreshDiscovery(source: UsageSource): boolean {
+  /**
+   * Starts a renewal's fetches. A source that answered, or a forced renewal, has every report
+   * fetched with the login just named. A source whose discovery failed still has its previous
+   * logins, so only its reports near the end of their window are fetched, as without a discovery.
+   */
+  private refetchHostSource(source: UsageSource, every: boolean): Promise<UsageReportEntry>[] {
     const found = this.defaults.get(source);
-    if (!found || found.stale || this.now() - found.at >= this.ttlMs) return false;
-    // A report about to reach the vendor again must use the login its store holds now.
-    return [...found.reports.keys()].every((id) => this.hasFreshFetch(id));
+    if (!found || this.sources.get(source.id) !== source) return [];
+    return [...found.reports.keys()].flatMap((id) => {
+      const known = this.known.get(id);
+      if (!known) return [];
+      const age = this.fetchAge(id);
+      if (!every && age !== undefined && age < this.ttlMs - this.hostRenewAhead()) return [];
+      return [this.fetchId(id, known, "forced")];
+    });
   }
 
-  private hasFreshFetch(id: string): boolean {
+  private noteHostQuery(): void {
+    const now = this.now();
+    while (this.hostQueries.length > 0 && now - this.hostQueries[0]! >= this.ttlMs)
+      this.hostQueries.shift();
+    if (this.hostQueries.length >= 1024) this.hostQueries.shift();
+    this.hostQueries.push(now);
+  }
+
+  /**
+   * How long before its end a host cache window is renewed: the longest recent gap between host
+   * queries, so the next one is still expected inside the window. Renewing a whole minute early
+   * for windows polled every few seconds would fetch a fifth more often than the window needs.
+   */
+  private hostRenewAhead(): number {
+    let gap = 0;
+    for (let index = 1; index < this.hostQueries.length; index++)
+      gap = Math.max(gap, this.hostQueries[index]! - this.hostQueries[index - 1]!);
+    return gap > 0 ? Math.min(gap, this.renewAheadMs) : this.renewAheadMs;
+  }
+
+  private hostGroupState(sources: UsageSource[]): HostGroupState {
+    const renewAt = this.ttlMs - this.hostRenewAhead();
+    let state: HostGroupState = "fresh";
+    for (const source of sources) {
+      const found = this.defaults.get(source);
+      if (!found || this.now() - found.at >= this.ttlMs) return "expired";
+      if (found.stale || this.now() - found.at >= renewAt) state = "due";
+      // A report about to reach the vendor again must use the login its store holds now, so a
+      // report is fetched only by a renewal of its group.
+      for (const id of found.reports.keys()) {
+        const age = this.fetchAge(id);
+        if (age === undefined || age >= this.ttlMs) return "expired";
+        if (age >= renewAt) state = "due";
+      }
+    }
+    return state;
+  }
+
+  /** How long ago a report was fetched: 0 while a fetch runs, undefined when nothing is cached. */
+  private fetchAge(id: string): number | undefined {
     const known = this.known.get(id);
-    if (!known) return false;
+    if (!known) return undefined;
     const cacheKey = cacheIdentity(id, known);
-    if (this.pending.has(cacheKey)) return true;
+    if (this.pending.has(cacheKey)) return 0;
     const cached = this.cache.get(cacheKey);
-    return cached !== undefined && this.now() - cached.at < this.ttlMs;
+    return cached === undefined ? undefined : this.now() - cached.at;
+  }
+
+  /** One line per renewal, so the time spent discovering and fetching can be read from the log. */
+  private async logRenewal(
+    group: HostGroup,
+    reason: RenewalReason,
+    discoveryMs: number,
+    discoveredAt: number,
+    fetches: Promise<UsageReportEntry>[],
+  ): Promise<void> {
+    if (!this.logger.info) return;
+    await Promise.allSettled(fetches);
+    this.logger.info(
+      {
+        group: groupName(group),
+        reason,
+        discoveryMs,
+        fetchMs: this.now() - discoveredAt,
+        reports: fetches.length,
+      },
+      "Usage source group renewed",
+    );
   }
 
   /** Each registered source's host accounts, in registration order. */
@@ -360,7 +502,12 @@ export class UsageSourceRegistry {
     };
   }
 
-  private fetchId(id: string, known: KnownReport, forceRefresh = false): Promise<UsageReportEntry> {
+  private fetchId(
+    id: string,
+    known: KnownReport,
+    mode: FetchMode = "cached",
+    renewAhead = false,
+  ): Promise<UsageReportEntry> {
     // Account identity groups cards; the ordered login set identifies a fetch result.
     const cacheKey = cacheIdentity(id, known);
     const present = (entry: UsageReportEntry): UsageReportEntry =>
@@ -378,9 +525,13 @@ export class UsageSourceRegistry {
             account: { label: known.label },
           };
     const cached = this.cache.get(cacheKey);
-    if (!forceRefresh && cached && this.now() - cached.at < this.ttlMs)
-      return Promise.resolve(present(cached.entry));
     const pending = this.pending.get(cacheKey);
+    if (mode === "renewed" && pending) return pending.then(present);
+    if (mode !== "forced" && cached && this.now() - cached.at < this.ttlMs) {
+      if (renewAhead && !pending && this.now() - cached.at >= this.ttlMs - this.renewAheadMs)
+        void this.fetchId(id, known, "forced");
+      return Promise.resolve(present(cached.entry));
+    }
     if (pending) return pending.then(present);
     const request = (async () => {
       const fetchedAt = new Date(this.now()).toISOString();
@@ -507,6 +658,10 @@ function loginKey(login: Login): string {
 
 function hostGroup(source: UsageSource): HostGroup {
   return source.cacheGroup || source;
+}
+
+function groupName(group: HostGroup): string {
+  return typeof group === "string" ? group : group.id;
 }
 
 function cacheIdentity(id: string, known: KnownReport): string {
