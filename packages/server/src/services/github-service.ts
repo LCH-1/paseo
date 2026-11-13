@@ -1493,10 +1493,12 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     const due: GitHubPollTarget[] = [];
     for (const target of pollTargets.values()) {
       if (target.retainCount > 0 && target.nextDueAt !== null && target.nextDueAt <= now) {
-        // Anchor the next cycle at this due time, not at the moment the timer fired: a timer that
-        // fires a few milliseconds late would otherwise push every cycle to the next grid step.
-        target.pollCycleStartedAt = target.nextDueAt;
+        // The next cycle counts from when this one actually ran. A timer fires a little late, so a
+        // pending-check poll lands on the grid step after its interval (about 25 seconds, not 20):
+        // the rate gh has always run at. Slow polls snap to the nearest slow tick, which absorbs
+        // the same lateness.
         target.nextDueAt = null;
+        target.pollCycleStartedAt = now;
         due.push(target);
       }
     }

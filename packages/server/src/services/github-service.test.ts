@@ -932,6 +932,44 @@ describe("ForgeService", () => {
     service.dispose?.();
   });
 
+  it("counts the next fast poll from when a late timer actually ran", async () => {
+    let now = 0;
+    const pending = () =>
+      currentPullRequestJson({
+        statusCheckRollup: [{ __typename: "StatusContext", context: "ci", state: "PENDING" }],
+      });
+    const runner = createRunner([pending(), pending(), pending()]);
+    const service = createGitHubService({
+      ttlMs: 0,
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => now,
+    });
+
+    const subscription = service.retainCurrentPullRequestStatusPoll?.({
+      cwd: "/repo",
+      headRef: "feature/fork",
+    });
+    await service.getCurrentPullRequestStatus({ cwd: "/repo", headRef: "feature/fork" });
+
+    // Timers fire a few milliseconds after their due time.
+    now = EXPECTED_GITHUB_FAST_POLL_MS + 3;
+    await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS + 3);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(2);
+
+    // 20 seconds after it ran falls just past a 5 second grid step, so the poll waits for the next.
+    now = 2 * EXPECTED_GITHUB_FAST_POLL_MS + 3;
+    await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(2);
+
+    now = 2 * EXPECTED_GITHUB_FAST_POLL_MS + GITHUB_POLL_ALIGNMENT_MS;
+    await vi.advanceTimersByTimeAsync(GITHUB_POLL_ALIGNMENT_MS - 3);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(3);
+
+    subscription?.unsubscribe();
+    service.dispose?.();
+  });
+
   it("retained fork PR status polls keep the head repository owner", async () => {
     const runner = createRunner([
       currentPullRequestJson({
