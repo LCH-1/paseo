@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
@@ -16,6 +16,7 @@ import type {
   WorkspaceRegistry,
 } from "./workspace-registry.js";
 import {
+  type ProjectGitEntryInspector,
   type ReconciliationChange,
   WorkspaceReconciliationService,
 } from "./workspace-reconciliation-service.js";
@@ -231,6 +232,76 @@ function createTempGitRepo(prefix: string): string {
 }
 
 const timestamp = "2025-01-01T00:00:00.000Z";
+
+/**
+ * A project root on the real filesystem whose `.git` events are delivered by hand, one debounced
+ * pass at a time. `getCheckout` answers as the Git probe would: never throwing for a non-repo.
+ */
+function createRootGitEntryHarness(
+  tempDirs: string[],
+  options: {
+    getCheckout?: (cwd: string, gitEntry: string) => Promise<ProjectCheckoutLitePayload>;
+    inspectProjectGitEntry?: ProjectGitEntryInspector;
+  } = {},
+) {
+  const projectRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-git-entry-")));
+  tempDirs.push(projectRoot);
+  const gitEntry = path.join(projectRoot, ".git");
+  const { projects, projectRegistry, workspaceRegistry } = createTestRegistries();
+  projects.set(
+    "p1",
+    createPersistedProjectRecord({
+      projectId: "p1",
+      rootPath: projectRoot,
+      kind: "non_git",
+      displayName: "entry",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }),
+  );
+  const readCheckout =
+    options.getCheckout ??
+    (async (cwd: string) =>
+      createCheckout(cwd, existsSync(gitEntry) ? { isGit: true, worktreeRoot: cwd } : {}));
+  let reads = 0;
+  const timeouts: Array<() => void | Promise<void>> = [];
+  let emit: ((event: string, filename: string | null) => void) | undefined;
+  const service = new WorkspaceReconciliationService({
+    projectRegistry,
+    workspaceRegistry,
+    logger: createTestLogger(),
+    workspaceGitService: {
+      getCheckout: async (cwd) => {
+        reads += 1;
+        return readCheckout(cwd, gitEntry);
+      },
+    },
+    clock: {
+      setTimeout: (callback) => {
+        timeouts.push(callback);
+        return {};
+      },
+      clearTimeout: () => undefined,
+      setInterval: () => ({}),
+      clearInterval: () => undefined,
+    },
+    watchProjectRoot: (_rootPath, _options, onChange) => {
+      emit = onChange;
+      return { close: () => undefined };
+    },
+    ...(options.inspectProjectGitEntry
+      ? { inspectProjectGitEntry: options.inspectProjectGitEntry }
+      : {}),
+  });
+  /** Delivers one event for `filename` and runs the pass it schedules; returns the Git reads. */
+  const readsAfterEvent = async (event: string, filename: string | null = ".git") => {
+    const before = reads;
+    emit?.(event, filename);
+    await timeouts.shift()?.();
+    return reads - before;
+  };
+  return { service, gitEntry, readsAfterEvent };
+}
 
 describe("WorkspaceReconciliationService", () => {
   const tempDirs: string[] = [];
@@ -1625,54 +1696,7 @@ describe("WorkspaceReconciliationService", () => {
   });
 
   test("a root .git event reconciles only when the entry appears, vanishes, or is replaced", async () => {
-    const projectRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-git-entry-")));
-    tempDirs.push(projectRoot);
-    const { projects, projectRegistry, workspaceRegistry } = createTestRegistries();
-    projects.set(
-      "p1",
-      createPersistedProjectRecord({
-        projectId: "p1",
-        rootPath: projectRoot,
-        kind: "non_git",
-        displayName: "entry",
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      }),
-    );
-    let reads = 0;
-    const timeouts: Array<() => void | Promise<void>> = [];
-    let emit: ((event: string, filename: string | null) => void) | undefined;
-    const service = new WorkspaceReconciliationService({
-      projectRegistry,
-      workspaceRegistry,
-      logger: createTestLogger(),
-      workspaceGitService: {
-        getCheckout: async (cwd) => {
-          reads += 1;
-          return createCheckout(cwd);
-        },
-      },
-      clock: {
-        setTimeout: (callback) => {
-          timeouts.push(callback);
-          return {};
-        },
-        clearTimeout: () => undefined,
-        setInterval: () => ({}),
-        clearInterval: () => undefined,
-      },
-      watchProjectRoot: (_rootPath, _options, onChange) => {
-        emit = onChange;
-        return { close: () => undefined };
-      },
-    });
-    const gitEntry = path.join(projectRoot, ".git");
-    const readsAfterEvent = async (event: string): Promise<number> => {
-      const before = reads;
-      emit?.(event, ".git");
-      await timeouts.shift()?.();
-      return reads - before;
-    };
+    const { service, gitEntry, readsAfterEvent } = createRootGitEntryHarness(tempDirs);
 
     await service.start();
     // Nothing there yet: a stray event changes nothing.
@@ -1700,10 +1724,71 @@ describe("WorkspaceReconciliationService", () => {
     expect(await readsAfterEvent("rename")).toBe(1);
 
     // An event without a name says nothing about what moved.
-    const beforeUnnamed = reads;
-    emit?.("rename", null);
-    await timeouts.shift()?.();
-    expect(reads - beforeUnnamed).toBe(1);
+    expect(await readsAfterEvent("rename", null)).toBe(1);
+    service.dispose();
+  });
+
+  test("a root .git rename reconciles even when the entry looks the same", async () => {
+    // A directory deleted and recreated at once can come back with a reused inode, and some
+    // filesystems keep no birth time to tell the two apart.
+    const { service, readsAfterEvent } = createRootGitEntryHarness(tempDirs, {
+      inspectProjectGitEntry: () => "directory:7:0",
+      getCheckout: async (cwd) => createCheckout(cwd, { isGit: true, worktreeRoot: cwd }),
+    });
+
+    await service.start();
+    expect(await readsAfterEvent("change")).toBe(0);
+    expect(await readsAfterEvent("rename")).toBe(1);
+    expect(await readsAfterEvent("rename")).toBe(1);
+    expect(await readsAfterEvent("change")).toBe(0);
+    service.dispose();
+  });
+
+  test("a root whose Git read fails lets its next unchanged .git event through", async () => {
+    let failNextRead = true;
+    const { service, gitEntry, readsAfterEvent } = createRootGitEntryHarness(tempDirs, {
+      getCheckout: async (cwd) => {
+        if (failNextRead) {
+          failNextRead = false;
+          throw new Error("git unavailable");
+        }
+        return createCheckout(cwd, { isGit: true, worktreeRoot: cwd });
+      },
+    });
+
+    await service.start();
+    mkdirSync(gitEntry);
+    expect(await readsAfterEvent("rename")).toBe(1);
+    // That pass learned nothing, so the next event is not taken as already seen.
+    expect(await readsAfterEvent("change")).toBe(1);
+    expect(await readsAfterEvent("change")).toBe(0);
+    service.dispose();
+  });
+
+  test("a root read as no repository while .git exists lets its next .git event through", async () => {
+    // `git init` or a clone still in progress: the probe answers "not a repository".
+    let initialized = false;
+    const { service, gitEntry, readsAfterEvent } = createRootGitEntryHarness(tempDirs, {
+      getCheckout: async (cwd) =>
+        createCheckout(cwd, initialized ? { isGit: true, worktreeRoot: cwd } : {}),
+    });
+
+    await service.start();
+    mkdirSync(gitEntry);
+    expect(await readsAfterEvent("rename")).toBe(1);
+
+    initialized = true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    writeFileSync(path.join(gitEntry, "HEAD"), "ref: refs/heads/main\n");
+    expect(await readsAfterEvent("change")).toBe(1);
+    // Now that the read agrees with the entry, writes inside .git are dropped again.
+    expect(await readsAfterEvent("change")).toBe(0);
+
+    // With no .git, a root that reads as no repository has nothing left to wait for.
+    rmSync(gitEntry, { recursive: true, force: true });
+    initialized = false;
+    expect(await readsAfterEvent("rename")).toBe(1);
+    expect(await readsAfterEvent("change")).toBe(0);
     service.dispose();
   });
 

@@ -67,15 +67,17 @@ const watchProjectRoot: ProjectRootWatch = (rootPath, options, onChange, onError
  * be replaced, so a directory is its kind and identity only: writes inside it belong to the
  * repository metadata watcher, and Windows reports them (and every access-time commit from a
  * plain Git read) as a change of `.git` itself. A `.git` file is a pointer whose content matters.
+ * "missing" and "unreadable:<code>" say there is no entry to identify.
  */
 export type ProjectGitEntryInspector = (rootPath: string) => string;
 
 const inspectProjectGitEntry: ProjectGitEntryInspector = (rootPath) => {
   try {
-    const stats = lstatSync(join(rootPath, ".git"));
-    if (stats.isDirectory()) return `directory:${stats.ino}:${stats.birthtimeMs}`;
+    // Exact integers: a Windows file id exceeds 2^53, where neighbouring ids round to one number.
+    const stats = lstatSync(join(rootPath, ".git"), { bigint: true });
+    if (stats.isDirectory()) return `directory:${stats.ino}:${stats.birthtimeNs}`;
     const kind = stats.isFile() ? "file" : "other";
-    return `${kind}:${stats.ino}:${stats.birthtimeMs}:${stats.mtimeMs}:${stats.ctimeMs}:${stats.size}`;
+    return `${kind}:${stats.ino}:${stats.birthtimeNs}:${stats.mtimeNs}:${stats.ctimeNs}:${stats.size}`;
   } catch (error) {
     if (isMissingPathError(error)) return "missing";
     const code =
@@ -83,6 +85,10 @@ const inspectProjectGitEntry: ProjectGitEntryInspector = (rootPath) => {
     return `unreadable:${code}`;
   }
 };
+
+function isGitEntryPresent(entry: string | null): boolean {
+  return entry !== null && entry !== "missing" && !entry.startsWith("unreadable:");
+}
 
 export type ReconciliationChange =
   | { kind: "workspace_archived"; workspaceId: string; directory: string; reason: string }
@@ -371,6 +377,12 @@ export class WorkspaceReconciliationService {
       roots.map(async ({ rootPath, projects }) => {
         try {
           const rootGit = await readCheckout(rootPath);
+          if (!rootGit.isGit) {
+            // The Git probe reports a repository caught mid-creation (`git init`, a clone) as no
+            // repository rather than failing. With `.git` already there, later events inside it
+            // would compare equal and be dropped, so the next one has to get through.
+            this.forgetGitEntries(rootPath, isGitEntryPresent);
+          }
           await Promise.all(
             projects.map((project) =>
               this.reconcileProject({
@@ -383,7 +395,7 @@ export class WorkspaceReconciliationService {
             ),
           );
         } catch (error) {
-          // A repository caught mid-creation fails its read; its next event has to get through.
+          // Nothing was learned about this root; its next event has to get through.
           this.forgetGitEntries(rootPath);
           this.logger.warn(
             { err: error, rootPath },
@@ -489,9 +501,13 @@ export class WorkspaceReconciliationService {
         const watcher = this.watchProjectRoot(
           project.rootPath,
           { recursive: false },
-          (_event, filename) => {
+          (event, filename) => {
             if (filename !== null && filename.toString() !== ".git") return;
-            if (target && !this.noteGitEntry(target, filename === null)) return;
+            // Only a change is filtered: access-time commits and writes inside `.git` raise
+            // nothing else. A rename says the entry appeared, vanished, or was replaced, and a
+            // recreated directory can come back with a reused inode and no birth time to tell.
+            const mustPass = filename === null || event !== "change";
+            if (target && !this.noteGitEntry(target, mustPass)) return;
             this.scheduleObservedReconciliation();
           },
           (error) => {
@@ -518,18 +534,21 @@ export class WorkspaceReconciliationService {
   }
 
   /** Records what `.git` is now and answers whether that warrants a pass. */
-  private noteGitEntry(target: ProjectRootWatchTarget, unknownChange: boolean): boolean {
+  private noteGitEntry(target: ProjectRootWatchTarget, mustPass: boolean): boolean {
     const next = this.inspectProjectGitEntry(target.rootPath);
-    const moved = unknownChange || target.gitEntry === null || next !== target.gitEntry;
+    const moved = mustPass || target.gitEntry === null || next !== target.gitEntry;
     target.gitEntry = next;
     return moved;
   }
 
-  private forgetGitEntries(rootPath?: string): void {
+  /** Lets the next `.git` event of the matching watches through, whatever it compares to. */
+  private forgetGitEntries(
+    rootPath?: string,
+    when: (entry: string | null) => boolean = () => true,
+  ): void {
     for (const target of this.watchers) {
-      if (rootPath === undefined || areEquivalentPaths(target.rootPath, rootPath)) {
-        target.gitEntry = null;
-      }
+      if (rootPath !== undefined && !areEquivalentPaths(target.rootPath, rootPath)) continue;
+      if (when(target.gitEntry)) target.gitEntry = null;
     }
   }
 

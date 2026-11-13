@@ -199,7 +199,10 @@ class ObservedPlacements {
       workspaceGitService: { getCheckout: async (cwd) => this.readCheckout(cwd) },
       logger,
       watchProjectRoot,
-      inspectProjectGitEntry: (rootPath) => `entry:${this.gitEntries.get(rootPath) ?? 0}`,
+      inspectProjectGitEntry: (rootPath) => {
+        const generation = this.gitEntries.get(rootPath);
+        return generation === undefined ? "missing" : `entry:${generation}`;
+      },
       clock: this.clock,
       debounceMs: DEBOUNCE_MS,
       rescanIntervalMs: RESCAN_INTERVAL_MS,
@@ -483,6 +486,7 @@ describe("observed workspace placement", () => {
     await observed.advanceBy(DEBOUNCE_MS);
     expect(observed.gitReads).toBe(0);
 
+    observed.makeProjectGit("project-one", "main");
     observed.change("repo", ".git");
     await observed.advanceBy(DEBOUNCE_MS);
     expect(observed.gitReads).toBe(1);
