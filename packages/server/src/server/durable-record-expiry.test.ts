@@ -110,13 +110,16 @@ test("completed message receipts expire after the retention; pending and recent 
   expect(deliveries).toBe(2);
 });
 
-test("completed creation receipts expire with their claims; failed ones stay", async () => {
+test("completed creation receipts expire with their claims; recent and failed ones stay", async () => {
   const home = await createHome();
   const directory = join(home, "creations");
   const creations = new CreationService(directory, silentLogger);
-  const completed = await creations.create(
-    workspaceCreation("done", async (id) => ({ workspace: { ...workspace, id } })),
-  );
+  let provisions = 0;
+  const provision: CreationInput["provision"] = async (id) => {
+    provisions += 1;
+    return { workspace: { ...workspace, id } };
+  };
+  const completed = await creations.create(workspaceCreation("done", provision));
   expect(completed.phase).toBe("completed");
   const failed = await creations.create(
     workspaceCreation("broken", async () => {
@@ -131,6 +134,14 @@ test("completed creation receipts expire with their claims; failed ones stay", a
   }
   const doneClaim = `${digest(["workspace", completed.workspaceId])}.claim`;
   expect(await readdir(directory)).toContain(doneClaim);
+  // A completed receipt inside the retention still answers a reconnecting client's retry.
+  const recent = await creations.create(workspaceCreation("recent", provision));
+  expect(recent.phase).toBe("completed");
+  const recentReceipt = `${digest(["workspace", "recent"])}.json`;
+  const recentClaim = `${digest(["workspace", recent.workspaceId])}.claim`;
+  for (const name of [recentReceipt, recentClaim]) {
+    await age(join(directory, name), COMPLETED_RECEIPT_RETENTION_MS - DAY_MS);
+  }
   // Another creation's claim is not this receipt's to release.
   await writeFile(join(directory, `${digest(["agent", "someone-else"])}.claim`), brokenIdentity);
 
@@ -139,9 +150,14 @@ test("completed creation receipts expire with their claims; failed ones stay", a
   const remaining = await readdir(directory);
   expect(remaining).not.toContain(`${doneIdentity}.json`);
   expect(remaining).not.toContain(doneClaim);
+  expect(remaining).toContain(recentReceipt);
+  expect(remaining).toContain(recentClaim);
   expect(remaining).toContain(`${brokenIdentity}.json`);
   expect(remaining).toContain(`${digest(["workspace", failed.workspaceId])}.claim`);
   expect(remaining).toContain(`${digest(["agent", "someone-else"])}.claim`);
+  // The retry gets the same workspace back instead of provisioning another one.
+  expect(await creations.create(workspaceCreation("recent", provision))).toEqual(recent);
+  expect(provisions).toBe(2);
 });
 
 test("a creation still running is not expired", async () => {
