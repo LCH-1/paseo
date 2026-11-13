@@ -59,23 +59,12 @@ for the lifetime of a draft and reuses the first message ID after failures.
 
 The daemon journals the assigned agent ID before creation. Concurrent retries share one operation,
 and a retry after a lost acknowledgement or restart returns the durable agent without creating a
-workspace or starting a turn. While its receipt is kept, deleting that agent does not make its old
-creation key reusable. Confirmed message delivery is also journaled, so retrying its message ID
-while that receipt is kept does not submit it again. An unfinished delivery after restart reports
-`agent_request_outcome_unknown`: a provider can have accepted a prompt before the daemon recorded
-success, so automatic resubmission could duplicate work. Inspect the agent before choosing a new
-message ID. Receipts contain identity and request hashes, never prompts, environment values, or
-credentials.
-
-Replay protection for finished operations is not permanent. The daemon keeps a completed creation
-receipt and a confirmed delivery receipt for at least 30 days after the operation finished, then
-removes them in a daily sweep; retries do not extend that window. Once removed, the same creation
-key or message ID is a new request. A creation that left its IDs to the daemon creates another
-workspace or agent. A creation that named its IDs fails with `workspace_id_conflict` or
-`agent_id_conflict` while those resources exist, and creates them again once they are gone. The
-message is submitted again. Failed or unfinished creations and unfinished deliveries keep their
-receipts at any age, so a late retry still resumes under the recorded IDs or reports the unknown
-outcome. Persist a finished operation's result instead of replaying it after that window.
+workspace or starting a turn. Deleting that agent does not make its old creation key reusable.
+Confirmed message delivery is also journaled, so retrying its message ID does not submit it again.
+An unfinished delivery after restart reports `agent_request_outcome_unknown`: a provider can have
+accepted a prompt before the daemon recorded success, so automatic resubmission could duplicate
+work. Inspect the agent before choosing a new message ID. Receipts contain identity and request
+hashes, never prompts, environment values, or credentials.
 
 Before messaging an archived workspace, call `workspace.recovery.inspect.request`, then
 `workspace.recovery.restore.request` and await success. The native message handler unarchives the
