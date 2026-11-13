@@ -60,14 +60,31 @@ export interface ClaudeReplayEntry {
 }
 
 /**
+ * Replaying a large session converts hundreds of thousands of entries. Replay yields between
+ * entries so an async caller can hand the event loop back; `runReplaySteps` runs the same steps
+ * to completion for callers that do not need to.
+ */
+export type ClaudeReplaySteps<T> = Generator<void, T, void>;
+
+export function runReplaySteps<T>(steps: ClaudeReplaySteps<T>): T {
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+  }
+}
+
+/**
  * Last-observed model and effort from a subagent's own assistant entries.
  *
  * Effort is replay-only: the SDK's live assistant message does not carry it, and it can be
  * silently downgraded for the selected model, so any live value would be a guess.
  */
-function readRuntime(entries: readonly ClaudeReplayEntry[]): { model?: string; effort?: string } {
+function* readRuntimeSteps(
+  entries: readonly ClaudeReplayEntry[],
+): ClaudeReplaySteps<{ model?: string; effort?: string }> {
   const runtime: { model?: string; effort?: string } = {};
   for (const entry of entries) {
+    yield;
     if (entry.type !== "assistant") continue;
     const effort = typeof entry.effort === "string" ? entry.effort.trim() : "";
     if (effort) runtime.effort = effort;
@@ -126,10 +143,13 @@ function readTotalTokens(raw: unknown): number | undefined {
  *
  * The last assistant entry's summed usage matches Claude Code's live `total_tokens` definition.
  */
-function readUsage(entries: readonly ClaudeReplayEntry[]): ClaudeSubagentUsage | null {
+function* readUsageSteps(
+  entries: readonly ClaudeReplayEntry[],
+): ClaudeReplaySteps<ClaudeSubagentUsage | null> {
   let totalTokens: number | undefined;
 
   for (const entry of entries) {
+    yield;
     if (entry.type !== "assistant") continue;
     const observed = readTotalTokens(entry.message?.usage);
     if (observed !== undefined) totalTokens = observed;
@@ -247,13 +267,13 @@ function declareSubagent(
   };
 }
 
-function observeSubtitle(
+function* observeSubtitleSteps(
   subagent: ClaudeReplaySubagentInput,
   link: ParentLink,
   title: string | undefined,
-): SubagentObservation | null {
-  const runtime = readRuntime(subagent.entries);
-  const usage = readUsage(subagent.entries);
+): ClaudeReplaySteps<SubagentObservation | null> {
+  const runtime = yield* readRuntimeSteps(subagent.entries);
+  const usage = yield* readUsageSteps(subagent.entries);
   const hasDetails =
     runtime.model !== undefined ||
     runtime.effort !== undefined ||
@@ -274,12 +294,12 @@ function observeSubtitle(
   };
 }
 
-function observeSubagent(
+function* observeSubagentSteps(
   subagent: ClaudeReplaySubagentInput,
   parent: ClaudeReplayParentFacts,
   convertEntry: (entry: ClaudeReplayEntry) => AgentTimelineItem[],
   parentSubagentId?: string,
-): SubagentObservation[] {
+): ClaudeReplaySteps<SubagentObservation[]> {
   const link = resolveParentLink(subagent, parent);
   if (!link) return [];
   const toolCall = parent.toolCalls.get(link.toolCallId);
@@ -287,7 +307,11 @@ function observeSubagent(
   const observations: SubagentObservation[] = [
     declareSubagent(subagent, link, toolCall, parentSubagentId),
   ];
-  const subtitle = observeSubtitle(subagent, link, toolCall?.title ?? subagent.meta?.agentType);
+  const subtitle = yield* observeSubtitleSteps(
+    subagent,
+    link,
+    toolCall?.title ?? subagent.meta?.agentType,
+  );
   if (subtitle) observations.push(subtitle);
 
   for (const entry of subagent.entries) {
@@ -300,6 +324,7 @@ function observeSubagent(
         ...(timestamp ? { timestamp } : {}),
       });
     }
+    yield;
   }
 
   // Prefer the parent's result because it carries failure. If that result is missing, the child's
@@ -318,12 +343,13 @@ function observeSubagent(
   return observations;
 }
 
-function recordReplayToolOwners(
+function* recordReplayToolOwnersSteps(
   owners: Map<string, string>,
   entries: readonly ClaudeReplayEntry[],
   subagentId: string,
-): void {
+): ClaudeReplaySteps<void> {
   for (const entry of entries) {
+    yield;
     if (entry.type !== "assistant" || !Array.isArray(entry.message?.content)) continue;
     for (const block of entry.message.content) {
       if (block?.type === "tool_use" && typeof block.id === "string") {
@@ -333,11 +359,26 @@ function recordReplayToolOwners(
   }
 }
 
-export function observeReplaySubagents(input: {
+interface ClaudeReplaySubagentsInput {
   subagents: readonly ClaudeReplaySubagentInput[];
   parent: ClaudeReplayParentFacts;
   convertEntry: (entry: ClaudeReplayEntry) => AgentTimelineItem[];
-}): { observations: SubagentObservation[]; toolOwners: ReadonlyMap<string, string> } {
+}
+
+interface ClaudeReplaySubagentsResult {
+  observations: SubagentObservation[];
+  toolOwners: ReadonlyMap<string, string>;
+}
+
+export function observeReplaySubagents(
+  input: ClaudeReplaySubagentsInput,
+): ClaudeReplaySubagentsResult {
+  return runReplaySteps(observeReplaySubagentsSteps(input));
+}
+
+export function* observeReplaySubagentsSteps(
+  input: ClaudeReplaySubagentsInput,
+): ClaudeReplaySteps<ClaudeReplaySubagentsResult> {
   const observations: SubagentObservation[] = [];
   const toolOwners = new Map<string, string>();
   const unresolved = [...input.subagents].sort(
@@ -359,8 +400,14 @@ export function observeReplaySubagents(input: {
       const { ownerId, parent, link } = resolved;
 
       // Only proven descendants may own notifications; ambient sidecars cannot claim them.
-      recordReplayToolOwners(toolOwners, subagent.entries, link.id);
-      observations.push(...observeSubagent(subagent, parent, input.convertEntry, ownerId));
+      yield* recordReplayToolOwnersSteps(toolOwners, subagent.entries, link.id);
+      const subagentObservations = yield* observeSubagentSteps(
+        subagent,
+        parent,
+        input.convertEntry,
+        ownerId,
+      );
+      for (const observation of subagentObservations) observations.push(observation);
       if (subagent.parentFacts) resolvedParents.set(link.id, subagent.parentFacts);
       unresolved.splice(index, 1);
       madeProgress = true;

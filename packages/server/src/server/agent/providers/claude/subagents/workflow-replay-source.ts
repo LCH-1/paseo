@@ -5,7 +5,7 @@ import { normalizeProviderReplayTimestamp } from "../../../provider-history-time
 import type { ProviderSubagentStatus } from "../../../provider-subagents/store.js";
 import type { SubagentObservation } from "./observation.js";
 import { buildClaudeSubagentSubtitle } from "./presentation.js";
-import type { ClaudeReplayEntry } from "./replay-source.js";
+import { runReplaySteps, type ClaudeReplayEntry, type ClaudeReplaySteps } from "./replay-source.js";
 import { formatClaudeWorkflowResult } from "./workflow-output.js";
 
 const ClaudeWorkflowRunSchema = z.object({
@@ -45,12 +45,20 @@ export function parseClaudeWorkflowRun(contents: string): ClaudeWorkflowRun | nu
  * provider runtime was recreated, so replay terminalizes it as failed instead of resurrecting a
  * row that can never receive another update.
  */
-export function observeReplayWorkflows(input: {
+interface ClaudeReplayWorkflowsInput {
   workflows: readonly ClaudeWorkflowRun[];
   parentEntries: readonly ClaudeWorkflowParentEntry[];
   entriesByRunId?: ReadonlyMap<string, readonly ClaudeReplayEntry[]>;
   convertEntry?: (entry: ClaudeReplayEntry) => AgentTimelineItem[];
-}): SubagentObservation[] {
+}
+
+export function observeReplayWorkflows(input: ClaudeReplayWorkflowsInput): SubagentObservation[] {
+  return runReplaySteps(observeReplayWorkflowsSteps(input));
+}
+
+export function* observeReplayWorkflowsSteps(
+  input: ClaudeReplayWorkflowsInput,
+): ClaudeReplaySteps<SubagentObservation[]> {
   const toolCallIdByRunId = readWorkflowLinks(input.parentEntries);
   const observations: SubagentObservation[] = [];
 
@@ -78,15 +86,14 @@ export function observeReplayWorkflows(input: {
       });
     }
 
-    observations.push(
-      ...observeWorkflowTimeline({
-        id,
-        result: workflow.result,
-        entries: input.entriesByRunId?.get(workflow.runId) ?? [],
-        convertEntry: input.convertEntry,
-        finishedAt,
-      }),
-    );
+    const timeline = yield* observeWorkflowTimelineSteps({
+      id,
+      result: workflow.result,
+      entries: input.entriesByRunId?.get(workflow.runId) ?? [],
+      convertEntry: input.convertEntry,
+      finishedAt,
+    });
+    for (const observation of timeline) observations.push(observation);
 
     const subtitle = buildClaudeSubagentSubtitle({
       title: "Workflow",
@@ -114,13 +121,13 @@ export function observeReplayWorkflows(input: {
   return observations;
 }
 
-function observeWorkflowTimeline(input: {
+function* observeWorkflowTimelineSteps(input: {
   id: string;
   result: unknown;
   entries: readonly ClaudeReplayEntry[];
   convertEntry?: (entry: ClaudeReplayEntry) => AgentTimelineItem[];
   finishedAt?: string;
-}): SubagentObservation[] {
+}): ClaudeReplaySteps<SubagentObservation[]> {
   const observations: SubagentObservation[] = [];
   const replayedAssistantText = new Set<string>();
   const entries = [...input.entries].sort(compareReplayTimestamps);
@@ -137,6 +144,7 @@ function observeWorkflowTimeline(input: {
         ...(timestamp ? { timestamp } : {}),
       });
     }
+    yield;
   }
 
   const resultText = formatClaudeWorkflowResult(input.result);
