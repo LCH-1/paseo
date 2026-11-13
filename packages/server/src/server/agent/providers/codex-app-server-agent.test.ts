@@ -4141,6 +4141,75 @@ describe("Codex app-server provider", () => {
     });
   });
 
+  test("leaves a parent card alone when its nested child's card did not change", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    const notify = (method: string, params: Record<string, unknown>) =>
+      asInternals(session).handleNotification(method, params);
+
+    notify("item/completed", {
+      threadId: "test-thread",
+      item: {
+        type: "subAgentActivity",
+        id: "spawn-child-root",
+        kind: "started",
+        agentThreadId: "child-thread-root",
+        agentPath: "/root/child",
+      },
+    });
+    notify("item/completed", {
+      threadId: "child-thread-root",
+      item: {
+        type: "subAgentActivity",
+        id: "spawn-grandchild",
+        kind: "started",
+        agentThreadId: "grandchild-thread",
+        agentPath: "/root/child/grandchild",
+      },
+    });
+    const grandchildTests = {
+      type: "commandExecution",
+      id: "grandchild-tests",
+      command: "npm test",
+      processId: "51",
+    };
+    notify("item/started", {
+      threadId: "grandchild-thread",
+      turnId: "grandchild-turn",
+      item: { ...grandchildTests, status: "inProgress" },
+    });
+    const parentUpdates = () =>
+      events.filter(
+        (event) =>
+          (event.type === "timeline" &&
+            event.item.type === "tool_call" &&
+            event.item.callId === "spawn-child-root") ||
+          (event.type === "provider_subagent" &&
+            event.event.type === "upsert" &&
+            event.event.id === "child-thread-root"),
+      ).length;
+    const grandchildUpserts = () =>
+      events.filter(
+        (event) =>
+          event.type === "provider_subagent" &&
+          event.event.type === "upsert" &&
+          event.event.id === "grandchild-thread",
+      ).length;
+    const parentUpdatesBefore = parentUpdates();
+    const grandchildUpsertsBefore = grandchildUpserts();
+
+    // The command finishing leaves the grandchild's log as it was.
+    notify("item/completed", {
+      threadId: "grandchild-thread",
+      turnId: "grandchild-turn",
+      item: { ...grandchildTests, status: "completed", aggregatedOutput: "ok", exitCode: 0 },
+    });
+
+    expect(grandchildUpserts()).toBe(grandchildUpsertsBefore + 1);
+    expect(parentUpdates()).toBe(parentUpdatesBefore);
+  });
+
   test("never treats an unmapped foreign terminal as the root terminal", () => {
     const session = createSession();
     const events: AgentStreamEvent[] = [];
