@@ -244,6 +244,10 @@ const GAUGE_KEYS: ReadonlySet<string> = new Set([
   "runtime",
   "agents",
 ]);
+/** Fields inside those blocks that start over every window, so a gauge line would drop them. */
+const WINDOW_FIELDS_IN_GAUGES: Readonly<Record<string, readonly string[]>> = {
+  runtime: ["peakInflightRequests"],
+};
 /** Blocks whose zero values carry no information and dominate the line. */
 const ZERO_ELIDED_KEYS: ReadonlySet<string> = new Set([
   "counters",
@@ -278,8 +282,8 @@ export function isNotableRuntimeMetricsWindow(payload: RuntimeMetricsLogInput): 
  * out, so a missing number reads as 0 and a missing list as empty; fractional values in those
  * blocks keep one decimal. Without gauges the standing-state blocks (sessions, sockets, memory,
  * runtime, agents, git.workspaceService) are left out too; the window's own measurements
- * (event loop delay, Git commands, latency, message counts) are always there. `elided` names
- * what was left out. The diagnostics snapshot keeps the full payload.
+ * (event loop delay, Git commands, latency, message counts, runtime.peakInflightRequests) are
+ * always there. `elided` names what was left out. The diagnostics snapshot keeps the full payload.
  */
 export function compactRuntimeMetricsForLog(
   payload: RuntimeMetricsLogInput,
@@ -287,9 +291,12 @@ export function compactRuntimeMetricsForLog(
 ): Record<string, unknown> {
   const compact: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(payload)) {
-    if (!options.includeGauges && GAUGE_KEYS.has(key)) continue;
     if (key === "final" && value === false) continue;
     let next: unknown = value;
+    if (!options.includeGauges && GAUGE_KEYS.has(key)) {
+      next = pickWindowFields(key, value);
+      if (next === undefined) continue;
+    }
     if (key === "git" && !options.includeGauges) {
       const { workspaceService: _gauges, ...windowGit } = payload.git;
       next = windowGit;
@@ -300,6 +307,13 @@ export function compactRuntimeMetricsForLog(
   }
   compact.elided = options.includeGauges ? "zeros" : "zeros+gauges";
   return compact;
+}
+
+function pickWindowFields(key: string, value: unknown): Record<string, unknown> | undefined {
+  const fields = WINDOW_FIELDS_IN_GAUGES[key];
+  if (!fields || value === null || typeof value !== "object") return undefined;
+  const block = value as Record<string, unknown>;
+  return Object.fromEntries(fields.filter((field) => field in block).map((f) => [f, block[f]]));
 }
 
 function elideZeros(value: unknown): unknown {

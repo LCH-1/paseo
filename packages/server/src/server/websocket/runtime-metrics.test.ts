@@ -289,15 +289,22 @@ describe("runtime metrics log lines", () => {
   it("keeps the window's own measurements and leaves standing state out between gauge lines", () => {
     const logged = compactRuntimeMetricsForLog(logPayload(), { includeGauges: false });
 
-    for (const gauge of ["sessions", "sockets", "memory", "runtime", "agents"]) {
+    for (const gauge of ["sessions", "sockets", "memory", "agents"]) {
       expect(logged).not.toHaveProperty(gauge);
     }
+    // The in-flight peak starts over every window; only the standing count is a gauge.
+    expect(logged.runtime).toEqual({ peakInflightRequests: 1 });
     expect(logged.git).toEqual({ commands: { submitted: 4, operationsTop: [["status", 4]] } });
     expect(logged).toMatchObject({
       eventLoopDelay: { maxMs: 40.2 },
       uptimeSeconds: 120.5,
       elided: "zeros+gauges",
     });
+
+    const idle = { ...logPayload(), runtime: { inflightRequests: 0, peakInflightRequests: 0 } };
+    expect(compactRuntimeMetricsForLog(idle, { includeGauges: false })).not.toHaveProperty(
+      "runtime",
+    );
   });
 
   it("calls a window notable for a stall, a slow request, a Git burst, or a rejected socket", () => {
