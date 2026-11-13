@@ -2,8 +2,10 @@ import type { Logger } from "pino";
 import { expireUploads } from "./file-upload/index.js";
 
 const DAY_MS = 24 * 60 * 60_000;
-// A completed receipt only answers a retry of the same request, and clients retry within one
-// connection. Thirty days is far past any retry and stops the directories from growing forever.
+// A completed receipt only answers a retry of the same request. The app keeps creation keys in
+// memory, so a restart never reuses one, but while it runs it resubmits an unsettled creation on
+// every reconnect, however late. Thirty days is far past any realistic disconnect and stops the
+// directories from growing forever; an app kept disconnected longer could create the same again.
 export const COMPLETED_RECEIPT_RETENTION_MS = 30 * DAY_MS;
 // An upload is referenced by path from the prompt that carried it and from any draft still
 // holding it, so it lives as long as conversation history is kept rather than as long as a receipt.
