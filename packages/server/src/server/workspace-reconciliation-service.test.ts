@@ -242,6 +242,7 @@ function createRootGitEntryHarness(
   options: {
     getCheckout?: (cwd: string, gitEntry: string) => Promise<ProjectCheckoutLitePayload>;
     inspectProjectGitEntry?: ProjectGitEntryInspector;
+    logger?: pino.Logger;
   } = {},
 ) {
   const projectRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-git-entry-")));
@@ -265,11 +266,12 @@ function createRootGitEntryHarness(
       createCheckout(cwd, existsSync(gitEntry) ? { isGit: true, worktreeRoot: cwd } : {}));
   let reads = 0;
   const timeouts: Array<() => void | Promise<void>> = [];
+  const intervals: Array<() => void | Promise<void>> = [];
   let emit: ((event: string, filename: string | null) => void) | undefined;
   const service = new WorkspaceReconciliationService({
     projectRegistry,
     workspaceRegistry,
-    logger: createTestLogger(),
+    logger: options.logger ?? createTestLogger(),
     workspaceGitService: {
       getCheckout: async (cwd) => {
         reads += 1;
@@ -282,7 +284,10 @@ function createRootGitEntryHarness(
         return {};
       },
       clearTimeout: () => undefined,
-      setInterval: () => ({}),
+      setInterval: (callback) => {
+        intervals.push(callback);
+        return {};
+      },
       clearInterval: () => undefined,
     },
     watchProjectRoot: (_rootPath, _options, onChange) => {
@@ -300,7 +305,11 @@ function createRootGitEntryHarness(
     await timeouts.shift()?.();
     return reads - before;
   };
-  return { service, gitEntry, readsAfterEvent };
+  /** Runs the periodic rescan. */
+  const rescan = async () => {
+    await intervals.at(0)?.();
+  };
+  return { service, projectRoot, gitEntry, readsAfterEvent, rescan };
 }
 
 describe("WorkspaceReconciliationService", () => {
@@ -1789,6 +1798,65 @@ describe("WorkspaceReconciliationService", () => {
     initialized = false;
     expect(await readsAfterEvent("rename")).toBe(1);
     expect(await readsAfterEvent("change")).toBe(0);
+    service.dispose();
+  });
+
+  test("a pass that changes a root after its watch dropped .git events leaves a trace", async () => {
+    const { logger, infoRecords } = createCapturingLogger();
+    let remoteUrl: string | null = null;
+    const { service, projectRoot, gitEntry, readsAfterEvent, rescan } = createRootGitEntryHarness(
+      tempDirs,
+      {
+        logger,
+        getCheckout: async (cwd, entry) =>
+          createCheckout(
+            cwd,
+            existsSync(entry) ? { isGit: true, worktreeRoot: cwd, remoteUrl } : {},
+          ),
+      },
+    );
+    const traces = () =>
+      infoRecords.filter(
+        (record) =>
+          record.message ===
+          "Workspace reconciliation changed roots whose watch filtered .git events",
+      );
+
+    await service.start();
+    mkdirSync(gitEntry);
+    expect(await readsAfterEvent("rename")).toBe(1);
+    // Dropped events alone leave no trace, and neither does a pass that changes nothing.
+    expect(await readsAfterEvent("change")).toBe(0);
+    await rescan();
+    expect(traces()).toEqual([]);
+
+    // The rescan finds a change the dropped events may have announced.
+    expect(await readsAfterEvent("change")).toBe(0);
+    expect(await readsAfterEvent("change")).toBe(0);
+    remoteUrl = "https://example.com/acme/entry.git";
+    await rescan();
+    expect(traces()).toEqual([
+      {
+        message: "Workspace reconciliation changed roots whose watch filtered .git events",
+        payload: {
+          trigger: "rescan",
+          roots: [
+            {
+              rootPath: projectRoot,
+              filteredEvents: 2,
+              changes: [
+                expect.objectContaining({ kind: "project_updated", directory: projectRoot }),
+              ],
+            },
+          ],
+        },
+      },
+    ]);
+
+    // Counted from the pass before: the next change found after no dropped event is not traced.
+    remoteUrl = "https://example.com/acme/moved.git";
+    await rescan();
+    expect(traces()).toHaveLength(1);
     service.dispose();
   });
 

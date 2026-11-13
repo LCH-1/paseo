@@ -147,6 +147,8 @@ interface ProjectRootWatchTarget {
   watcher: ProjectRootWatcher;
   /** What `.git` was when this watch last asked for a pass; null forces the next event through. */
   gitEntry: string | null;
+  /** `.git` events dropped as unchanged since the last pass began. */
+  filteredEvents: number;
 }
 
 // "watch" answers a change at a project root and "boot" converges a fresh daemon, so both read
@@ -520,7 +522,7 @@ export class WorkspaceReconciliationService {
             );
           },
         );
-        target = { rootPath: project.rootPath, watcher, gitEntry };
+        target = { rootPath: project.rootPath, watcher, gitEntry, filteredEvents: 0 };
         this.watchers.push(target);
       } catch (error) {
         // The periodic reconciliation is the convergence path for roots that
@@ -538,7 +540,42 @@ export class WorkspaceReconciliationService {
     const next = this.inspectProjectGitEntry(target.rootPath);
     const moved = mustPass || target.gitEntry === null || next !== target.gitEntry;
     target.gitEntry = next;
+    if (!moved) target.filteredEvents += 1;
     return moved;
+  }
+
+  /** Takes, per watched root, the `.git` events dropped since the last pass began. */
+  private takeFilteredGitEvents(): Array<{ rootPath: string; filteredEvents: number }> {
+    const taken: Array<{ rootPath: string; filteredEvents: number }> = [];
+    for (const target of this.watchers) {
+      if (target.filteredEvents === 0) continue;
+      taken.push({ rootPath: target.rootPath, filteredEvents: target.filteredEvents });
+      target.filteredEvents = 0;
+    }
+    return taken;
+  }
+
+  /**
+   * Leaves a trace when a pass changes a root whose watch dropped `.git` events as unchanged since
+   * the pass before: the filter may have held that change back until now. Expected for a branch
+   * switched at a root on Windows, which the rescan picks up; anything else points at the filter.
+   */
+  private reportFilteredGitEvents(
+    trigger: ReconciliationTrigger,
+    filtered: Array<{ rootPath: string; filteredEvents: number }>,
+    changes: ReconciliationChange[],
+  ): void {
+    const roots = filtered.flatMap((root) => {
+      const rootChanges = changes.filter((change) =>
+        areEquivalentPaths(change.directory, root.rootPath),
+      );
+      return rootChanges.length > 0 ? [{ ...root, changes: rootChanges }] : [];
+    });
+    if (roots.length === 0) return;
+    this.logger.info(
+      { trigger, roots },
+      "Workspace reconciliation changed roots whose watch filtered .git events",
+    );
   }
 
   /** Lets the next `.git` event of the matching watches through, whatever it compares to. */
@@ -574,6 +611,7 @@ export class WorkspaceReconciliationService {
     this.reconciling = true;
     try {
       await this.syncProjectRootWatches();
+      const filteredGitEvents = this.takeFilteredGitEvents();
       const checkoutRead: WorkspaceGitCheckoutOptions = {
         allowObserved: trigger === "rescan",
         reason: `reconcile-${trigger}`,
@@ -582,6 +620,7 @@ export class WorkspaceReconciliationService {
         mode === "full"
           ? await this.runOnce(checkoutRead)
           : await this.reconcileGitMetadata(checkoutRead);
+      this.reportFilteredGitEvents(trigger, filteredGitEvents, result.changesApplied);
       const workspaceIds = new Set<string>();
       const projectIds = new Set<string>();
       for (const change of result.changesApplied) {
