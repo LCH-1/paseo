@@ -1440,6 +1440,80 @@ test("a failed host discovery keeps the accounts and is asked again by the next 
   expect(discoveries).toBe(5);
 });
 
+test("while the login store cannot be read, renewals fetch each account once per cache window with its last login, behind the polls' answers", async () => {
+  let now = 0;
+  let storeFails = false;
+  let discoveries = 0;
+  const fetched: Array<{ input: string; at: number }> = [];
+  const warnings: unknown[] = [];
+  const registry = new UsageSourceRegistry(() => now, 300_000, {
+    warn: (...args: unknown[]) => {
+      warnings.push(args[1]);
+    },
+  });
+  registry.register(
+    source({
+      id: "source",
+      // Each takes its time after the query that started it has had its chance to answer.
+      discover: async () => {
+        discoveries++;
+        await settle();
+        now += 1_000;
+        if (storeFails) throw new Error("Login store temporarily unavailable");
+        return ["a", "b"].map((key) => ({ key, input: key }));
+      },
+      fetch: async (input) => {
+        fetched.push({ input: String(input), at: now });
+        await settle();
+        now += 500;
+        return { status: "available", windows: [] };
+      },
+    }),
+  );
+  await registry.listReports();
+  storeFails = true;
+  discoveries = 0;
+  fetched.length = 0;
+  const waits: number[] = [];
+  let firstRenewalSeen = false;
+  // An app window polls once a minute for a quarter of an hour, and the store fails every read.
+  for (let minute = 1; minute <= 15; minute++) {
+    now = Math.max(now, minute * 60_000);
+    const asked = now;
+    const before = discoveries;
+    const reports = await registry.listReports();
+    waits.push(now - asked);
+    // The accounts the store named before stay listed.
+    expect(reports.map((report) => report.id)).toEqual(["source:a", "source:b"]);
+    for (let step = 0; step < 4; step++) await settle();
+    if (before === 0 && discoveries > 0) {
+      // The poll that started the first renewal was answered from the cache, and the renewal still
+      // fetched both reports, near the end of their window, with the logins named before.
+      firstRenewalSeen = true;
+      expect(waits.at(-1)).toBe(0);
+      expect(warnings).toEqual(["Usage source discovery failed"]);
+      expect(fetched.map((fetch) => fetch.input)).toEqual(["a", "b"]);
+    }
+  }
+  expect(firstRenewalSeen).toBe(true);
+  // Once the store's last answer is a window old, a poll waits for the store to fail again, but no
+  // poll waits for the vendor.
+  expect(waits.filter((wait) => wait > 1_000)).toEqual([]);
+  // Each account reaches the vendor once per cache window, not on every failed renewal.
+  expect(fetched.map((fetch) => `${fetch.input}@${fetch.at / 1_000}s`)).toEqual([
+    "a@301s",
+    "b@301s",
+    "a@601s",
+    "b@601s",
+    "a@901s",
+    "b@901s",
+  ]);
+  // Every failed store read is logged.
+  expect(warnings).toEqual(
+    Array.from({ length: discoveries }, () => "Usage source discovery failed"),
+  );
+});
+
 test("a forced refresh that meets a running discovery is answered by one started after it", async () => {
   let now = 0;
   const store: string[] = [];
