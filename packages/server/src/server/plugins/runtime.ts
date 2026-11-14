@@ -24,6 +24,7 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import type { PluginLogEntry } from "@getpaseo/protocol/messages";
 import { compilePlugin } from "./compiler.js";
+import { createPluginBuildCache, type PluginBuildCache } from "./plugin-build-cache.js";
 import { readPluginManifest } from "./manifest.js";
 import type { PluginRequirements } from "@getpaseo/protocol/messages";
 import { assertPluginCompatibility } from "@getpaseo/protocol/plugin-requirements";
@@ -127,6 +128,8 @@ interface RemoteProviderConnection {
 
 interface PluginRuntimeDependencies {
   settingsDirectory?: string;
+  /** Where compiled bundles are kept between loads; no cache without one. */
+  buildCacheDirectory?: string;
   onSettingsChanged?: (pluginId: string, settingsId: string) => void;
   spawnChild?: () => PluginChild;
   sessionHost?: PluginPaseoSessionHost;
@@ -306,6 +309,7 @@ export class PluginRuntime {
   private readonly spawnChild: () => PluginChild;
   private sessionHost: PluginPaseoSessionHost | null;
   private readonly listeners = new Set<(pluginId: string, error?: string) => void>();
+  private readonly buildCache: PluginBuildCache | undefined;
 
   constructor(
     logger: pino.Logger,
@@ -315,6 +319,14 @@ export class PluginRuntime {
     this.logger = logger.child({ module: "plugins" });
     this.spawnChild = dependencies.spawnChild ?? spawnPluginChild;
     this.sessionHost = dependencies.sessionHost ?? null;
+    this.buildCache = dependencies.buildCacheDirectory
+      ? createPluginBuildCache({
+          directory: dependencies.buildCacheDirectory,
+          daemonVersion,
+          onError: (operation, error) =>
+            this.logger.warn({ err: error, operation }, "Plugin build cache unavailable"),
+        })
+      : undefined;
   }
 
   bindPaseoSessionHost(sessionHost: PluginPaseoSessionHost): void {
@@ -356,7 +368,9 @@ export class PluginRuntime {
       throw new Error(`Built-in plugin ${input.id} has manifest ID ${manifest.id}`);
     }
     assertPluginCompatibility({ ...manifest, version: this.daemonVersion, runtime: "daemon" });
-    const bundles = await compilePlugin(await resolveEntryPaths(directory));
+    const bundles = await compilePlugin(await resolveEntryPaths(directory), {
+      cache: this.buildCache,
+    });
     if (!bundles.serverBundle) throw new Error(`Built-in plugin ${input.id} needs a server entry`);
     const loaded = await this.launchPlugin({
       pluginId: input.id,
@@ -375,7 +389,7 @@ export class PluginRuntime {
     const manifest = await readPluginManifest(directory);
     assertPluginCompatibility({ ...manifest, version: this.daemonVersion, runtime: "daemon" });
     const entryPaths = await resolveEntryPaths(directory);
-    await compilePlugin(entryPaths);
+    await compilePlugin(entryPaths, { cache: this.buildCache });
   }
 
   async stopPluginById(pluginId: string): Promise<boolean> {
@@ -650,7 +664,7 @@ export class PluginRuntime {
     const manifest = await readPluginManifest(directory);
     assertPluginCompatibility({ ...manifest, version: this.daemonVersion, runtime: "daemon" });
     const entryPaths = await resolveEntryPaths(directory);
-    const bundles = await compilePlugin(entryPaths);
+    const bundles = await compilePlugin(entryPaths, { cache: this.buildCache });
     const serverBundle = bundles.serverBundle;
     if (!serverBundle) {
       return {

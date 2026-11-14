@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "vitest";
 import { compilePlugin } from "../compiler.js";
+import { pluginImportWorkerStats } from "../compiler-imports-pool.js";
 import { readPluginManifest } from "../manifest.js";
 import { DaemonClient } from "../../test-utils/daemon-client.js";
 import { createTestPaseoDaemon } from "../../test-utils/paseo-daemon.js";
@@ -65,6 +66,52 @@ test("retired Windows plugin ID is reserved without starting a second usage engi
   expect(started).toContain("claude-usage-source");
   expect(started).not.toContain("claude-windows-usage");
 });
+
+test("a restarted daemon reuses built-in bundles it compiled into PASEO_HOME", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "paseo-builtin-cache-"));
+  roots.push(root);
+  await fixture(root, "listed", true);
+  // Bundles of files modified while their build ran are not kept; these were just written.
+  const past = new Date(Date.now() - 60 * 60 * 1000);
+  for (const entry of [
+    "listed/paseo-plugin.json",
+    "listed/index.server.ts",
+    "listed/index.client.tsx",
+    "listed",
+    ".",
+  ])
+    await utimes(path.join(root, entry), past, past);
+  const paseoHomeRoot = await mkdtemp(path.join(os.tmpdir(), "paseo-builtin-cache-home-"));
+  roots.push(paseoHomeRoot);
+  const boundaryChecks = () => {
+    const stats = pluginImportWorkerStats();
+    return stats.workerReaders + stats.inThreadReaders;
+  };
+  const start = () =>
+    createTestPaseoDaemon({
+      daemonVersion: "0.9.2",
+      pluginsEnabled: false,
+      builtinPlugins: new BuiltinPluginLoader(root, ["listed"]),
+      paseoHomeRoot,
+      cleanup: false,
+    });
+
+  const first = await start();
+  const cache = path.join(first.paseoHome, "cache", "plugin-builds");
+  await first.close();
+  expect((await readdir(cache)).filter((name) => name.endsWith(".build"))).toHaveLength(2);
+  const checks = boundaryChecks();
+  const second = await start();
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${second.port}/ws`, appVersion: "0.9.2" });
+  try {
+    expect(boundaryChecks()).toBe(checks);
+    await client.connect();
+    expect((await client.getPluginCatalog())[0]?.clientBundle).toContain("builtin-client-marker");
+  } finally {
+    await client.close();
+    await second.close();
+  }
+}, 60_000);
 
 test("listed client bundle is published while plugins are disabled; unlisted directory is inert", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "paseo-builtin-fixture-"));

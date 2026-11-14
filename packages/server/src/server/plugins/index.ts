@@ -65,6 +65,7 @@ interface PluginRuntimePort {
 interface PluginServiceDependencies {
   usageAgents?: AgentUsageLookup;
   settingsDirectory?: string;
+  buildCacheDirectory?: string;
   runtime?: PluginRuntimePort;
   managedSources?: ManagedPluginSources;
   builtinPlugins?: BuiltinPluginLoader;
@@ -114,6 +115,7 @@ export class PluginService {
       dependencies.runtime ??
       new PluginRuntime(logger, daemonVersion, {
         settingsDirectory: dependencies.settingsDirectory,
+        buildCacheDirectory: dependencies.buildCacheDirectory,
         onSettingsChanged: (pluginId, settingsId) => {
           for (const listener of this.settingsListeners) listener(pluginId, settingsId);
         },

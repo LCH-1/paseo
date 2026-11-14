@@ -3,7 +3,8 @@ import { createRequire, isBuiltin } from "node:module";
 import path from "node:path";
 import type { PluginImportKind } from "./compiler-imports.js";
 import { openPluginImportReader } from "./compiler-imports-pool.js";
-import type { Metafile, OnResolveResult, Plugin } from "esbuild";
+import type { PluginBuildCache } from "./plugin-build-cache.js";
+import type { BuildOptions, Metafile, OnResolveResult, Plugin } from "esbuild";
 import {
   isPluginClientOnlySdkSpecifier,
   isPluginServerOnlySdkSpecifier,
@@ -167,7 +168,12 @@ function lexicalBoundaryError(
   }
 }
 
-function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory: string): Plugin {
+function createRuntimeBoundaryPlugin(
+  target: PluginBuildTarget,
+  pluginDirectory: string,
+  readFiles: Set<string>,
+  configFiles: Set<string>,
+): Plugin {
   const boundaryResolution = {};
   const linkedDependencyRoots = new Set<string>();
   return {
@@ -176,6 +182,8 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
       const checked = new Set<string>();
       const imports = await openPluginImportReader(pluginDirectory);
       buildContext.onDispose(() => imports.close());
+      // A config may extend a file that does not exist; that is still a lookup.
+      for (const configFile of imports.configFiles) configFiles.add(configFile);
       function resolvedBoundaryError(
         resolvedFile: string,
         specifier: string,
@@ -237,6 +245,7 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
         const key = `${owner}:${file}`;
         if (checked.has(key) || !/\.[cm]?[jt]sx?$/.test(file)) return null;
         checked.add(key);
+        readFiles.add(file);
         for (const { specifier, kind, typeOnly } of await imports.read(file)) {
           const packageSpecifier =
             kind === "type-reference"
@@ -385,13 +394,18 @@ function checkSharedDependencies(inputs: Metafile["inputs"], pluginDirectory: st
   }
 }
 
-async function compileTarget(entryPath: string, target: PluginBuildTarget): Promise<string> {
-  const { build } = loadEsbuild();
+async function compileTarget(
+  entryPath: string,
+  target: PluginBuildTarget,
+  cache: PluginBuildCache | undefined,
+): Promise<string> {
+  const esbuild = loadEsbuild();
   // Use native canonical paths throughout: TypeScript expands Windows short names
   // when resolving type references, while the JS realpath implementation retains them.
   const pluginDirectory = realpathSync.native(path.dirname(entryPath));
-  const result = await build({
-    entryPoints: [realpathSync.native(entryPath)],
+  const entryPoint = realpathSync.native(entryPath);
+  const options = {
+    entryPoints: [entryPoint],
     bundle: true,
     format: "cjs",
     jsx: "automatic",
@@ -415,28 +429,60 @@ async function compileTarget(entryPath: string, target: PluginBuildTarget): Prom
             "zod",
           ]
         : SERVER_HOST_MODULES,
-    plugins: [createRuntimeBoundaryPlugin(target, pluginDirectory)],
     metafile: true,
     logLevel: "silent",
     treeShaking: true,
     write: false,
+  } satisfies BuildOptions;
+  const key = cache
+    ? await cache.key({
+        target,
+        entryPath: entryPoint,
+        pluginDirectory,
+        esbuildVersion: esbuild.version,
+        options,
+      })
+    : null;
+  if (cache && key) {
+    const cached = await cache.lookup(key);
+    if (cached !== null) return cached;
+  }
+  const recorder = cache && key ? await cache.begin(key, pluginDirectory) : null;
+  const readFiles = new Set<string>();
+  const configFiles = new Set<string>();
+  const result = await esbuild.build({
+    ...options,
+    plugins: [createRuntimeBoundaryPlugin(target, pluginDirectory, readFiles, configFiles)],
   });
   checkSharedDependencies(result.metafile.inputs, pluginDirectory);
   const output = result.outputFiles[0]?.text;
   if (!output) throw new Error(`Plugin ${target} compilation produced no output`);
-  return wrapCommonJsBundle(makeHermesInteropEager(output));
+  const bundle = wrapCommonJsBundle(makeHermesInteropEager(output));
+  if (recorder) {
+    for (const input of Object.keys(result.metafile.inputs)) readFiles.add(path.resolve(input));
+    await recorder.store(bundle, readFiles, configFiles);
+  }
+  return bundle;
 }
 
-export async function compilePlugin(entryPaths: {
-  client: string | null;
-  server: string | null;
-}): Promise<{
+export interface CompilePluginOptions {
+  /** Reuses a bundle only while every input it recorded is unchanged. */
+  cache?: PluginBuildCache;
+}
+
+export async function compilePlugin(
+  entryPaths: {
+    client: string | null;
+    server: string | null;
+  },
+  options: CompilePluginOptions = {},
+): Promise<{
   clientBundle: string | null;
   serverBundle: string | null;
 }> {
   const [clientBundle, serverBundle] = await Promise.all([
-    entryPaths.client ? compileTarget(entryPaths.client, "client") : null,
-    entryPaths.server ? compileTarget(entryPaths.server, "server") : null,
+    entryPaths.client ? compileTarget(entryPaths.client, "client", options.cache) : null,
+    entryPaths.server ? compileTarget(entryPaths.server, "server", options.cache) : null,
   ]);
   return { clientBundle, serverBundle };
 }
