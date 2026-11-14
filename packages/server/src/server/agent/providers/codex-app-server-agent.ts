@@ -153,6 +153,9 @@ function isCodexAlreadyUnarchivedError(error: unknown, threadId: string): boolea
 
 const TURN_START_TIMEOUT_MS = 90 * 1000;
 const INTERRUPT_TIMEOUT_MS = 2_000;
+// Another session's app-server that does not answer a history read in time is passed over for
+// the rollout, which reads even a 120MB thread within two seconds.
+const OPEN_THREAD_READ_TIMEOUT_MS = 15_000;
 const CODEX_PROVIDER = "codex" as const;
 // Codex treats most app-server client names as the model-request originator.
 // This reserved Codex name is non-originating, so requests keep Codex's default
@@ -272,7 +275,7 @@ const CODEX_MODES: AgentMode[] = [
 const DEFAULT_CODEX_MODE_ID = "auto";
 
 interface CodexAppServerClientLike {
-  request(method: string, params?: unknown): Promise<unknown>;
+  request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
   forkThread?(params: CodexThreadForkParams): Promise<CodexThreadForkResponse>;
   rollbackThread?(params: CodexThreadRollbackParams): Promise<CodexThreadRollbackResponse>;
   notify(method: string, params?: unknown): void;
@@ -2274,11 +2277,12 @@ function readLatestCodexTurnId(response: unknown): string | null {
   return typeof latest?.id === "string" && latest.id ? latest.id : null;
 }
 
-function readCodexThread(client: CodexAppServerClientLike, threadId: string): Promise<unknown> {
-  return client.request("thread/read", {
-    threadId,
-    includeTurns: true,
-  });
+function readCodexThread(
+  client: CodexAppServerClientLike,
+  threadId: string,
+  timeoutMs?: number,
+): Promise<unknown> {
+  return client.request("thread/read", { threadId, includeTurns: true }, timeoutMs);
 }
 
 export async function forkCodexThread(
@@ -4264,8 +4268,17 @@ export class CodexAppServerAgentSession implements AgentSession {
     const readThread = async (threadIdToRead: string): Promise<unknown> => {
       const live = this.findLiveThreadClient(threadIdToRead);
       if (live) {
-        reads.live += 1;
-        return readCodexThread(live, threadIdToRead);
+        try {
+          const read = await readCodexThread(live, threadIdToRead, OPEN_THREAD_READ_TIMEOUT_MS);
+          reads.live += 1;
+          return read;
+        } catch (error) {
+          // That session's app-server may be exiting, closing or busy; the history is on disk too.
+          this.logger.warn(
+            { err: error, threadId: threadIdToRead },
+            "Reading Codex history without the app-server that has it open",
+          );
+        }
       }
       try {
         const read = await readCodexThreadFromRollouts({
@@ -4349,12 +4362,16 @@ export class CodexAppServerAgentSession implements AgentSession {
     } finally {
       this.loadingPersistedHistory = false;
     }
-    this.resetCodexUserMessageTurns();
     for (const entry of timeline) {
       if (slicer.due) await slicer.pause();
       if (entry.item.type === "tool_call" && entry.item.name === "request_user_input_async") {
         entry.item = this.asyncQuestions.timeline(entry.item.callId) ?? entry.item;
       }
+    }
+    // Rewind points are rebuilt without a pause, so a live user message handled during one
+    // cannot land between two of the history's.
+    this.resetCodexUserMessageTurns();
+    for (const entry of timeline) {
       if (entry.item.type === "user_message") {
         this.rememberCodexUserMessageTurn(entry.item.messageId, entry.providerTurnId);
       }

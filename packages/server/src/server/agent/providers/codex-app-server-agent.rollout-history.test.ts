@@ -1,12 +1,13 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import { asInternals } from "../../test-utils/class-mocks.js";
 import type { AgentSessionConfig, AgentStreamEvent } from "../agent-sdk-types.js";
 import { CodexAppServerAgentClient, CodexAppServerAgentSession } from "./codex-app-server-agent.js";
+import { CodexHistorySlicer } from "./codex/rollout-history.js";
 import { createFakeCodexAppServer } from "./codex/test-utils/fake-app-server.js";
 import {
   fixtureRolloutPath,
@@ -71,22 +72,30 @@ interface ThreadReadServer {
   threadReads: string[];
   appServers(): number;
   spawn(): Promise<ReturnType<typeof createFakeCodexAppServer>["child"]>;
+  /** Answers every later `thread/read` with `answer`; throwing makes it an error response. */
+  answerReads(answer: (threadId: string) => unknown): void;
 }
 
 /** App-server stand-ins that answer `thread/read` as Codex 0.167 did for the fixture. */
 function threadReadServer(answers: Record<string, unknown[]> = {}): ThreadReadServer {
   const threadReads: string[] = [];
   let started = 0;
+  let answerRead = (id: string): unknown => ({
+    thread: { id, turns: answers[id] ?? recordedThreadTurns(id) },
+  });
   return {
     threadReads,
     appServers: () => started,
+    answerReads: (answer) => {
+      answerRead = answer;
+    },
     spawn: async () => {
       started += 1;
       return createFakeCodexAppServer({
-        "thread/read": (params) => {
+        "thread/read": async (params) => {
           const id = String((params as { threadId?: unknown }).threadId);
           threadReads.push(id);
-          return { thread: { id, turns: answers[id] ?? recordedThreadTurns(id) } };
+          return answerRead(id);
         },
       }).child;
     },
@@ -138,6 +147,57 @@ async function readHistory(
   } finally {
     await session.close();
   }
+}
+
+/** Leaves every later `thread/read` to `server` unanswered; resolves once one is asked. */
+function leaveReadsUnanswered(server: ThreadReadServer): Promise<void> {
+  return new Promise((resolve) => {
+    server.answerReads(() => {
+      resolve();
+      return new Promise(() => {});
+    });
+  });
+}
+
+interface OpenThread {
+  open: { close(): Promise<void> };
+  /** Reads the thread's history as AgentManager reads a closed agent of the same provider. */
+  readHistory(): Promise<AgentStreamEvent[]>;
+}
+
+/** A provider client whose interactive session already has `threadId` open on `server`. */
+async function openThreadElsewhere(
+  threadId: string,
+  server: ThreadReadServer,
+): Promise<OpenThread> {
+  const provider = new CodexAppServerAgentClient(createTestLogger());
+  const internals = asInternals<{
+    goalsEnabledPromise: Promise<boolean> | null;
+    autoReviewEnabledPromise: Promise<boolean> | null;
+    spawnAppServer: ThreadReadServer["spawn"];
+  }>(provider);
+  internals.goalsEnabledPromise = Promise.resolve(false);
+  internals.autoReviewEnabledPromise = Promise.resolve(false);
+  internals.spawnAppServer = server.spawn;
+  const launch = { env: { CODEX_HOME: codexHome } };
+  const handle = { sessionId: threadId, metadata: { cwd: FIXTURE_CWD, model: "gpt-5.4" } };
+  const open = await provider.resumeSession(handle, undefined, launch);
+  server.threadReads.length = 0;
+  return {
+    open,
+    readHistory: async () => {
+      const history = await provider.resumeSession(handle, undefined, launch, {
+        purpose: "history",
+      });
+      try {
+        const events: AgentStreamEvent[] = [];
+        for await (const event of history.streamHistory()) events.push(event);
+        return events;
+      } finally {
+        await history.close();
+      }
+    },
+  };
 }
 
 const FIXTURE_THREADS = [
@@ -231,33 +291,116 @@ describe("Codex closed-thread history", () => {
   test("reads through the app-server that already has the thread open", async () => {
     const threadId = ROLLOUT_FIXTURE_THREADS.root;
     const server = threadReadServer();
-    const provider = new CodexAppServerAgentClient(createTestLogger());
-    const internals = asInternals<{
-      goalsEnabledPromise: Promise<boolean> | null;
-      autoReviewEnabledPromise: Promise<boolean> | null;
-      spawnAppServer: ThreadReadServer["spawn"];
-    }>(provider);
-    internals.goalsEnabledPromise = Promise.resolve(false);
-    internals.autoReviewEnabledPromise = Promise.resolve(false);
-    internals.spawnAppServer = server.spawn;
-    const launch = { env: { CODEX_HOME: codexHome } };
-    const handle = { sessionId: threadId, metadata: { cwd: FIXTURE_CWD, model: "gpt-5.4" } };
-    const open = await provider.resumeSession(handle, undefined, launch);
+    const elsewhere = await openThreadElsewhere(threadId, server);
     try {
-      server.threadReads.length = 0;
-      const history = await provider.resumeSession(handle, undefined, launch, {
-        purpose: "history",
-      });
-      const events: AgentStreamEvent[] = [];
-      for await (const event of history.streamHistory()) events.push(event);
-      await history.close();
+      const events = await elsewhere.readHistory();
 
       expect(server.appServers()).toBe(1);
       expect(server.threadReads[0]).toBe(threadId);
       expect(events.length).toBeGreaterThan(0);
     } finally {
-      await open.close();
+      await elsewhere.open.close();
     }
+  });
+
+  test("reads the rollout when the app-server that has the thread open refuses", async () => {
+    const threadId = ROLLOUT_FIXTURE_THREADS.root;
+    const expected = (await readHistory(threadId, codexHome)).events;
+    const server = threadReadServer();
+    const elsewhere = await openThreadElsewhere(threadId, server);
+    try {
+      server.answerReads(() => {
+        throw new Error("thread/read failed");
+      });
+
+      const events = await elsewhere.readHistory();
+
+      expect(server.threadReads).toEqual([threadId]);
+      expect(server.appServers()).toBe(1);
+      expect(events).toEqual(expected);
+    } finally {
+      await elsewhere.open.close();
+    }
+  });
+
+  test("reads the rollout when the session that has the thread open closes meanwhile", async () => {
+    const threadId = ROLLOUT_FIXTURE_THREADS.root;
+    const expected = (await readHistory(threadId, codexHome)).events;
+    const server = threadReadServer();
+    const elsewhere = await openThreadElsewhere(threadId, server);
+    const asked = leaveReadsUnanswered(server);
+
+    const reading = elsewhere.readHistory();
+    await asked;
+    await elsewhere.open.close();
+
+    expect(await reading).toEqual(expected);
+    expect(server.appServers()).toBe(1);
+  });
+
+  test("stops waiting for an app-server that has the thread open but never answers", async () => {
+    const threadId = ROLLOUT_FIXTURE_THREADS.root;
+    const expected = (await readHistory(threadId, codexHome)).events;
+    const server = threadReadServer();
+    const elsewhere = await openThreadElsewhere(threadId, server);
+    const asked = leaveReadsUnanswered(server);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const reading = elsewhere.readHistory();
+      await asked;
+      // Paseo gives an open app-server 15 seconds; other requests wait up to 14 days.
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      expect(await reading).toEqual(expected);
+      expect(server.appServers()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+      await elsewhere.open.close();
+    }
+  });
+
+  test("keeps the rewind order of reread history when a message arrives meanwhile", async () => {
+    const threadId = ROLLOUT_FIXTURE_THREADS.root;
+    const session = historySession(threadId, codexHome, threadReadServer());
+    const internals = asInternals<
+      SessionInternals & {
+        currentThreadId: string | null;
+        persistedHistory: Array<{ item: { type: string; messageId?: string } }>;
+        loadThreadHistory(
+          readThread: (threadId: string) => Promise<unknown>,
+          slicer: CodexHistorySlicer,
+        ): Promise<void>;
+        rememberCodexUserMessageTurn(messageId: string, providerTurnId?: string | null): boolean;
+      }
+    >(session);
+    internals.currentThreadId = threadId;
+    let arrivals = 0;
+    // Every pause lets a live user_message notification in, as a reconnect's reread allows.
+    class EveryPauseSlicer extends CodexHistorySlicer {
+      override get due(): boolean {
+        return true;
+      }
+
+      override async pause(): Promise<void> {
+        await super.pause();
+        arrivals += 1;
+        internals.rememberCodexUserMessageTurn(`live-${arrivals}`, "turn-live");
+      }
+    }
+
+    await internals.loadThreadHistory(
+      async (id) => ({ thread: { id, turns: recordedThreadTurns(id) } }),
+      new EveryPauseSlicer(),
+    );
+
+    const messageIds = internals.persistedHistory.flatMap((entry) =>
+      entry.item.type === "user_message" && entry.item.messageId ? [entry.item.messageId] : [],
+    );
+    expect(messageIds.length).toBeGreaterThan(1);
+    expect(arrivals).toBeGreaterThan(messageIds.length);
+    expect(
+      messageIds.map((messageId) => internals.codexUserMessageTurns().resolve(messageId)?.index),
+    ).toEqual(messageIds.map((_messageId, index) => index));
   });
 });
 
