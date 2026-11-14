@@ -97,6 +97,48 @@ describe("findMountedWindowStart", () => {
       }),
     ).toBe(39);
   });
+
+  it("bounds a long turn to 150-199 mounted rows and moves the bound in steps of 50", () => {
+    const longTurn = (toolCount: number): StreamItem[] => [
+      userMessage("earlier-u", 1),
+      assistantMessage("earlier-a", 2),
+      userMessage("u", 3),
+      ...Array.from({ length: toolCount }, (_, index) => toolCall(`t${index}`, 4)),
+    ];
+    const mountedStart = (items: StreamItem[]) =>
+      findMountedWindowStart({ items, minMountedCount: 20, maxMountedCount: 150 });
+
+    const items = longTurn(600);
+    const start = mountedStart(items);
+    expect(items.length - start).toBeGreaterThanOrEqual(150);
+    expect(items.length - start).toBeLessThan(200);
+    expect(start % 50).toBe(0);
+
+    const grown = [...items];
+    let moves = 0;
+    let previousBoundaryId = items[start]?.id;
+    for (let added = 1; added <= 100; added += 1) {
+      grown.push(toolCall(`new${added}`, 5));
+      const next = mountedStart(grown);
+      expect(grown.length - next).toBeGreaterThanOrEqual(150);
+      expect(grown.length - next).toBeLessThan(200);
+      if (grown[next]?.id !== previousBoundaryId) moves += 1;
+      previousBoundaryId = grown[next]?.id;
+    }
+    expect(moves).toBe(2);
+  });
+
+  it("still opens a long window on the turn's user message when it is within the bound", () => {
+    const items: StreamItem[] = [
+      userMessage("earlier-u", 1),
+      assistantMessage("earlier-a", 2),
+      userMessage("u", 3),
+      ...Array.from({ length: 140 }, (_, index) => toolCall(`t${index}`, 4)),
+    ];
+
+    expect(findMountedWindowStart({ items, minMountedCount: 20, maxMountedCount: 150 })).toBe(2);
+    expect(findMountedWindowStart({ items, minMountedCount: 300, maxMountedCount: 150 })).toBe(0);
+  });
 });
 
 describe("splitWebVirtualizedHistory", () => {

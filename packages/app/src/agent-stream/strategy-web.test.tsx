@@ -10,6 +10,7 @@ import { RetainedPanelActivity } from "@/components/retained-panel";
 import type { StreamItem } from "@/types/stream";
 import type { StreamRenderInput, StreamSegmentRenderers, StreamViewportHandle } from "./strategy";
 import { createWebStreamStrategy } from "./strategy-web";
+import { buildAgentStreamRenderModel } from "./model";
 
 vi.hoisted(() => {
   Object.defineProperty(window, "matchMedia", {
@@ -1599,5 +1600,98 @@ describe("createWebStreamStrategy", () => {
     });
     expect(container.querySelector('[data-testid="agent-chat-scroll"]')).toBe(scrollContainer);
     expect(scrollTo).toHaveBeenCalledWith({ top: 2200, behavior: "auto" });
+  });
+
+  it("keeps following output while a long turn moves its oldest mounted rows into virtualized history", () => {
+    const scrollTo = vi.fn(function (this: HTMLElement, options?: ScrollToOptions | number) {
+      const top = typeof options === "object" ? (options.top ?? 0) : 0;
+      // Browsers clamp to the scroll range; jsdom does not.
+      this.scrollTop = Math.min(top, this.scrollHeight - this.clientHeight);
+    });
+    HTMLElement.prototype.scrollTo = scrollTo;
+    const strategy = createWebStreamStrategy({ isMobileBreakpoint: false });
+    const viewportRef = React.createRef<StreamViewportHandle>();
+    const turn = (rows: number): StreamItem[] => [
+      userMessage(0),
+      ...Array.from(
+        { length: rows },
+        (_, index): StreamItem => ({
+          kind: "assistant_message",
+          id: `step-${index}`,
+          text: `Step ${index}`,
+          timestamp: new Date("2026-04-20T00:00:01.000Z"),
+        }),
+      ),
+    ];
+    const renderTurn = (tail: StreamItem[]) => {
+      const model = buildAgentStreamRenderModel({
+        isTurnActive: true,
+        activeTurnStartedAt: null,
+        tail,
+        head: [],
+        platform: "web",
+        isMobileBreakpoint: false,
+      });
+      return strategy.render({
+        agentId: "agent",
+        segments: model.segments,
+        boundary: model.boundary,
+        renderers: createRenderers(vi.fn()),
+        listEmptyComponent: null,
+        viewportRef,
+        routeBottomAnchorRequest: null,
+        isAuthoritativeHistoryReady: true,
+        onNearBottomChange: vi.fn(),
+        onNearHistoryStart: vi.fn().mockReturnValue(true),
+        isLoadingOlderHistory: false,
+        hasOlderHistory: false,
+        olderHistoryProgressKey: null,
+        scrollEnabled: true,
+        listStyle: null,
+        baseListContentContainerStyle: null,
+        forwardListContentContainerStyle: null,
+        contentMaxWidth: DEFAULT_CONTENT_MAX_WIDTH,
+      });
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    // 349 rows mount 199; the 350th row moves the bound by a step and mounts 150.
+    const before = turn(348);
+    act(() => root?.render(renderTurn(before)));
+    const scrollContainer = container.querySelector('[data-testid="agent-chat-scroll"]');
+    if (!(scrollContainer instanceof HTMLElement)) {
+      throw new Error("Expected agent chat scroll container");
+    }
+    // At most 199 mounted rows plus the virtualizer's few visible and overscanned ones.
+    expect(scrollContainer.querySelectorAll("[data-history-row-id]").length).toBeLessThan(230);
+    expect(container.querySelector('[data-history-row-id="step-100"]')).toBeNull();
+    Object.defineProperty(scrollContainer, "clientHeight", { configurable: true, value: 500 });
+    Object.defineProperty(scrollContainer, "clientWidth", { configurable: true, value: 500 });
+    Object.defineProperty(scrollContainer, "offsetWidth", { configurable: true, value: 500 });
+    Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 7200 });
+    scrollContainer.getBoundingClientRect = () =>
+      ({
+        bottom: 500,
+        height: 500,
+        left: 0,
+        right: 500,
+        top: 0,
+        width: 500,
+        x: 0,
+        y: 0,
+        toJSON: () => {},
+      }) as DOMRect;
+    scrollContainer.scrollTop = 6700;
+    act(() => scrollContainer.dispatchEvent(new Event("scroll")));
+    scrollTo.mockClear();
+
+    Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 7224 });
+    act(() => root?.render(renderTurn(turn(349))));
+
+    expect(container.querySelector('[data-history-row-id="step-348"]')).not.toBeNull();
+    expect(scrollContainer.querySelectorAll("[data-history-row-id]").length).toBeLessThan(230);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 7224, behavior: "auto" });
   });
 });
