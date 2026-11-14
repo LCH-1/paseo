@@ -136,6 +136,20 @@ describe("Codex rollout history refuses what it cannot place", () => {
         );
       },
     ],
+    [
+      "a reverted thread whose first rollout was archived",
+      () => {
+        const active = fixtureRolloutPath(codexHome, threadId);
+        write(rollout(), path.join(codexHome, "archived_sessions", path.basename(active)));
+        write(
+          rollout(),
+          active.replace(
+            `-${threadId}.jsonl`,
+            `-${threadId}_01a20000-0001-7000-8000-00000000beef.jsonl`,
+          ),
+        );
+      },
+    ],
     ["a missing rollout", () => {}],
     [
       "a fork whose parent is gone",
@@ -154,6 +168,65 @@ describe("Codex rollout history refuses what it cannot place", () => {
     setup();
 
     await expect(read(threadId)).rejects.toBeInstanceOf(CodexRolloutUnavailableError);
+  });
+});
+
+describe("Codex rollout history pacing", () => {
+  const threadId = "01a40000-0000-7000-8000-0000000000bb";
+
+  function writeTurns(turns: number): number {
+    const builder = new RolloutBuilder(0, 0x01a400000000).line("session_meta", {
+      session_id: threadId,
+      id: threadId,
+      timestamp: "2026-11-03T00:00:00.000Z",
+      cwd: "C:\\fixture\\repo",
+      originator: "paseo_fixture",
+      cli_version: "0.167.0",
+      model_provider: "openai",
+      base_instructions: null,
+      history_mode: "paginated",
+    });
+    for (let index = 0; index < turns; index += 1) {
+      const turnId = `turn-${index}`;
+      builder.turnStarted(turnId);
+      builder.item(threadId, turnId, {
+        type: "UserMessage",
+        id: `user-${index}`,
+        content: [{ type: "text", text: `question ${index}`, text_elements: [] }],
+      });
+      builder.turnComplete(turnId);
+    }
+    const file = fixtureRolloutPath(codexHome, threadId);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, builder.text());
+    return builder.text().split("\n").length - 1;
+  }
+
+  /** A slicer whose every slice is used up, counting the pauses it is asked for. */
+  class ExhaustedSlicer extends CodexHistorySlicer {
+    pauses = 0;
+
+    override get due(): boolean {
+      return true;
+    }
+
+    override async pause(): Promise<void> {
+      this.pauses += 1;
+      await super.pause();
+    }
+  }
+
+  test("may pause after every line it reads and every turn it assembles", async () => {
+    const turns = 200;
+    const lines = writeTurns(turns);
+    const slicer = new ExhaustedSlicer();
+
+    const result = await readCodexThreadFromRollouts({ codexHome, threadId, slicer });
+
+    expect(result.thread.turns).toHaveLength(turns);
+    // Assembling turns can cost as much as reading them (a long fork chain revisits every
+    // segment per turn), so it pauses between turns as reading does between lines.
+    expect(slicer.pauses).toBeGreaterThanOrEqual(lines + turns);
   });
 });
 
