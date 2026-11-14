@@ -4,7 +4,11 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { compilePlugin } from "./compiler.js";
-import { configurePluginImportWorkers, pluginImportWorkerStats } from "./compiler-imports-pool.js";
+import {
+  configurePluginImportWorkers,
+  openPluginImportReader,
+  pluginImportWorkerStats,
+} from "./compiler-imports-pool.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -40,6 +44,25 @@ async function createPlugin(serverSource: string) {
     writeFile(server, serverSource),
   ]);
   return { client, server };
+}
+
+// Opens readers like the real worker, then exits while the first file is being read.
+async function dyingWorkerUrl(): Promise<URL> {
+  const workerDirectory = await mkdtemp(path.join(tmpdir(), "paseo-dying-import-worker-"));
+  temporaryDirectories.push(workerDirectory);
+  const workerPath = path.join(workerDirectory, "dying-worker.mjs");
+  await writeFile(
+    workerPath,
+    [
+      'import { parentPort } from "node:worker_threads";',
+      "parentPort.on('message', (request) => {",
+      "  if (request.op === 'open') parentPort.postMessage({ id: request.id, ok: true, value: [] });",
+      "  else if (request.op === 'read') process.exit(1);",
+      "  else parentPort.postMessage({ id: request.id, ok: true, value: null });",
+      "});",
+    ].join("\n"),
+  );
+  return pathToFileURL(workerPath);
 }
 
 const VALID_SERVER =
@@ -102,22 +125,7 @@ describe("plugin import workers", () => {
     configurePluginImportWorkers({ size: 0 });
     const expected = await compilePlugin(valid);
     const expectedError = await compilePlugin(violating).catch((error: Error) => error.message);
-    // Opens readers like the real worker, then exits while the first file is being read.
-    const workerDirectory = await mkdtemp(path.join(tmpdir(), "paseo-dying-import-worker-"));
-    temporaryDirectories.push(workerDirectory);
-    const workerPath = path.join(workerDirectory, "dying-worker.mjs");
-    await writeFile(
-      workerPath,
-      [
-        'import { parentPort } from "node:worker_threads";',
-        "parentPort.on('message', (request) => {",
-        "  if (request.op === 'open') parentPort.postMessage({ id: request.id, ok: true, value: [] });",
-        "  else if (request.op === 'read') process.exit(1);",
-        "  else parentPort.postMessage({ id: request.id, ok: true, value: null });",
-        "});",
-      ].join("\n"),
-    );
-    configurePluginImportWorkers({ workerUrl: pathToFileURL(workerPath) });
+    configurePluginImportWorkers({ workerUrl: await dyingWorkerUrl() });
     const before = pluginImportWorkerStats();
 
     expect(await compilePlugin(valid)).toEqual(expected);
@@ -138,6 +146,50 @@ describe("plugin import workers", () => {
       })
       .toEqual([4, 4, 0]);
   });
+
+  // Each parse holds the calling thread; parses for concurrent builds must not run back to
+  // back, or the event loop stalls for their sum.
+  it.each(["without a worker", "after its worker dies"] as const)(
+    "gives the event loop a turn between parses on the calling thread %s",
+    async (setup) => {
+      configurePluginImportWorkers(
+        setup === "without a worker" ? { size: 0 } : { workerUrl: await dyingWorkerUrl() },
+      );
+      const directory = await mkdtemp(path.join(tmpdir(), "paseo-plugin-import-turns-"));
+      temporaryDirectories.push(directory);
+      // Large enough that every parse outlasts the 1 ms timer below.
+      const source = Array.from(
+        { length: 20_000 },
+        (_, index) => `export const value${index} = ${index};`,
+      ).join("\n");
+      const files = ["first.ts", "second.ts", "third.ts"].map((name) => path.join(directory, name));
+      await Promise.all(files.map((file) => writeFile(file, source)));
+      const readers = await Promise.all(files.map(() => openPluginImportReader(directory)));
+      // A first read moves a reader whose worker died onto this thread.
+      const small = path.join(directory, "small.ts");
+      await writeFile(small, "export {};");
+      await Promise.all(readers.map((reader) => reader.read(small)));
+      const events: string[] = [];
+      const ticker = setInterval(() => events.push("tick"), 1);
+      try {
+        await Promise.all(
+          readers.map(async (reader, index) => {
+            expect(await reader.read(files[index]!)).toEqual([]);
+            events.push("parsed");
+          }),
+        );
+      } finally {
+        clearInterval(ticker);
+        for (const reader of readers) reader.close();
+      }
+
+      const parses = events.flatMap((event, index) => (event === "parsed" ? [index] : []));
+      expect(parses).toHaveLength(3);
+      for (let index = 1; index < parses.length; index += 1) {
+        expect(events.slice(parses[index - 1]! + 1, parses[index])).toContain("tick");
+      }
+    },
+  );
 
   it("lets an idle worker exit and starts another for the next build", async () => {
     const plugin = await createPlugin(VALID_SERVER);

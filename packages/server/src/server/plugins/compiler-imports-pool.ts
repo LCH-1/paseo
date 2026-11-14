@@ -136,17 +136,32 @@ class ImportWorker {
   }
 }
 
+let inThreadWork: Promise<unknown> = Promise.resolve();
+
+/**
+ * Runs `work` (loading TypeScript or parsing a file) on this thread in a turn of its own,
+ * after any already waiting. Concurrent builds would otherwise run their parses back to
+ * back and hold the event loop for their sum, not just for the longest one.
+ */
+function inThreadTurn<T>(work: () => T): Promise<T> {
+  const turn = inThreadWork
+    .then(() => new Promise<void>((resolve) => setImmediate(resolve)))
+    .then(work);
+  inThreadWork = turn.catch(() => undefined);
+  return turn;
+}
+
 function inThreadReader(reader: PluginImportReader): AsyncPluginImportReader {
   return {
     configFiles: reader.configFiles,
-    read: async (file) => reader.read(file),
+    read: (file) => inThreadTurn(() => reader.read(file)),
     resolve: async (specifier, importer, kind) => reader.resolve(specifier, importer, kind),
     close: () => undefined,
   };
 }
 
 class WorkerImportReader implements AsyncPluginImportReader {
-  private local: PluginImportReader | null = null;
+  private local: Promise<PluginImportReader> | null = null;
   private closed = false;
 
   constructor(
@@ -158,7 +173,7 @@ class WorkerImportReader implements AsyncPluginImportReader {
 
   read(file: string): Promise<ModuleImport[]> {
     return this.call({ op: "read", reader: this.id, file }, (reader) =>
-      reader.read(file),
+      inThreadTurn(() => reader.read(file)),
     ) as Promise<ModuleImport[]>;
   }
 
@@ -185,16 +200,21 @@ class WorkerImportReader implements AsyncPluginImportReader {
     call: ImportWorkerCall,
     inThread: (reader: PluginImportReader) => unknown,
   ): Promise<unknown> {
-    if (!this.local) {
+    let local = this.local;
+    if (!local) {
       try {
         return await this.worker.request(call);
       } catch (error) {
         if (!(error instanceof ImportWorkerUnavailableError)) throw error;
-        pool.stats.inThreadReaders += 1;
-        this.local = createPluginImportReader(this.directory);
+        // Calls in flight when the worker went share the one reader that replaces it.
+        if (!this.local) {
+          pool.stats.inThreadReaders += 1;
+          this.local = inThreadTurn(() => createPluginImportReader(this.directory));
+        }
+        local = this.local;
       }
     }
-    return inThread(this.local);
+    return inThread(await local);
   }
 }
 
@@ -242,7 +262,7 @@ class ImportWorkerPool {
       }
     }
     this.stats.inThreadReaders += 1;
-    return inThreadReader(createPluginImportReader(directory));
+    return inThreadReader(await inThreadTurn(() => createPluginImportReader(directory)));
   }
 
   private pick(): ImportWorker | null {
