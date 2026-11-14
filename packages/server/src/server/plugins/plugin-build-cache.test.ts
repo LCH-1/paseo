@@ -323,6 +323,47 @@ describe("plugin build cache", () => {
     expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("beta");
   });
 
+  it("rebuilds when a config a nested tsconfig extends from a package changes", async () => {
+    const plugin = await createPlugin();
+    await writeFile(
+      path.join(plugin.directory, "server", "alpha.ts"),
+      'export const pick = "alpha";',
+    );
+    await writeFile(
+      path.join(plugin.directory, "server", "beta.ts"),
+      'export const pick = "beta";',
+    );
+    await writeFile(
+      path.join(plugin.directory, "server", "main.ts"),
+      'export { pick } from "@pick/current";',
+    );
+    await writeFile(
+      plugin.server,
+      'import { pick } from "./server/main"; export default () => () => pick;',
+    );
+    // Paths in an extended config are relative to that config, here inside node_modules.
+    const base = (target: string) =>
+      JSON.stringify({ compilerOptions: { paths: { "@pick/current": [target] } } });
+    const configPackage = path.join(plugin.directory, "node_modules", "fixture-tsconfig");
+    await mkdir(configPackage, { recursive: true });
+    await writeFile(
+      path.join(configPackage, "package.json"),
+      JSON.stringify({ name: "fixture-tsconfig" }),
+    );
+    await writeFile(path.join(configPackage, "base.json"), base("../../server/alpha.ts"));
+    await writeFile(
+      path.join(plugin.directory, "server", "tsconfig.json"),
+      JSON.stringify({ extends: "fixture-tsconfig/base.json" }),
+    );
+    await settle(plugin.directory);
+    const { cache } = await createCache();
+    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("alpha");
+
+    await writeFile(path.join(configPackage, "base.json"), base("../../server/beta.ts"));
+
+    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("beta");
+  });
+
   it("re-runs the boundary check when a file reached only through a type import changes", async () => {
     const plugin = await createPlugin();
     const { cache } = await createCache();
