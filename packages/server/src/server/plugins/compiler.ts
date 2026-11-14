@@ -245,6 +245,7 @@ function createRuntimeBoundaryPlugin(
   target: PluginBuildTarget,
   pluginDirectory: string,
   lookups: PluginBuildLookups,
+  onFallback: ((reason: string) => void) | undefined,
 ): Plugin {
   const { readFiles, configFiles } = lookups;
   const boundaryResolution = {};
@@ -253,7 +254,7 @@ function createRuntimeBoundaryPlugin(
     name: `paseo-plugin-${target}-runtime-boundary`,
     async setup(buildContext) {
       const checked = new Set<string>();
-      const imports = await openPluginImportReader(pluginDirectory);
+      const imports = await openPluginImportReader(pluginDirectory, onFallback);
       buildContext.onDispose(() => imports.close());
       // A config may extend a file that does not exist; that is still a lookup.
       for (const configFile of imports.configFiles) configFiles.add(configFile);
@@ -477,7 +478,7 @@ function checkSharedDependencies(inputs: Metafile["inputs"], pluginDirectory: st
 async function compileTarget(
   entryPath: string,
   target: PluginBuildTarget,
-  cache: PluginBuildCache | undefined,
+  { cache, onBoundaryCheckFallback }: CompilePluginOptions,
 ): Promise<string> {
   const esbuild = loadEsbuild();
   // Use native canonical paths throughout: TypeScript expands Windows short names
@@ -536,7 +537,9 @@ async function compileTarget(
   };
   const result = await esbuild.build({
     ...options,
-    plugins: [createRuntimeBoundaryPlugin(target, pluginDirectory, lookups)],
+    plugins: [
+      createRuntimeBoundaryPlugin(target, pluginDirectory, lookups, onBoundaryCheckFallback),
+    ],
   });
   checkSharedDependencies(result.metafile.inputs, pluginDirectory);
   const output = result.outputFiles[0]?.text;
@@ -554,6 +557,11 @@ async function compileTarget(
 export interface CompilePluginOptions {
   /** Reuses a bundle only while every input it recorded is unchanged. */
   cache?: PluginBuildCache;
+  /**
+   * Hears why a boundary check runs on the calling thread, which it blocks while parsing,
+   * because its worker could not start or stopped.
+   */
+  onBoundaryCheckFallback?: (reason: string) => void;
 }
 
 export async function compilePlugin(
@@ -567,8 +575,8 @@ export async function compilePlugin(
   serverBundle: string | null;
 }> {
   const [clientBundle, serverBundle] = await Promise.all([
-    entryPaths.client ? compileTarget(entryPaths.client, "client", options.cache) : null,
-    entryPaths.server ? compileTarget(entryPaths.server, "server", options.cache) : null,
+    entryPaths.client ? compileTarget(entryPaths.client, "client", options) : null,
+    entryPaths.server ? compileTarget(entryPaths.server, "server", options) : null,
   ]);
   return { clientBundle, serverBundle };
 }

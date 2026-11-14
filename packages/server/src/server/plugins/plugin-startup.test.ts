@@ -3,11 +3,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
+import { pathToFileURL } from "node:url";
 import pino from "pino";
 import { afterEach, describe, expect, it } from "vitest";
 import { DaemonConfigStore } from "../daemon-config-store.js";
 import { BuiltinPluginLoader } from "./builtin/index.js";
-import { pluginImportWorkerStats } from "./compiler-imports-pool.js";
+import { configurePluginImportWorkers, pluginImportWorkerStats } from "./compiler-imports-pool.js";
 import { PluginService } from "./index.js";
 import { PluginRuntime } from "./runtime.js";
 import type { PluginSessionSocket } from "./session-socket.js";
@@ -19,6 +20,7 @@ type PluginSources = Record<string, { source: "directory"; path: string; enabled
 
 const roots: string[] = [];
 afterEach(async () => {
+  configurePluginImportWorkers();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -66,7 +68,7 @@ type MarkedChild = EventEmitter & {
 };
 
 /** A plugin service on the real runtime and compiler whose children only record their bundle. */
-async function createMarkedService(manifest: object) {
+async function createMarkedService(manifest: object, logger = pino({ level: "silent" })) {
   const home = await temporaryDirectory("paseo-plugin-startup-");
   const directory = await temporaryDirectory("paseo-plugin-startup-plugin-");
   await writeFile(path.join(directory, "paseo-plugin.json"), JSON.stringify(manifest));
@@ -102,7 +104,7 @@ async function createMarkedService(manifest: object) {
     };
     return child;
   };
-  const runtime = new PluginRuntime(pino({ level: "silent" }), "0.4.0", {
+  const runtime = new PluginRuntime(logger, "0.4.0", {
     spawnChild,
     sessionHost: {
       async attachPluginSocket(_pluginId: string, socket: PluginSessionSocket) {
@@ -402,6 +404,30 @@ describe("plugin startup", () => {
 
     expect(bundles).toHaveLength(2);
     expect(bundles[1]).toContain("second marker");
+    await service.stopAllPlugins();
+  });
+
+  it("warns once when boundary checks fall back to the daemon thread", async () => {
+    configurePluginImportWorkers({
+      workerUrl: pathToFileURL(path.join(tmpdir(), "missing-paseo-import-worker.js")),
+    });
+    const lines: string[] = [];
+    const logger = pino({ level: "warn" }, { write: (line: string) => lines.push(line) });
+    const { service, directory, bundles } = await createMarkedService({ id: "marked" }, logger);
+
+    await service.start();
+    await writeFile(path.join(directory, "index.server.ts"), markerSource("second marker"));
+    await service.reloadPlugin("marked");
+
+    expect(bundles).toEqual([
+      expect.stringContaining("first marker"),
+      expect.stringContaining("second marker"),
+    ]);
+    const warnings = lines
+      .map((line) => JSON.parse(line) as { msg: string; reason?: string })
+      .filter(({ msg }) => msg.includes("boundary checks"));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.reason).toContain("missing-paseo-import-worker");
     await service.stopAllPlugins();
   });
 

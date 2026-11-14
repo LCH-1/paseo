@@ -88,6 +88,10 @@ class ImportWorker {
     return this.failure === null;
   }
 
+  get failureMessage(): string | null {
+    return this.failure?.message ?? null;
+  }
+
   request(call: ImportWorkerCall): Promise<unknown> {
     if (this.failure) {
       return Promise.reject(new ImportWorkerUnavailableError(this.failure.message));
@@ -169,6 +173,7 @@ class WorkerImportReader implements AsyncPluginImportReader {
     private readonly id: number,
     private readonly directory: string,
     readonly configFiles: readonly string[],
+    private readonly onFallback: ((reason: string) => void) | undefined,
   ) {}
 
   read(file: string): Promise<ModuleImport[]> {
@@ -209,6 +214,7 @@ class WorkerImportReader implements AsyncPluginImportReader {
         // Calls in flight when the worker went share the one reader that replaces it.
         if (!this.local) {
           pool.stats.inThreadReaders += 1;
+          this.onFallback?.(error.message);
           this.local = inThreadTurn(() => createPluginImportReader(this.directory));
         }
         local = this.local;
@@ -222,7 +228,8 @@ class ImportWorkerPool {
   readonly stats = { workerReaders: 0, inThreadReaders: 0, workersStarted: 0 };
   private readonly workers = new Set<ImportWorker>();
   private nextReader = 0;
-  private unavailable = false;
+  /** Why no worker can start here, once one has failed to. */
+  private unavailable: string | null = null;
   private size = DEFAULT_POOL_SIZE;
   private idleMs = DEFAULT_IDLE_MS;
   private url = defaultWorkerUrl();
@@ -240,10 +247,14 @@ class ImportWorkerPool {
     this.size = options.size ?? DEFAULT_POOL_SIZE;
     this.idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
     this.url = options.workerUrl ?? defaultWorkerUrl();
-    this.unavailable = false;
+    this.unavailable = null;
   }
 
-  async open(directory: string): Promise<AsyncPluginImportReader> {
+  /** `onFallback` hears why a reader runs on this thread when a worker should have taken it. */
+  async open(
+    directory: string,
+    onFallback?: (reason: string) => void,
+  ): Promise<AsyncPluginImportReader> {
     const worker = this.pick();
     if (worker) {
       const id = ++this.nextReader;
@@ -255,18 +266,21 @@ class ImportWorkerPool {
           directory,
         })) as string[];
         this.stats.workerReaders += 1;
-        return new WorkerImportReader(worker, id, directory, configFiles);
+        return new WorkerImportReader(worker, id, directory, configFiles, onFallback);
       } catch (error) {
         worker.release();
         if (!(error instanceof ImportWorkerUnavailableError)) throw error;
+        onFallback?.(error.message);
       }
+    } else if (this.unavailable !== null) {
+      onFallback?.(this.unavailable);
     }
     this.stats.inThreadReaders += 1;
     return inThreadReader(await inThreadTurn(() => createPluginImportReader(directory)));
   }
 
   private pick(): ImportWorker | null {
-    if (this.unavailable || this.size <= 0) return null;
+    if (this.unavailable !== null || this.size <= 0) return null;
     let best: ImportWorker | null = null;
     for (const worker of this.workers) {
       if (!best || worker.openReaders < best.openReaders) best = worker;
@@ -277,13 +291,15 @@ class ImportWorkerPool {
         this.workers.delete(gone);
         // A worker that never answered cannot load here (for example a missing
         // module); stop paying its startup on every build.
-        if (!gone.answered && gone.openReaders > 0) this.unavailable = true;
+        if (!gone.answered && gone.openReaders > 0) {
+          this.unavailable = gone.failureMessage ?? "the worker stopped";
+        }
       });
       this.workers.add(worker);
       this.stats.workersStarted += 1;
       return worker;
-    } catch {
-      this.unavailable = true;
+    } catch (error) {
+      this.unavailable = error instanceof Error ? error.message : String(error);
       return best;
     }
   }
@@ -291,8 +307,11 @@ class ImportWorkerPool {
 
 const pool = new ImportWorkerPool();
 
-export function openPluginImportReader(directory: string): Promise<AsyncPluginImportReader> {
-  return pool.open(directory);
+export function openPluginImportReader(
+  directory: string,
+  onFallback?: (reason: string) => void,
+): Promise<AsyncPluginImportReader> {
+  return pool.open(directory, onFallback);
 }
 
 /** Test seam: pool size 0 keeps every reader on the calling thread. */

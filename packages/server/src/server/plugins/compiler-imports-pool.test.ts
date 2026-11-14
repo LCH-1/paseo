@@ -191,6 +191,33 @@ describe("plugin import workers", () => {
     },
   );
 
+  it("reports why boundary checks moved to the calling thread, and only then", async () => {
+    const plugin = await createPlugin(VALID_SERVER);
+    const reasons: string[] = [];
+    const onBoundaryCheckFallback = (reason: string) => reasons.push(reason);
+
+    configurePluginImportWorkers();
+    await compilePlugin(plugin, { onBoundaryCheckFallback });
+    // A pool configured without workers is not a fallback.
+    configurePluginImportWorkers({ size: 0 });
+    await compilePlugin(plugin, { onBoundaryCheckFallback });
+    expect(reasons).toEqual([]);
+
+    configurePluginImportWorkers({
+      workerUrl: pathToFileURL(path.join(tmpdir(), "missing-paseo-import-worker.js")),
+    });
+    await compilePlugin(plugin, { onBoundaryCheckFallback });
+    // Later builds skip the worker that never started, and still say so.
+    await compilePlugin(plugin, { onBoundaryCheckFallback });
+    expect(reasons).toHaveLength(4);
+    for (const reason of reasons) expect(reason).toContain("missing-paseo-import-worker");
+
+    reasons.length = 0;
+    configurePluginImportWorkers({ workerUrl: await dyingWorkerUrl() });
+    await compilePlugin(plugin, { onBoundaryCheckFallback });
+    expect(reasons).toContain("exited with code 1");
+  });
+
   it("lets an idle worker exit and starts another for the next build", async () => {
     const plugin = await createPlugin(VALID_SERVER);
     configurePluginImportWorkers({ size: 1, idleMs: 10 });

@@ -324,6 +324,7 @@ export class PluginRuntime {
   private readonly buildCache: PluginBuildCache | undefined;
   private readonly compileSlot = createLimiter(COMPILE_CONCURRENCY);
   private readonly prepared = new Map<string, Promise<PreparedPlugin | null>>();
+  private boundaryCheckFallbackReported = false;
 
   constructor(
     logger: pino.Logger,
@@ -451,7 +452,21 @@ export class PluginRuntime {
   }
 
   private compile(entryPaths: PluginEntryPaths): ReturnType<typeof compilePlugin> {
-    return this.compileSlot(() => compilePlugin(entryPaths, { cache: this.buildCache }));
+    return this.compileSlot(() =>
+      compilePlugin(entryPaths, {
+        cache: this.buildCache,
+        onBoundaryCheckFallback: (reason) => this.reportBoundaryCheckFallback(reason),
+      }),
+    );
+  }
+
+  private reportBoundaryCheckFallback(reason: string): void {
+    if (this.boundaryCheckFallbackReported) return;
+    this.boundaryCheckFallbackReported = true;
+    this.logger.warn(
+      { reason },
+      "Plugin boundary checks run on the daemon thread, which stalls while they parse",
+    );
   }
 
   private async compileDirectory(
