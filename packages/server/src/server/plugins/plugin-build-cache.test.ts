@@ -251,6 +251,97 @@ describe("plugin build cache", () => {
     expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("dep v2");
   });
 
+  // Inputs are recorded by real path, so only the package's own directories show its links.
+  async function createLinkedDependency(plugin: Plugin, linkPath: string[], manifest: object) {
+    const dependency = path.join(plugin.directory, "node_modules", "dep");
+    await mkdir(path.join(dependency, ...linkPath.slice(0, -1)), { recursive: true });
+    await writeFile(
+      path.join(dependency, "package.json"),
+      JSON.stringify({ name: "dep", ...manifest }),
+    );
+    for (const version of ["v1", "v2"]) {
+      await mkdir(path.join(dependency, `copy-${version}`));
+    }
+    const linked = path.join(dependency, ...linkPath);
+    await link(path.join(dependency, "copy-v1"), linked);
+    return {
+      copy: (version: string) => path.join(dependency, `copy-${version}`),
+      // The first copy stays as it was, so only the link itself tells the builds apart.
+      retarget: () => link(path.join(dependency, "copy-v2"), linked),
+    };
+  }
+
+  it.each([
+    [
+      "a subpath import goes through",
+      'import { marker } from "dep/nested/lib/marker"; export default () => () => marker;',
+      ["nested", "lib"],
+      {},
+    ],
+    [
+      "an exports target goes through",
+      'import { marker } from "dep/api/feature"; export default () => () => marker;',
+      ["lib"],
+      { exports: { "./api/feature": "./lib/marker.js" } },
+    ],
+    [
+      // esbuild bundles both branches; the boundary check's reader sees no import here.
+      "a conditional require goes through",
+      'const pick = process.env.UNSET === "1"; export default () => () => require(pick ? "dep/nested/lib/marker" : "dep/nested/lib/other").marker;',
+      ["nested", "lib"],
+      {},
+    ],
+  ] as const)(
+    "rebuilds when a link inside a dependency that %s is pointed at another copy",
+    async (_case, source, linkPath, manifest) => {
+      const plugin = await createPlugin();
+      const dependency = await createLinkedDependency(plugin, [...linkPath], manifest);
+      for (const version of ["v1", "v2"]) {
+        for (const name of ["marker", "other"]) {
+          await writeFile(
+            path.join(dependency.copy(version), `${name}.js`),
+            `exports.marker = "${name} copy ${version}";`,
+          );
+        }
+      }
+      await writeFile(plugin.server, source);
+      await settle(plugin.directory);
+      const { cache } = await createCache();
+      expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("copy v1");
+
+      await dependency.retarget();
+
+      const rebuilt = (await compilePlugin(plugin, { cache })).serverBundle;
+      expect(rebuilt).toContain("copy v2");
+      expect(rebuilt).not.toContain("copy v1");
+    },
+  );
+
+  it("re-runs the boundary check when a link a type-only package import goes through is pointed at another copy", async () => {
+    const plugin = await createPlugin();
+    const dependency = await createLinkedDependency(plugin, ["nested", "lib"], {});
+    await writeFile(
+      path.join(dependency.copy("v1"), "marker.d.ts"),
+      "export type Marker = string;",
+    );
+    await writeFile(
+      path.join(dependency.copy("v2"), "marker.d.ts"),
+      'import type { PluginClientContext } from "@getpaseo/plugin/client"; export type Marker = PluginClientContext;',
+    );
+    await writeFile(
+      plugin.server,
+      'import type { Marker } from "dep/nested/lib/marker"; export default () => (marker: Marker) => marker;',
+    );
+    await settle(plugin.directory);
+    const { cache } = await createCache();
+    await compilePlugin(plugin, { cache });
+
+    await dependency.retarget();
+
+    await expect(compilePlugin(plugin)).rejects.toThrow("plugin server");
+    await expect(compilePlugin(plugin, { cache })).rejects.toThrow("plugin server");
+  });
+
   it("rebuilds when a linked plugin directory is pointed at another copy", async () => {
     const plugin = await createPlugin();
     for (const version of ["v1", "v2"]) {

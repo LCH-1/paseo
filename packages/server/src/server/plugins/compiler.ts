@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { lstat } from "node:fs/promises";
 import { createRequire, isBuiltin } from "node:module";
 import path from "node:path";
 import type { PluginImportKind } from "./compiler-imports.js";
@@ -174,6 +175,8 @@ interface PluginBuildLookups {
   configFiles: Set<string>;
   /** Directories relative imports went through before links were followed. */
   directories: Set<string>;
+  /** Each package directory a package import may be found at, with the subpath directories in it. */
+  packages: Map<string, Set<string>>;
 }
 
 function recordRelativeLookup(
@@ -183,6 +186,59 @@ function recordRelativeLookup(
 ): void {
   if (!specifier.startsWith(".") && !path.isAbsolute(specifier)) return;
   lookups.directories.add(path.dirname(path.resolve(resolveDirectory, specifier)));
+}
+
+/**
+ * Records where a package import is looked for in each ancestor node_modules. Bundled
+ * files are recorded by real path, so a link inside a package shows only here: the
+ * package directory lists its links, such as one an `exports` target goes through, and
+ * a subpath's directory is headed by its real path, which any link on the way decides.
+ */
+function recordPackageLookup(
+  lookups: PluginBuildLookups,
+  specifier: string,
+  resolveDirectory: string,
+): void {
+  if (
+    specifier.startsWith(".") ||
+    specifier.startsWith("#") ||
+    specifier.includes(":") ||
+    path.isAbsolute(specifier) ||
+    isBuiltin(specifier)
+  )
+    return;
+  const name = dependencyName(specifier);
+  for (let directory = resolveDirectory; ; directory = path.dirname(directory)) {
+    if (path.basename(directory) !== "node_modules") {
+      const modules = path.join(directory, "node_modules");
+      const packageDirectory = path.join(modules, name);
+      let subpaths = lookups.packages.get(packageDirectory);
+      if (!subpaths) lookups.packages.set(packageDirectory, (subpaths = new Set()));
+      if (specifier !== name) subpaths.add(path.dirname(path.join(modules, specifier)));
+    }
+    if (path.dirname(directory) === directory) return;
+  }
+}
+
+/**
+ * The recorded package lookups worth keeping. A package directory that is not there
+ * needs none: the build cache already lists every node_modules above an input, so the
+ * package appearing shows there. A link counts as there even when it leads nowhere.
+ */
+async function packageLookups(
+  packages: ReadonlyMap<string, ReadonlySet<string>>,
+): Promise<string[]> {
+  const directories: string[] = [];
+  await Promise.all(
+    [...packages].map(async ([packageDirectory, subpaths]) => {
+      const there = await lstat(packageDirectory).then(
+        () => true,
+        () => false,
+      );
+      if (there) directories.push(packageDirectory, ...subpaths);
+    }),
+  );
+  return directories;
 }
 
 function createRuntimeBoundaryPlugin(
@@ -286,6 +342,10 @@ function createRuntimeBoundaryPlugin(
             packageSpecifier === "@types/node"
           )
             continue;
+          recordPackageLookup(lookups, specifier, path.dirname(file));
+          if (packageSpecifier !== specifier) {
+            recordPackageLookup(lookups, packageSpecifier, path.dirname(file));
+          }
           const dependencyFiles = await resolveImportFiles(file, specifier, kind, typeOnly);
           for (const dependencyFile of dependencyFiles) {
             const boundaryError = resolvedBoundaryError(dependencyFile, specifier, file, owner);
@@ -326,6 +386,7 @@ function createRuntimeBoundaryPlugin(
         ) {
           return null;
         }
+        recordPackageLookup(lookups, args.path, resolveDir);
         return resolvedBoundaryError(resolution.path, args.path, importer, owner);
       });
     },
@@ -471,6 +532,7 @@ async function compileTarget(
     readFiles: new Set(),
     configFiles: new Set(),
     directories: new Set(),
+    packages: new Map(),
   };
   const result = await esbuild.build({
     ...options,
@@ -481,7 +543,8 @@ async function compileTarget(
   if (!output) throw new Error(`Plugin ${target} compilation produced no output`);
   const bundle = wrapCommonJsBundle(makeHermesInteropEager(output));
   if (recorder) {
-    const { readFiles, configFiles, directories } = lookups;
+    const { readFiles, configFiles } = lookups;
+    const directories = [...lookups.directories, ...(await packageLookups(lookups.packages))];
     for (const input of Object.keys(result.metafile.inputs)) readFiles.add(path.resolve(input));
     await recorder.store(bundle, readFiles, configFiles, directories);
   }
