@@ -875,6 +875,33 @@ describe("plugin build cache", () => {
     expect(await compilePlugin(plugin)).toEqual(next);
   });
 
+  it("bundles a file imported with attributes the way esbuild loads it", async () => {
+    const plugin = await createPlugin();
+    await writeFile(path.join(plugin.directory, "server", "data.js"), '{"answer": "forty-two"}');
+    await writeFile(
+      plugin.server,
+      `import data from "./server/data.js" with { type: "json" };
+export default function contribute() { return () => data.answer; }`,
+    );
+
+    expect((await compilePlugin(plugin)).serverBundle).toContain("forty-two");
+  });
+
+  it("keeps esbuild's stricter loader for .mts files", async () => {
+    const plugin = await createPlugin();
+    await writeFile(
+      path.join(plugin.directory, "server", "cast.mts"),
+      "const raw: unknown = 1; export const n = <number>raw;",
+    );
+    await writeFile(
+      plugin.server,
+      `import { n } from "./server/cast.mts";
+export default function contribute() { return () => n; }`,
+    );
+
+    await expect(compilePlugin(plugin)).rejects.toThrow(/not allowed in files with the/);
+  });
+
   it("drops entries past the size cap or age, oldest first, and stale temporary files", async () => {
     const plugin = await createPlugin();
     const directory = await temporaryDirectory("paseo-plugin-builds-");
