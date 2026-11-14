@@ -168,6 +168,15 @@ function slowHookLines(lines: CapturedLine[]): CapturedLine[] {
   return lines.filter((line) => line.msg === "Plugin hook slow");
 }
 
+const placeholderHookAgent = {
+  id: "agent-0",
+  workspaceId: null,
+  parentAgentId: null,
+  provider: "claude",
+  cwd: "/tmp/project",
+  title: null,
+};
+
 const sessionOpenRequest = {
   agentId: "agent-1",
   workspaceId: null,
@@ -1107,6 +1116,116 @@ export default function contribute(server: any) { server.registerProvider(provid
     await runtime.stopAll();
   });
 
+  // An event hook holds no request, and a hook slow on every turn would add a line per turn.
+  it("folds repeats of a slow event hook into one summary an hour", async () => {
+    let now = 0;
+    const hookDurations = [760, 1_900, 1_100, 2_000];
+    const { logger, lines, raw } = createCapturingLogger();
+    const runtime = await startBeforeHookPlugin(
+      createBeforeHookChild("gate", (hook) => {
+        now += hookDurations.shift() ?? 0;
+        return { type: "result", requestId: hook.requestId, output: null };
+      }),
+      { logger, now: () => now, hooks: { events: ["agent.turn_ended"], before: [] } },
+    );
+    const endTurn = async (agentId: string, provider: string) => {
+      runtime.emit("agent.turn_ended", {
+        agent: {
+          id: agentId,
+          workspaceId: null,
+          parentAgentId: null,
+          provider,
+          cwd: "/tmp/private-project",
+          title: "Fix the payroll export",
+        },
+        turnId: null,
+        outcome: { kind: "completed" },
+        timeline: [],
+      });
+      await runtime.drainEvents();
+    };
+
+    await endTurn("agent-a", "claude");
+    await endTurn("agent-b", "codex");
+    await endTurn("agent-a", "claude");
+    // The hour opened when the first slow call was noted.
+    const firstNotedAt = 760;
+    now = firstNotedAt + 3_600_000 - 1;
+    // Any event closes an hour that has ended, a fast or unsubscribed one included.
+    runtime.emit("agent.turn_started", { agent: { ...placeholderHookAgent }, turnId: null });
+
+    expect(slowHookLines(lines)).toEqual([
+      expect.objectContaining({
+        pluginId: "gate",
+        hook: "agent.turn_ended",
+        kind: "event",
+        durationMs: 760,
+        ok: true,
+        agentId: "agent-a",
+        provider: "claude",
+      }),
+    ]);
+    expect(lines.filter((line) => line.msg === "Plugin hook slow summary")).toEqual([]);
+
+    now = firstNotedAt + 3_600_000;
+    runtime.emit("agent.turn_started", { agent: { ...placeholderHookAgent }, turnId: null });
+    await endTurn("agent-b", "codex");
+
+    const summaries = lines.filter((line) => line.msg === "Plugin hook slow summary");
+    expect(summaries).toEqual([
+      expect.objectContaining({
+        level: 30,
+        module: "plugins",
+        pluginId: "gate",
+        hook: "agent.turn_ended",
+        kind: "event",
+        ok: true,
+        count: 3,
+        p50Ms: 1_100,
+        maxMs: 1_900,
+        windowMs: 3_600_000,
+      }),
+    ]);
+    expect(summaries[0]).not.toHaveProperty("agentId");
+    // The kind stays folded into the next hour.
+    expect(slowHookLines(lines)).toHaveLength(1);
+    const written = raw.join("");
+    expect(written).not.toContain("private-project");
+    expect(written).not.toContain("payroll");
+
+    await runtime.stopAll();
+    expect(lines.filter((line) => line.msg === "Plugin hook slow summary")).toEqual([
+      expect.objectContaining({ count: 3 }),
+      expect.objectContaining({ hook: "agent.turn_ended", count: 1, p50Ms: 2_000, maxMs: 2_000 }),
+    ]);
+  });
+
+  it("keeps every slow before hook on a line of its own", async () => {
+    let now = 0;
+    const { logger, lines } = createCapturingLogger();
+    const runtime = await startBeforeHookPlugin(
+      createBeforeHookChild("gate", (hook) => {
+        now += 1_000;
+        return { type: "result", requestId: hook.requestId, output: hook.input };
+      }),
+      { logger, now: () => now },
+    );
+
+    for (const agentId of ["agent-1", "agent-2", "agent-1"]) {
+      await runtime.before("agent.session_open", { ...sessionOpenRequest, agentId });
+    }
+    now += 3_600_000;
+    runtime.emit("agent.turn_started", { agent: { ...placeholderHookAgent }, turnId: null });
+
+    expect(slowHookLines(lines).map((line) => line.agentId)).toEqual([
+      "agent-1",
+      "agent-2",
+      "agent-1",
+    ]);
+    expect(lines.filter((line) => line.msg === "Plugin hook slow summary")).toEqual([]);
+    await runtime.stopAll();
+  });
+
   it("logs a lifecycle event hook that failed after 500ms as not ok, without its error", async () => {
     let now = 0;
     const { logger, lines, raw } = createCapturingLogger();
@@ -1180,12 +1299,12 @@ export default function contribute(server: any) { server.registerProvider(provid
     });
     await runtime.before("workspace.create", {
       source,
-      agent: { config: { provider: providerOverLimit, cwd: "/tmp/project" } },
+      agent: { config: { provider: providerOverLimit, cwd: "/tmp/project" }, labels: {} },
     });
     await runtime.before("agent.create", { config: { provider: "codex", cwd: "/tmp/project" } });
     await runtime.before("workspace.create", {
       source,
-      agent: { config: { provider: "claude", cwd: "/tmp/project" } },
+      agent: { config: { provider: "claude", cwd: "/tmp/project" }, labels: {} },
     });
 
     const slow = slowHookLines(lines);

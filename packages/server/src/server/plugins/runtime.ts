@@ -8,6 +8,7 @@ import type { PluginBeforeRequests, PluginLifecycleEvents } from "@getpaseo/plug
 import { validateBeforeRequest, validateBeforeResult } from "./lifecycle/index.js";
 import { PluginHookRefusalError } from "./hook-refusal.js";
 import { loggableProviderId } from "../websocket/slow-request-agent.js";
+import { RepeatDigest } from "../websocket/repeat-digest.js";
 import { fork } from "node:child_process";
 import { stat } from "node:fs/promises";
 import path from "node:path";
@@ -48,6 +49,11 @@ const MAX_LOG_LINE_BYTES = 16 * 1024;
 const SOFT_SHUTDOWN_TIMEOUT_MS = 2_000;
 // A hook call longer than this is logged with its plugin, so a slow session open names its hook.
 const SLOW_HOOK_MS = 500;
+/**
+ * An event hook holds no request, yet one slow on every turn would add a line per turn. The first
+ * slow call of a kind gets a line of its own; the ones after it are summed up once per window.
+ */
+const SLOW_EVENT_HOOK_WINDOW_MS = 3_600_000;
 
 interface PluginOutputStream {
   on(event: "data", listener: (chunk: Buffer | string) => void): this;
@@ -142,6 +148,13 @@ interface HookCall {
   kind: "before" | "event";
   name: string;
   input: unknown;
+}
+
+/** A kind of slow event hook call, as summed up. */
+interface SlowEventHookKind {
+  pluginId: string;
+  hook: string;
+  ok: boolean;
 }
 
 /** What a slow hook line says about the agent a hook was about. */
@@ -365,6 +378,9 @@ export class PluginRuntime {
   private readonly logger: pino.Logger;
   private readonly spawnChild: () => PluginChild;
   private readonly now: () => number;
+  private readonly slowEventHooks = new RepeatDigest<SlowEventHookKind>();
+  /** When the current window of `slowEventHooks` opened; unset until a slow event hook is noted. */
+  private slowEventHooksFrom: number | undefined;
   private sessionHost: PluginPaseoSessionHost | null;
   private readonly listeners = new Set<(pluginId: string, error?: string) => void>();
 
@@ -584,6 +600,7 @@ export class PluginRuntime {
     name: Name,
     event: PluginLifecycleEvents[Name],
   ): void {
+    this.flushSlowEventHooks(false);
     for (const loaded of this.plugins.values()) {
       if (!loaded.hooks.events.includes(name)) {
         continue;
@@ -664,11 +681,13 @@ export class PluginRuntime {
   /**
    * Logs a hook call that took longer than SLOW_HOOK_MS to answer: a before hook holds the request
    * it gates, and an event hook keeps its plugin busy. Names the agent a hook was about, never the
-   * request's directory, environment, title or a refusal's reason.
+   * request's directory, environment, title or a refusal's reason. Every slow before hook gets a
+   * line; event hooks are folded, see SLOW_EVENT_HOOK_WINDOW_MS.
    */
   private noteHookCall(call: HookCall, startedAt: number, ok: boolean): void {
     const durationMs = Math.round(this.now() - startedAt);
     if (durationMs <= SLOW_HOOK_MS) return;
+    if (call.kind === "event" && !this.firstSlowEventHook(call, durationMs, ok)) return;
     this.logger.info(
       {
         pluginId: call.pluginId,
@@ -680,6 +699,29 @@ export class PluginRuntime {
       },
       "Plugin hook slow",
     );
+  }
+
+  /** Whether a slow event hook call is the first of its kind, which keeps a line of its own. */
+  private firstSlowEventHook(call: HookCall, durationMs: number, ok: boolean): boolean {
+    this.slowEventHooksFrom ??= this.now();
+    const kind: SlowEventHookKind = { pluginId: call.pluginId, hook: call.name, ok };
+    const key = JSON.stringify([kind.pluginId, kind.hook, kind.ok]);
+    return this.slowEventHooks.record(key, kind, durationMs);
+  }
+
+  /** Sums up the folded slow event hook calls of a window that has ended, or of any on stop. */
+  private flushSlowEventHooks(stopping: boolean): void {
+    const from = this.slowEventHooksFrom;
+    if (from === undefined) return;
+    const now = this.now();
+    if (!stopping && now - from < SLOW_EVENT_HOOK_WINDOW_MS) return;
+    this.slowEventHooksFrom = now;
+    for (const { fields, count, p50Ms, maxMs } of this.slowEventHooks.flush()) {
+      this.logger.info(
+        { ...fields, kind: "event", count, p50Ms, maxMs, windowMs: Math.round(now - from) },
+        "Plugin hook slow summary",
+      );
+    }
   }
 
   async getProviderCatalogCacheKey(
@@ -732,6 +774,7 @@ export class PluginRuntime {
       this.rejectPending(plugin, `Plugin stopped: ${plugin.id}`);
     }
     await Promise.all(loaded.map((plugin) => this.stopPlugin(plugin)));
+    this.flushSlowEventHooks(true);
   }
 
   private async loadDirectoryPlugin(
