@@ -1204,6 +1204,95 @@ describe("relay external socket reconnect behavior", () => {
     await server.close();
   });
 
+  test("leaves out a drafted provider that is not shaped like a provider id", async () => {
+    const { log, lines, raw } = createCapturingLog();
+    const server = createServer({ log });
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId: "cid-slow-odd-provider" });
+    const providerOverLimit = `p${"x".repeat(64)}`;
+
+    for (const [index, provider] of ["someone@example.com /home/x", providerOverLimit].entries()) {
+      await sendSlowRequest({
+        socket,
+        request: {
+          type: "list_provider_features_request",
+          requestId: `features-odd-${index}`,
+          draftConfig: { provider, cwd: "/tmp/project" },
+        },
+        durationMs: 1_000 + index,
+      });
+    }
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    const slow = linesWithMessage(lines, "ws_slow_request");
+    const summaries = linesWithMessage(lines, "ws_slow_request_summary");
+    expect(slow).toEqual([
+      expect.objectContaining({ requestType: "list_provider_features_request", durationMs: 1_000 }),
+    ]);
+    expect(summaries).toEqual([
+      expect.objectContaining({ requestType: "list_provider_features_request", count: 2 }),
+    ]);
+    for (const line of [...slow, ...summaries]) expect(line).not.toHaveProperty("provider");
+    const written = raw.join("");
+    expect(written).not.toContain("someone@example.com");
+    expect(written).not.toContain(providerOverLimit);
+
+    await server.close();
+  });
+
+  test("names no agent for an id prefix that two agents share", async () => {
+    const { log, lines } = createCapturingLog();
+    const server = createServer({
+      log,
+      agents: {
+        live: [{ id: "c0ffee00-aaaa-4222-8333-944455556666", provider: "claude" }],
+        stored: [{ id: "c0ffee00-bbbb-4222-8333-944455556666", provider: "codex" }],
+      },
+    });
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId: "cid-slow-shared-prefix" });
+
+    await sendSlowRequest({ socket, request: refreshAgentRequest("c0ffee00"), durationMs: 1_300 });
+
+    const slow = linesWithMessage(lines, "ws_slow_request");
+    expect(slow).toEqual([
+      expect.objectContaining({ requestType: "refresh_agent_request", durationMs: 1_300 }),
+    ]);
+    expect(slow[0]).not.toHaveProperty("agentId");
+    expect(slow[0]).not.toHaveProperty("provider");
+
+    await server.close();
+  });
+
+  test("keeps the first slow draft of each provider on a line of its own", async () => {
+    const { log, lines } = createCapturingLog();
+    const server = createServer({ log });
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId: "cid-slow-drafts" });
+
+    for (const provider of ["codex", "claude"]) {
+      await sendSlowRequest({
+        socket,
+        request: {
+          type: "list_provider_features_request",
+          requestId: `features-${provider}`,
+          draftConfig: { provider, cwd: "/tmp/project" },
+        },
+        durationMs: 1_500,
+      });
+    }
+
+    expect(linesWithMessage(lines, "ws_slow_request")).toEqual([
+      expect.objectContaining({ requestType: "list_provider_features_request", provider: "codex" }),
+      expect.objectContaining({
+        requestType: "list_provider_features_request",
+        provider: "claude",
+      }),
+    ]);
+
+    await server.close();
+  });
+
   test("announces a socket that joins a live session with its first request", async () => {
     const { log, lines } = createCapturingLog();
     const server = createServer({ log });

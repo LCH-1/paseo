@@ -40,6 +40,7 @@ function launchLines(lines: CapturedLine[]): CapturedLine[] {
 
 interface QueryMockOptions {
   onReturn?: () => void;
+  /** Runs inside applyFlagSettings; whatever it throws is what the process answers. */
   onFlagSettings?: () => void;
 }
 
@@ -204,6 +205,52 @@ describe("Claude query launch timing", () => {
         }),
       ]);
       expect(launchLines(lines)[0]).not.toHaveProperty("returnMs");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("logs a launch that failed after 500ms as not ok, without the phase it failed in", async () => {
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    const { logger, lines } = createCapturingLogger();
+    const queryFactory = vi.fn(() =>
+      createQueryMock({
+        onFlagSettings: () => {
+          clock += 800;
+          throw new Error(`Claude exited while taking flag settings for ${process.cwd()}`);
+        },
+      }),
+    );
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({
+      provider: "claude",
+      cwd: process.cwd(),
+      model: "claude-opus-5-5",
+    });
+
+    try {
+      await expect(session.listCommands?.()).rejects.toThrow("flag settings");
+
+      const launches = launchLines(lines);
+      expect(launches).toEqual([
+        expect.objectContaining({
+          level: 30,
+          restart: false,
+          ok: false,
+          buildOptionsMs: 0,
+          startQueryMs: 0,
+          totalMs: 800,
+        }),
+      ]);
+      expect(launches[0]).not.toHaveProperty("flagSettingsMs");
+      // The error, which names the directory, stays out of the line.
+      const written = JSON.stringify(launches);
+      expect(written).not.toContain("flag settings");
+      expect(written).not.toContain(JSON.stringify(process.cwd()).slice(1, -1));
     } finally {
       await session.close();
     }

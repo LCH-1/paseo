@@ -1069,6 +1069,56 @@ export default function contribute(server: any) { server.registerProvider(provid
     await runtime.stopAll();
   });
 
+  it("logs a lifecycle event hook that failed after 500ms as not ok, without its error", async () => {
+    let now = 0;
+    const { logger, lines, raw } = createCapturingLogger();
+    const runtime = await startBeforeHookPlugin(
+      createBeforeHookChild("gate", (hook) => {
+        now += 820;
+        return {
+          type: "error",
+          requestId: hook.requestId,
+          error: "Usage store for someone@example.com is locked",
+        };
+      }),
+      { logger, now: () => now, hooks: { events: ["agent.turn_ended"], before: [] } },
+    );
+
+    runtime.emit("agent.turn_ended", {
+      agent: {
+        id: "agent-9",
+        workspaceId: null,
+        parentAgentId: null,
+        provider: "claude",
+        cwd: "/tmp/private-project",
+        title: "Fix the payroll export",
+      },
+      turnId: "turn-2",
+      outcome: { kind: "completed" },
+      timeline: [],
+    });
+    await runtime.drainEvents();
+
+    expect(slowHookLines(lines)).toEqual([
+      expect.objectContaining({
+        pluginId: "gate",
+        hook: "agent.turn_ended",
+        kind: "event",
+        durationMs: 820,
+        ok: false,
+        agentId: "agent-9",
+        provider: "claude",
+      }),
+    ]);
+    // The error is the plugin's own output, logged as such already; the slow line leaves it out.
+    expect(pluginMessages(runtime, "gate").join("\n")).toContain("Lifecycle hook agent.turn_ended");
+    const written = JSON.stringify(slowHookLines(lines));
+    expect(written).not.toContain("someone@example.com");
+    expect(written).not.toContain("private-project");
+    expect(raw.join("")).not.toContain("private-project");
+    await runtime.stopAll();
+  });
+
   it("tells whether a running plugin handles a before hook", async () => {
     const runtime = await startBeforeHookPlugin(
       createBeforeHookChild("gate", (hook) => ({
