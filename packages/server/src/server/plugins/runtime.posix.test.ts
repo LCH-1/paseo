@@ -123,18 +123,49 @@ function createBeforeHookChild(name: string, answer: (hook: HookRequest) => Plug
   return child;
 }
 
-async function startBeforeHookPlugin(child: ReturnType<typeof createReloadChild>) {
+async function startBeforeHookPlugin(
+  child: ReturnType<typeof createReloadChild>,
+  options: {
+    logger?: pino.Logger;
+    now?: () => number;
+    hooks?: { events: string[]; before: string[] };
+  } = {},
+) {
   const directory = await createPlugin(
     "gate",
     `export default function contribute(plugin: unknown) { void plugin; return () => undefined; }`,
   );
-  const runtime = createTestRuntime({ spawnChild: () => child });
+  const runtime = createTestRuntime({ spawnChild: () => child, now: options.now }, options.logger);
   await runtime.startPlugin("gate", directory);
   child.emitMessage({
     type: "hooks.changed",
-    hooks: { events: [], before: ["agent.session_open"] },
+    hooks: options.hooks ?? { events: [], before: ["agent.session_open"] },
   });
   return runtime;
+}
+
+interface CapturedLine {
+  msg: string;
+  [field: string]: unknown;
+}
+
+function createCapturingLogger(): { logger: pino.Logger; lines: CapturedLine[]; raw: string[] } {
+  const lines: CapturedLine[] = [];
+  const raw: string[] = [];
+  const logger = pino(
+    { level: "info" },
+    {
+      write(line: string) {
+        raw.push(line);
+        lines.push(JSON.parse(line));
+      },
+    },
+  );
+  return { logger, lines, raw };
+}
+
+function slowHookLines(lines: CapturedLine[]): CapturedLine[] {
+  return lines.filter((line) => line.msg === "Plugin hook slow");
 }
 
 const sessionOpenRequest = {
@@ -929,6 +960,112 @@ export default function contribute(server: any) { server.registerProvider(provid
       message:
         "Plugin gate before agent.session_open failed: agent.session_open hooks can only change env",
     });
+    await runtime.stopAll();
+  });
+
+  it("logs a before hook call over 500ms with its plugin, hook and the session it opened", async () => {
+    let now = 0;
+    const hookDurations = [1_140, 499];
+    const { logger, lines, raw } = createCapturingLogger();
+    const runtime = await startBeforeHookPlugin(
+      createBeforeHookChild("gate", (hook) => {
+        now += hookDurations.shift() ?? 0;
+        return { type: "result", requestId: hook.requestId, output: hook.input };
+      }),
+      { logger, now: () => now },
+    );
+
+    await runtime.before("agent.session_open", sessionOpenRequest);
+    await runtime.before("agent.session_open", { ...sessionOpenRequest, agentId: "agent-2" });
+
+    expect(slowHookLines(lines)).toEqual([
+      expect.objectContaining({
+        level: 30,
+        module: "plugins",
+        pluginId: "gate",
+        hook: "agent.session_open",
+        kind: "before",
+        durationMs: 1_140,
+        ok: true,
+        agentId: "agent-1",
+        provider: "claude",
+        reason: "resume",
+        purpose: "history",
+      }),
+    ]);
+    expect(raw.join("")).not.toContain(sessionOpenRequest.cwd);
+    await runtime.stopAll();
+  });
+
+  it("logs a slow before hook that turned the request down without the plugin's reason", async () => {
+    let now = 0;
+    const reason = "Aster: someone@example.com 계정의 사용 한도가 소진되었습니다.";
+    const { logger, lines, raw } = createCapturingLogger();
+    const runtime = await startBeforeHookPlugin(
+      createBeforeHookChild("gate", (hook) => {
+        now += 2_300;
+        return { type: "error", requestId: hook.requestId, error: reason };
+      }),
+      { logger, now: () => now },
+    );
+
+    await expect(runtime.before("agent.session_open", sessionOpenRequest)).rejects.toBeInstanceOf(
+      PluginHookRefusalError,
+    );
+
+    expect(slowHookLines(lines)).toEqual([
+      expect.objectContaining({
+        pluginId: "gate",
+        hook: "agent.session_open",
+        kind: "before",
+        durationMs: 2_300,
+        ok: false,
+      }),
+    ]);
+    expect(raw.join("")).not.toContain("someone@example.com");
+    await runtime.stopAll();
+  });
+
+  it("logs a lifecycle event hook over 500ms with the agent it was about", async () => {
+    let now = 0;
+    const { logger, lines, raw } = createCapturingLogger();
+    const runtime = await startBeforeHookPlugin(
+      createBeforeHookChild("gate", (hook) => {
+        now += 760;
+        return { type: "result", requestId: hook.requestId, output: null };
+      }),
+      { logger, now: () => now, hooks: { events: ["agent.turn_ended"], before: [] } },
+    );
+
+    runtime.emit("agent.turn_ended", {
+      agent: {
+        id: "agent-7",
+        workspaceId: null,
+        parentAgentId: null,
+        provider: "codex",
+        cwd: "/tmp/private-project",
+        title: "Fix the payroll export",
+      },
+      turnId: "turn-1",
+      outcome: { kind: "completed" },
+      timeline: [],
+    });
+    await runtime.drainEvents();
+
+    expect(slowHookLines(lines)).toEqual([
+      expect.objectContaining({
+        pluginId: "gate",
+        hook: "agent.turn_ended",
+        kind: "event",
+        durationMs: 760,
+        ok: true,
+        agentId: "agent-7",
+        provider: "codex",
+      }),
+    ]);
+    const written = raw.join("");
+    expect(written).not.toContain("private-project");
+    expect(written).not.toContain("payroll");
     await runtime.stopAll();
   });
 
