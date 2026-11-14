@@ -477,6 +477,32 @@ describe("plugin build cache", () => {
     expect((await compilePlugin(plugin, { cache })).serverBundle).not.toContain(ASSIGNED_FIELD);
   });
 
+  // A bare package name is looked for as a file first, which is the package's directory.
+  it.each(["fixture-base", "@fixture/base"])(
+    "reuses a bundle whose tsconfig extends the package %s by name, until its tsconfig changes",
+    async (name) => {
+      const plugin = await createPlugin();
+      await writeFile(plugin.server, `${CLASS_FIELD_SOURCE} export default () => box;`);
+      const configPackage = path.join(plugin.directory, "node_modules", name);
+      await mkdir(configPackage, { recursive: true });
+      await writeFile(path.join(configPackage, "package.json"), JSON.stringify({ name }));
+      await writeFile(path.join(configPackage, "tsconfig.json"), classFields(false));
+      await writeFile(
+        path.join(plugin.directory, "tsconfig.json"),
+        JSON.stringify({ extends: name }),
+      );
+      await settle(plugin.directory);
+      const { cache, errors } = await createCache();
+      expect((await compilePlugin(plugin, { cache })).serverBundle).toContain(ASSIGNED_FIELD);
+      expect((await reused(plugin, cache)).serverBundle).toContain(ASSIGNED_FIELD);
+      expect(errors).toEqual([]);
+
+      await writeFile(path.join(configPackage, "tsconfig.json"), classFields(true));
+
+      expect((await compilePlugin(plugin, { cache })).serverBundle).not.toContain(ASSIGNED_FIELD);
+    },
+  );
+
   // Only esbuild reads a nested tsconfig; the boundary check's TypeScript reads the plugin's.
   it.each(["the plugin tsconfig", "a config a nested tsconfig extends"] as const)(
     "rebuilds when a new file matches an earlier paths substitution in %s",

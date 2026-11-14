@@ -132,12 +132,17 @@ function isMissing(error: unknown): boolean {
   return code === "ENOENT" || code === "ENOTDIR";
 }
 
+// An `extends` that names a package is looked for as a file first, at the package's
+// directory. A directory there is no file, which is all that look depends on.
+const DIRECTORY_DIGEST = "directory";
+
 async function fileDigest(file: string): Promise<string | null> {
   try {
     const [content, canonical] = await Promise.all([readFile(file), realpath(file)]);
     return `${await hashBuffer(content)}:${canonical}`;
   } catch (error) {
     if (isMissing(error)) return null;
+    if ((error as NodeJS.ErrnoException | null)?.code === "EISDIR") return DIRECTORY_DIGEST;
     throw error;
   }
 }
