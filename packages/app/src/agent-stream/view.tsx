@@ -103,6 +103,7 @@ import type { Theme } from "@/styles/theme";
 import { recordRenderProfileReasons } from "@/utils/render-profiler";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { useStreamHistoryWindow } from "./use-stream-history-window";
+import { useRetainedValue, useStreamPresentationLive } from "./presentation-liveness";
 import { PluginTimelineItemView, useInstalledTimelineTransform } from "@/plugins/timeline";
 
 function renderLiveAuxiliaryNode(input: {
@@ -295,14 +296,6 @@ const AGENT_CAPABILITY_FLAG_KEYS: (keyof AgentCapabilityFlags)[] = [
 ];
 
 const EMPTY_STREAM_HEAD: StreamItem[] = [];
-
-function useRetainedValue<T>(value: T, active: boolean): T {
-  const retainedRef = useRef(value);
-  if (active) {
-    retainedRef.current = value;
-  }
-  return active ? value : retainedRef.current;
-}
 const EMPTY_PENDING_MESSAGE_SUBMISSIONS: readonly PendingMessageSubmission[] = [];
 const GROUPED_TOOL_CALL_DETAIL_MAX_HEIGHT = 200;
 
@@ -508,13 +501,14 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       });
     });
 
-    // Freeze stream presentation while this tab slot is hidden to prevent offscreen
-    // cell-window and turn-lifecycle renders from background agents.
-    // When isActive flips back to true, the context change triggers a re-render and
+    // Freeze stream presentation while this tab slot or the whole window is hidden to
+    // prevent offscreen cell-window and turn-lifecycle renders from background agents.
+    // When it is shown again, the context or visibility change triggers a re-render and
     // the component reads the current (fresh) streamItems/streamHead from props.
-    const effectiveStreamItems = useRetainedValue(streamItems, isActive);
-    const effectiveStreamHead = useRetainedValue(streamHead, isActive);
-    const effectiveTurnPresentation = useRetainedValue(turnPresentation, isActive);
+    const isPresentationLive = useStreamPresentationLive();
+    const effectiveStreamItems = useRetainedValue(streamItems, isPresentationLive);
+    const effectiveStreamHead = useRetainedValue(streamHead, isPresentationLive);
+    const effectiveTurnPresentation = useRetainedValue(turnPresentation, isPresentationLive);
     const isTurnActive = effectiveTurnPresentation.isActive;
     const presentStream = useMemo(() => createStreamPresentation(), []);
     const presentation = useMemo(
