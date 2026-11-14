@@ -275,7 +275,7 @@ function createServer(options?: {
   log?: pino.Logger;
   startPaused?: boolean;
   auth?: { password: string; localCredential: () => string | null };
-  agents?: { live?: KnownAgent[]; stored?: KnownAgent[] };
+  agents?: { live?: KnownAgent[]; stored?: KnownAgent[]; storageFails?: boolean };
 }) {
   const speechReadiness = options?.speechReadiness ?? null;
   const daemonConfigStore = {
@@ -303,8 +303,14 @@ function createServer(options?: {
       })),
     }),
     createStub<AgentStorage>({
-      get: vi.fn(async (id: string) => storedAgents.find((agent) => agent.id === id) ?? null),
-      list: vi.fn(async () => storedAgents),
+      get: vi.fn(async (id: string) => {
+        if (options?.agents?.storageFails) throw new Error("agent storage unreadable");
+        return storedAgents.find((agent) => agent.id === id) ?? null;
+      }),
+      list: vi.fn(async () => {
+        if (options?.agents?.storageFails) throw new Error("agent storage unreadable");
+        return storedAgents;
+      }),
     }),
     createStub<DownloadTokenStore>({}),
     "/tmp/paseo-test",
@@ -1138,8 +1144,9 @@ describe("relay external socket reconnect behavior", () => {
 
   test("keeps the first slow request of each agent on a line of its own", async () => {
     const { log, lines } = createCapturingLog();
+    // The same provider, so only the agent id can tell the two kinds apart.
     const first = { id: "agent-first", provider: "claude" };
-    const second = { id: "agent-second", provider: "codex" };
+    const second = { id: "agent-second", provider: "claude" };
     const server = createServer({ log, agents: { live: [first, second] } });
     const socket = new MockSocket();
     await attachRelayAndHello({ server, socket, clientId: "cid-slow-agents" });
@@ -1159,7 +1166,7 @@ describe("relay external socket reconnect behavior", () => {
 
     expect(linesWithMessage(lines, "ws_slow_request")).toEqual([
       expect.objectContaining({ agentId: first.id, provider: "claude", durationMs: 1_200 }),
-      expect.objectContaining({ agentId: second.id, provider: "codex", durationMs: 800 }),
+      expect.objectContaining({ agentId: second.id, provider: "claude", durationMs: 800 }),
     ]);
     expect(linesWithMessage(lines, "ws_slow_request_summary")).toEqual([
       expect.objectContaining({
@@ -1260,6 +1267,29 @@ describe("relay external socket reconnect behavior", () => {
     ]);
     expect(slow[0]).not.toHaveProperty("agentId");
     expect(slow[0]).not.toHaveProperty("provider");
+
+    await server.close();
+  });
+
+  // The request already succeeded: a failed lookup must not turn it into a protocol failure.
+  test("still logs a slow agent request whose agent lookup fails", async () => {
+    const { log, lines } = createCapturingLog();
+    const server = createServer({ log, agents: { storageFails: true } });
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId: "cid-slow-lookup-fails" });
+    const sentBeforeRequest = socket.sent.length;
+
+    await sendSlowRequest({ socket, request: refreshAgentRequest("c0ffee00"), durationMs: 1_300 });
+
+    const slow = linesWithMessage(lines, "ws_slow_request");
+    expect(slow).toEqual([
+      expect.objectContaining({ requestType: "refresh_agent_request", durationMs: 1_300 }),
+    ]);
+    expect(slow[0]).not.toHaveProperty("agentId");
+    expect(slow[0]).not.toHaveProperty("provider");
+    expect(linesWithMessage(lines, "Failed to parse/handle message")).toEqual([]);
+    const replies = sentEnvelopes(socket).slice(sentBeforeRequest);
+    expect(replies.filter((envelope) => envelope.message?.type === "rpc_error")).toEqual([]);
 
     await server.close();
   });
