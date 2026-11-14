@@ -91,8 +91,24 @@ interface RunningFetch {
   supersede(): void;
 }
 
-/** A renewal that fetched nothing is logged at info only when its discovery took this long. */
-const SLOW_EMPTY_DISCOVERY_MS = 1_000;
+/**
+ * A source call longer than this is named in the log: inside its renewal's line when a host group
+ * renewal made it, on a line of its own otherwise. A renewal that fetched nothing is logged at info
+ * only when one of its discoveries was this slow.
+ */
+const SLOW_USAGE_CALL_MS = 500;
+
+/** One discovery or fetch of a source, as logged. Names no account, label or login. */
+interface UsageSourceCall {
+  sourceId: string;
+  phase: "discover" | "fetch";
+  scope?: UsageScope["kind"];
+  durationMs: number;
+  ok: boolean;
+}
+
+/** Where a slow call is reported: a renewal collects its own into its one line. */
+type SlowCallReport = (call: UsageSourceCall) => void;
 
 /** Owns account identity, ordered logins for each account, and the five-minute fetch cache. */
 export class UsageSourceRegistry {
@@ -286,11 +302,13 @@ export class UsageSourceRegistry {
     reason: RenewalReason,
   ): Promise<unknown> {
     const renew = async () => {
+      const slowCalls: UsageSourceCall[] = [];
+      const report: SlowCallReport = (call) => slowCalls.push(call);
       // Asked before the discovery renews the windows of the sources that answer it.
       const discoveryEnding = this.hostDiscoveryEnding(sources);
       const startedAt = this.now();
       const answered = await Promise.all(
-        sources.map((source) => this.rediscoverHostSource(source)),
+        sources.map((source) => this.rediscoverHostSource(source, report)),
       );
       this.mergeKnown();
       const discoveredAt = this.now();
@@ -305,10 +323,18 @@ export class UsageSourceRegistry {
           source,
           reason === "forced" || (windowEnding && answered[index] === true),
           startedAfter,
+          report,
         ),
       );
       if (sources.length > 0)
-        void this.logRenewal(group, reason, discoveredAt - startedAt, discoveredAt, fetches);
+        void this.logRenewal(
+          group,
+          reason,
+          discoveredAt - startedAt,
+          discoveredAt,
+          fetches,
+          slowCalls,
+        );
     };
     const started: RunningHostDiscovery = {
       // Settles after the entry is gone, so a discovery chained on it starts a new one.
@@ -322,8 +348,11 @@ export class UsageSourceRegistry {
   }
 
   /** Whether the source answered. One that failed or was replaced keeps what it said before. */
-  private async rediscoverHostSource(source: UsageSource): Promise<boolean> {
-    const reports = await this.discoverSource(source, { kind: "global" });
+  private async rediscoverHostSource(
+    source: UsageSource,
+    report: SlowCallReport,
+  ): Promise<boolean> {
+    const reports = await this.discoverSource(source, { kind: "global" }, report);
     if (this.sources.get(source.id) !== source) return false;
     if (reports) {
       // Timed from the answer, like the fetches after it, so the query that started a renewal
@@ -347,13 +376,14 @@ export class UsageSourceRegistry {
     source: UsageSource,
     every: boolean,
     startedAfter: number,
+    report: SlowCallReport,
   ): Promise<UsageReportEntry>[] {
     const found = this.defaults.get(source);
     if (!found || this.sources.get(source.id) !== source) return [];
     return [...found.reports.keys()].flatMap((id) => {
       const known = this.known.get(id);
       if (!known || (!every && !this.hostReportDue(id))) return [];
-      return [this.fetchId(id, known, "forced", false, startedAfter)];
+      return [this.fetchId(id, known, "forced", false, startedAfter, report)];
     });
   }
 
@@ -432,8 +462,10 @@ export class UsageSourceRegistry {
 
   /**
    * One line per renewal, so the time spent discovering and fetching can be read from the log.
-   * Most sources list no account on a host, and their quick discoveries every five minutes would
-   * fill the info log; they are logged at debug, and a slow one is still logged at info.
+   * Its slow source calls, in the order they finished, ride on the same line rather than adding a
+   * line each every five minutes. Most sources list no account on a host, and their quick
+   * discoveries would fill the info log; they are logged at debug, and a slow one is still logged
+   * at info.
    */
   private async logRenewal(
     group: HostGroup,
@@ -441,6 +473,7 @@ export class UsageSourceRegistry {
     discoveryMs: number,
     discoveredAt: number,
     fetches: Promise<UsageReportEntry>[],
+    slowCalls: UsageSourceCall[],
   ): Promise<void> {
     if (!this.logger.info && !this.logger.debug) return;
     await Promise.allSettled(fetches);
@@ -450,10 +483,18 @@ export class UsageSourceRegistry {
       discoveryMs,
       fetchMs: this.now() - discoveredAt,
       reports: fetches.length,
+      ...(slowCalls.length > 0 ? { slowCalls } : {}),
     };
-    if (fetches.length === 0 && discoveryMs < SLOW_EMPTY_DISCOVERY_MS)
+    if (fetches.length === 0 && slowCalls.length === 0)
       this.logger.debug?.(line, "Usage source group renewed");
     else this.logger.info?.(line, "Usage source group renewed");
+  }
+
+  /** Reports a source call longer than SLOW_USAGE_CALL_MS; see UsageSourceCall. */
+  private noteSourceCall(call: UsageSourceCall, report?: SlowCallReport): void {
+    if (call.durationMs <= SLOW_USAGE_CALL_MS) return;
+    if (report) report(call);
+    else this.logger.info?.(call, "Usage source call slow");
   }
 
   /**
@@ -529,8 +570,31 @@ export class UsageSourceRegistry {
     return merged;
   }
 
-  /** The accounts a source reports for a scope, or null when it could not be asked. */
+  /**
+   * The accounts a source reports for a scope, or null when it could not be asked. A slow call
+   * goes to `report`, or to a line of its own when no renewal collects it.
+   */
   private async discoverSource(
+    source: UsageSource,
+    scope: UsageScope,
+    report?: SlowCallReport,
+  ): Promise<Map<string, KnownReport> | null> {
+    const startedAt = this.now();
+    const reports = await this.readSourceAccounts(source, scope);
+    this.noteSourceCall(
+      {
+        sourceId: source.id,
+        phase: "discover",
+        scope: scope.kind,
+        durationMs: this.now() - startedAt,
+        ok: reports !== null,
+      },
+      report,
+    );
+    return reports;
+  }
+
+  private async readSourceAccounts(
     source: UsageSource,
     scope: UsageScope,
   ): Promise<Map<string, KnownReport> | null> {
@@ -598,6 +662,7 @@ export class UsageSourceRegistry {
     mode: FetchMode = "cached",
     renewAhead = false,
     startedAfter = -1,
+    report?: SlowCallReport,
   ): Promise<UsageReportEntry> {
     // Account identity groups cards; the ordered login set identifies a fetch result.
     const cacheKey = cacheIdentity(id, known);
@@ -637,8 +702,19 @@ export class UsageSourceRegistry {
     const seq = ++this.fetchSeq;
     let superseded = false;
     const request = (async () => {
-      const fetchedAt = new Date(this.now()).toISOString();
+      const startedAt = this.now();
+      const fetchedAt = new Date(startedAt).toISOString();
       const outcome = await this.fetchWithFallback(known);
+      // Timed where the fetch starts, so a query that joins it does not report it again.
+      this.noteSourceCall(
+        {
+          sourceId: known.source.id,
+          phase: "fetch",
+          durationMs: this.now() - startedAt,
+          ok: outcome.report.status !== "error",
+        },
+        report,
+      );
       const completedAt = new Date(this.now()).toISOString();
       const entry: UsageReportEntry = {
         id,
