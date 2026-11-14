@@ -376,6 +376,12 @@ export interface ViewedTimelineOwner extends ViewedTimelineSync {
   applyTimelineResponse(payload: TimelineResponsePayload): void;
   enqueueStreamEvent(agentId: string, event: AgentStreamReducerEvent): void;
   flushStreamAgent(agentId: string): void;
+  /**
+   * Replaces the chat's in-memory timeline with the daemon's latest page, so a long stream
+   * nobody is reading stops holding every row it ever received. Older rows stay available
+   * and load again when scrolled to. The caller decides that no one reads the dropped rows.
+   */
+  releaseRetainedHistory(agentId: string): Promise<void>;
 }
 
 export function createViewedTimelineOwner(input: {
@@ -455,6 +461,16 @@ export function createViewedTimelineOwner(input: {
     },
     flushStreamAgent(agentId) {
       streamQueue.flushAgent(agentId);
+    },
+    async releaseRetainedHistory(agentId) {
+      if (sync.isAgentDeleted(agentId)) return;
+      streamQueue.flushAgent(agentId);
+      forcedTailReplacements.add(agentId);
+      try {
+        await input.ports.fetchLatestTail(agentId);
+      } finally {
+        forcedTailReplacements.delete(agentId);
+      }
     },
     dispose() {
       streamQueue.dispose({ flush: true });

@@ -784,3 +784,118 @@ describe("SQLite baseline restoration", () => {
     }
   });
 });
+
+describe("releasing retained history", () => {
+  const HISTORY_ROWS = 1_200;
+  const PAGE_ROWS = 40;
+
+  function applyLongSyncedHistory(): void {
+    useSessionStore.getState().applyAgentTimelineResponseState(SERVER_ID, AGENT_ID, {
+      items: Array.from({ length: HISTORY_ROWS }, (_, index) =>
+        item(`reply-${index + 1}`, `reply ${index + 1}`, index + 1),
+      ),
+      head: [],
+      range: { epoch: "epoch-1", startSeq: 1, endSeq: HISTORY_ROWS },
+      older: "none",
+      newer: false,
+      synchronized: true,
+      acknowledgedClientMessageIds: [],
+    });
+  }
+
+  function latestPage(): Parameters<ViewedTimelineOwner["applyTimelineResponse"]>[0] {
+    const firstSeq = HISTORY_ROWS - PAGE_ROWS + 1;
+    return {
+      requestId: "latest-tail",
+      agentId: AGENT_ID,
+      agent: null,
+      direction: "tail",
+      projection: "projected",
+      reset: false,
+      epoch: "epoch-1",
+      window: { minSeq: 1, maxSeq: HISTORY_ROWS, nextSeq: HISTORY_ROWS + 1 },
+      startCursor: { epoch: "epoch-1", seq: firstSeq },
+      endCursor: { epoch: "epoch-1", seq: HISTORY_ROWS },
+      entries: Array.from({ length: PAGE_ROWS }, (_, index) => {
+        const seq = firstSeq + index;
+        return {
+          provider: "codex",
+          item: { type: "assistant_message", text: `reply ${seq}`, messageId: `reply-${seq}` },
+          timestamp: "2026-08-26T10:00:00.000Z",
+          seqStart: seq,
+          seqEnd: seq,
+          sourceSeqRanges: [{ startSeq: seq, endSeq: seq }],
+          collapsed: [],
+        };
+      }),
+      error: null,
+      hasNewer: false,
+      hasOlder: true,
+      staleCursor: false,
+      gap: false,
+    };
+  }
+
+  function ownerAnsweringLatestTail(): { owner: ViewedTimelineOwner; tailFetches: () => number } {
+    let fetches = 0;
+    let owner!: ViewedTimelineOwner;
+    const replica = createTimelineReplica({
+      serverId: SERVER_ID,
+      storage: { readTimeline: async () => undefined, commitTimeline: () => undefined },
+      prepareAgent: async () => undefined,
+    });
+    owner = createViewedTimelineOwner({
+      serverId: SERVER_ID,
+      replica,
+      replaceDemandedAgentIds: () => undefined,
+      drainQueuedAgentMessage: () => undefined,
+      ports: {
+        observe: () => ({ ready: Promise.resolve(), release: async () => undefined }),
+        readCursor: () => undefined,
+        fetchPage: async () => ({ hasNewer: false, endCursor: null }),
+        fetchLatestTail: async () => {
+          fetches += 1;
+          owner.applyTimelineResponse(latestPage());
+          return { hasNewer: false, endCursor: { epoch: "epoch-1", seq: HISTORY_ROWS } };
+        },
+        reportError: () => undefined,
+        schedule: () => () => undefined,
+      },
+    });
+    return { owner, tailFetches: () => fetches };
+  }
+
+  function timeline() {
+    return selectAgentTimelineState(useSessionStore.getState().sessions[SERVER_ID], AGENT_ID);
+  }
+
+  it("replaces a long in-memory timeline with the latest page and keeps older rows loadable", async () => {
+    useSessionStore.getState().initializeSession(SERVER_ID, null);
+    applyLongSyncedHistory();
+    const { owner, tailFetches } = ownerAnsweringLatestTail();
+
+    await owner.releaseRetainedHistory(AGENT_ID);
+
+    const released = timeline();
+    expect(tailFetches()).toBe(1);
+    expect(released).toMatchObject({ status: "synced", older: "available" });
+    if (released.status !== "synced") throw new Error("expected a synced timeline");
+    expect(released.items).toHaveLength(PAGE_ROWS);
+    expect(released.items.at(-1)).toMatchObject({ kind: "assistant_message", text: "reply 1200" });
+    expect(released.range).toMatchObject({ startSeq: HISTORY_ROWS - PAGE_ROWS + 1 });
+    owner.dispose();
+  });
+
+  it("leaves the timeline whole when the same page arrives without a release", () => {
+    useSessionStore.getState().initializeSession(SERVER_ID, null);
+    applyLongSyncedHistory();
+    const { owner } = ownerAnsweringLatestTail();
+
+    owner.applyTimelineResponse(latestPage());
+
+    const current = timeline();
+    if (current.status !== "synced") throw new Error("expected a synced timeline");
+    expect(current.items).toHaveLength(HISTORY_ROWS);
+    owner.dispose();
+  });
+});

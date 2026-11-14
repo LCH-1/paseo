@@ -103,7 +103,11 @@ import type { Theme } from "@/styles/theme";
 import { recordRenderProfileReasons } from "@/utils/render-profiler";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { useStreamHistoryWindow } from "./use-stream-history-window";
-import { useRetainedValue, useStreamPresentationLive } from "./presentation-liveness";
+import {
+  useReleaseHiddenSessionStreamHistory,
+  useRetainedValue,
+  useStreamPresentationLive,
+} from "./presentation-liveness";
 import { PluginTimelineItemView, useInstalledTimelineTransform } from "@/plugins/timeline";
 
 function renderLiveAuxiliaryNode(input: {
@@ -506,9 +510,32 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     // When it is shown again, the context or visibility change triggers a re-render and
     // the component reads the current (fresh) streamItems/streamHead from props.
     const isPresentationLive = useStreamPresentationLive();
-    const effectiveStreamItems = useRetainedValue(streamItems, isPresentationLive);
-    const effectiveStreamHead = useRetainedValue(streamHead, isPresentationLive);
-    const effectiveTurnPresentation = useRetainedValue(turnPresentation, isPresentationLive);
+    // A long stream that is not shown, whose reader was at the live edge, drops its older
+    // rows to the daemon's latest page; the frozen presentation then lets go of them too.
+    const hiddenHistoryReleases = useReleaseHiddenSessionStreamHistory({
+      serverId: resolvedServerId,
+      agentId,
+      live: isPresentationLive,
+      isNearBottom,
+      isTimelineDetached,
+      itemCount: streamItems.length,
+      ownSource: { historyPagination, readOnly, streamHead: providedStreamHead },
+    });
+    const effectiveStreamItems = useRetainedValue(
+      streamItems,
+      isPresentationLive,
+      hiddenHistoryReleases,
+    );
+    const effectiveStreamHead = useRetainedValue(
+      streamHead,
+      isPresentationLive,
+      hiddenHistoryReleases,
+    );
+    const effectiveTurnPresentation = useRetainedValue(
+      turnPresentation,
+      isPresentationLive,
+      hiddenHistoryReleases,
+    );
     const isTurnActive = effectiveTurnPresentation.isActive;
     const presentStream = useMemo(() => createStreamPresentation(), []);
     const presentation = useMemo(

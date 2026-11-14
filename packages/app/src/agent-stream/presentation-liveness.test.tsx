@@ -2,11 +2,16 @@
 
 import React from "react";
 import { act, renderHook } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RetainedPanelActivity } from "@/components/retained-panel";
 import type { StreamItem } from "@/types/stream";
 import { createStreamPresentation } from "./presentation";
-import { useRetainedValue, useStreamPresentationLive } from "./presentation-liveness";
+import {
+  MAX_HIDDEN_STREAM_ITEMS,
+  useReleaseHiddenStreamHistory,
+  useRetainedValue,
+  useStreamPresentationLive,
+} from "./presentation-liveness";
 
 let visibilityState: DocumentVisibilityState = "visible";
 Object.defineProperty(document, "visibilityState", {
@@ -112,5 +117,92 @@ describe("stream presentation liveness", () => {
     expect(result.current.live).toBe(false);
     expect(result.current.presentations).toBe(1);
     expect(result.current.presentation.tail).toEqual(first);
+  });
+});
+
+describe("hidden stream history release", () => {
+  function renderRelease(initial: {
+    live: boolean;
+    atLiveEdge: boolean;
+    itemCount: number;
+    release: (() => Promise<void>) | null;
+  }) {
+    return renderHook((props: typeof initial) => useReleaseHiddenStreamHistory(props), {
+      initialProps: initial,
+    });
+  }
+
+  it("releases a long timeline once it is hidden at the live edge", async () => {
+    const release = vi.fn(async () => undefined);
+    const { result, rerender } = renderRelease({
+      live: true,
+      atLiveEdge: true,
+      itemCount: MAX_HIDDEN_STREAM_ITEMS + 1,
+      release,
+    });
+    expect(release).not.toHaveBeenCalled();
+
+    await act(async () =>
+      rerender({ live: false, atLiveEdge: true, itemCount: MAX_HIDDEN_STREAM_ITEMS + 1, release }),
+    );
+    expect(release).toHaveBeenCalledOnce();
+    expect(result.current).toBe(1);
+
+    await act(async () => rerender({ live: false, atLiveEdge: true, itemCount: 40, release }));
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the rows of a reader who scrolled away from the live edge or a short timeline", async () => {
+    const release = vi.fn(async () => undefined);
+    const { result, rerender } = renderRelease({
+      live: false,
+      atLiveEdge: false,
+      itemCount: MAX_HIDDEN_STREAM_ITEMS * 3,
+      release,
+    });
+    await act(async () =>
+      rerender({ live: false, atLiveEdge: true, itemCount: MAX_HIDDEN_STREAM_ITEMS, release }),
+    );
+    await act(async () =>
+      rerender({
+        live: false,
+        atLiveEdge: true,
+        itemCount: MAX_HIDDEN_STREAM_ITEMS * 3,
+        release: null,
+      }),
+    );
+
+    expect(release).not.toHaveBeenCalled();
+    expect(result.current).toBe(0);
+  });
+
+  it("lets a frozen view drop the rows it held once the release completes", async () => {
+    const long = Array.from({ length: MAX_HIDDEN_STREAM_ITEMS + 1 }, (_, index) =>
+      toolCall(`row-${index}`, "log"),
+    );
+    const latest = long.slice(-40);
+    let tail = long;
+    const release = vi.fn(async () => {
+      tail = latest;
+    });
+    const { result, rerender } = renderHook(
+      ({ live }: { live: boolean }) => {
+        const releases = useReleaseHiddenStreamHistory({
+          live,
+          atLiveEdge: true,
+          itemCount: tail.length,
+          release,
+        });
+        return useRetainedValue(tail, live, releases);
+      },
+      { initialProps: { live: true } },
+    );
+    expect(result.current).toBe(long);
+
+    await act(async () => rerender({ live: false }));
+    await act(async () => rerender({ live: false }));
+
+    expect(release).toHaveBeenCalledOnce();
+    expect(result.current).toBe(latest);
   });
 });
