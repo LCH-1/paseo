@@ -1,8 +1,12 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { lstat, readFile } from "node:fs/promises";
 import { createRequire, isBuiltin } from "node:module";
 import path from "node:path";
-import { createPluginImportReader, type PluginImportKind } from "./compiler-imports.js";
-import type { Metafile, OnResolveResult, Plugin } from "esbuild";
+import type { PluginImportKind } from "./compiler-imports.js";
+import { openPluginImportReader } from "./compiler-imports-pool.js";
+import type { PluginBuildCache } from "./plugin-build-cache.js";
+import type { BuildOptions, Metafile, OnResolveResult, Plugin } from "esbuild";
 import {
   isPluginClientOnlySdkSpecifier,
   isPluginServerOnlySdkSpecifier,
@@ -166,14 +170,108 @@ function lexicalBoundaryError(
   }
 }
 
-function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory: string): Plugin {
+/** What a build looked at, for the build cache to tell when the bundle is out of date. */
+interface PluginBuildLookups {
+  readFiles: Set<string>;
+  configFiles: Set<string>;
+  /** Directories relative imports went through before links were followed. */
+  directories: Set<string>;
+  /** Each package directory a package import may be found at, with the subpath directories in it. */
+  packages: Map<string, Set<string>>;
+  /** SHA-256 of the exact bytes esbuild bundled for each source file it loaded, by absolute path. */
+  loaded: Map<string, string>;
+}
+
+const SOURCE_LOADERS = {
+  ".ts": "ts",
+  ".mts": "ts",
+  ".cts": "ts",
+  ".tsx": "tsx",
+  ".js": "js",
+  ".mjs": "js",
+  ".cjs": "js",
+  ".jsx": "jsx",
+} as const;
+
+function recordRelativeLookup(
+  lookups: PluginBuildLookups,
+  specifier: string,
+  resolveDirectory: string,
+): void {
+  if (!specifier.startsWith(".") && !path.isAbsolute(specifier)) return;
+  lookups.directories.add(path.dirname(path.resolve(resolveDirectory, specifier)));
+}
+
+/**
+ * Records where a package import is looked for in each ancestor node_modules. Bundled
+ * files are recorded by real path, so a link inside a package shows only here: the
+ * package directory lists its links, such as one an `exports` target goes through, and
+ * a subpath's directory is headed by its real path, which any link on the way decides.
+ */
+function recordPackageLookup(
+  lookups: PluginBuildLookups,
+  specifier: string,
+  resolveDirectory: string,
+): void {
+  if (
+    specifier.startsWith(".") ||
+    specifier.startsWith("#") ||
+    specifier.includes(":") ||
+    path.isAbsolute(specifier) ||
+    isBuiltin(specifier)
+  )
+    return;
+  const name = dependencyName(specifier);
+  for (let directory = resolveDirectory; ; directory = path.dirname(directory)) {
+    if (path.basename(directory) !== "node_modules") {
+      const modules = path.join(directory, "node_modules");
+      const packageDirectory = path.join(modules, name);
+      let subpaths = lookups.packages.get(packageDirectory);
+      if (!subpaths) lookups.packages.set(packageDirectory, (subpaths = new Set()));
+      if (specifier !== name) subpaths.add(path.dirname(path.join(modules, specifier)));
+    }
+    if (path.dirname(directory) === directory) return;
+  }
+}
+
+/**
+ * The recorded package lookups worth keeping. A package directory that is not there
+ * needs none: the build cache already lists every node_modules above an input, so the
+ * package appearing shows there. A link counts as there even when it leads nowhere.
+ */
+async function packageLookups(
+  packages: ReadonlyMap<string, ReadonlySet<string>>,
+): Promise<string[]> {
+  const directories: string[] = [];
+  await Promise.all(
+    [...packages].map(async ([packageDirectory, subpaths]) => {
+      const there = await lstat(packageDirectory).then(
+        () => true,
+        () => false,
+      );
+      if (there) directories.push(packageDirectory, ...subpaths);
+    }),
+  );
+  return directories;
+}
+
+function createRuntimeBoundaryPlugin(
+  target: PluginBuildTarget,
+  pluginDirectory: string,
+  lookups: PluginBuildLookups,
+  onFallback: ((reason: string) => void) | undefined,
+): Plugin {
+  const { readFiles, configFiles } = lookups;
   const boundaryResolution = {};
   const linkedDependencyRoots = new Set<string>();
   return {
     name: `paseo-plugin-${target}-runtime-boundary`,
-    setup(buildContext) {
+    async setup(buildContext) {
       const checked = new Set<string>();
-      const imports = createPluginImportReader(pluginDirectory);
+      const imports = await openPluginImportReader(pluginDirectory, onFallback);
+      buildContext.onDispose(() => imports.close());
+      // A config may extend a file that does not exist; that is still a lookup.
+      for (const configFile of imports.configFiles) configFiles.add(configFile);
       function resolvedBoundaryError(
         resolvedFile: string,
         specifier: string,
@@ -205,7 +303,7 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
         kind: PluginImportKind,
         typeOnly: boolean,
       ): Promise<Set<string>> {
-        const declaration = imports.resolve(specifier, file, kind);
+        const declaration = await imports.resolve(specifier, file, kind);
         const dependencyFiles = new Set<string>();
         if (declaration && (typeOnly || /\.d\.[cm]?ts$/.test(declaration)))
           dependencyFiles.add(declaration);
@@ -235,7 +333,9 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
         const key = `${owner}:${file}`;
         if (checked.has(key) || !/\.[cm]?[jt]sx?$/.test(file)) return null;
         checked.add(key);
-        for (const { specifier, kind, typeOnly } of imports.read(file)) {
+        readFiles.add(file);
+        for (const { specifier, kind, typeOnly } of await imports.read(file)) {
+          recordRelativeLookup(lookups, specifier, path.dirname(file));
           const packageSpecifier =
             kind === "type-reference"
               ? `@types/${specifier.replace(/^@/, "").replace("/", "__")}`
@@ -257,6 +357,10 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
             packageSpecifier === "@types/node"
           )
             continue;
+          recordPackageLookup(lookups, specifier, path.dirname(file));
+          if (packageSpecifier !== specifier) {
+            recordPackageLookup(lookups, packageSpecifier, path.dirname(file));
+          }
           const dependencyFiles = await resolveImportFiles(file, specifier, kind, typeOnly);
           for (const dependencyFile of dependencyFiles) {
             const boundaryError = resolvedBoundaryError(dependencyFile, specifier, file, owner);
@@ -267,15 +371,29 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
         }
         return null;
       }
-      buildContext.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, (args) =>
-        checkSourceImports(args.path, target),
-      );
+      buildContext.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
+        const boundaryError = await checkSourceImports(args.path, target);
+        if (boundaryError) return boundaryError;
+        const extension = path.extname(args.path).toLowerCase() as keyof typeof SOURCE_LOADERS;
+        const loader = SOURCE_LOADERS[extension];
+        if (args.namespace !== "file" || !loader) return null;
+        // esbuild bundles exactly these bytes, so the cache records their hash instead of what
+        // the file holds after the build: a replacement that keeps the old modification time
+        // can no longer be stored as this bundle's input.
+        const contents = await readFile(args.path);
+        lookups.loaded.set(
+          path.resolve(args.path),
+          createHash("sha256").update(contents).digest("hex"),
+        );
+        return { contents, loader };
+      });
       buildContext.onResolve({ filter: /.*/ }, async (args) => {
         if (args.kind === "entry-point") return null;
         if (args.pluginData === boundaryResolution) return null;
         const importer =
           args.namespace === "file" ? realpathSync.native(args.importer) : args.importer;
         const resolveDir = args.namespace === "file" ? path.dirname(importer) : args.resolveDir;
+        recordRelativeLookup(lookups, args.path, resolveDir);
         const owner = directoryTarget(importer, pluginDirectory) === "shared" ? "shared" : target;
         const specifierError = runtimeSpecifierError(args.path, owner, importer);
         if (specifierError) return specifierError;
@@ -296,6 +414,7 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
         ) {
           return null;
         }
+        recordPackageLookup(lookups, args.path, resolveDir);
         return resolvedBoundaryError(resolution.path, args.path, importer, owner);
       });
     },
@@ -383,13 +502,30 @@ function checkSharedDependencies(inputs: Metafile["inputs"], pluginDirectory: st
   }
 }
 
-async function compileTarget(entryPath: string, target: PluginBuildTarget): Promise<string> {
-  const { build } = loadEsbuild();
+/**
+ * Whether the build bundled a glob. A template or concatenated import such as
+ * import(`./data/${name}.js`) takes in every file that may match (./data/**\/*.js), which
+ * esbuild finds without asking any plugin, so no lookup records the directories searched
+ * and a file added under them would go unseen. Such a build is not cached.
+ */
+function bundlesGlob(inputs: Metafile["inputs"]): boolean {
+  return Object.values(inputs).some(({ imports }) =>
+    imports.some((dependency) => dependency.path.includes("*")),
+  );
+}
+
+async function compileTarget(
+  entryPath: string,
+  target: PluginBuildTarget,
+  { cache, onBoundaryCheckFallback }: CompilePluginOptions,
+): Promise<string> {
+  const esbuild = loadEsbuild();
   // Use native canonical paths throughout: TypeScript expands Windows short names
   // when resolving type references, while the JS realpath implementation retains them.
   const pluginDirectory = realpathSync.native(path.dirname(entryPath));
-  const result = await build({
-    entryPoints: [realpathSync.native(entryPath)],
+  const entryPoint = realpathSync.native(entryPath);
+  const options = {
+    entryPoints: [entryPoint],
     bundle: true,
     format: "cjs",
     jsx: "automatic",
@@ -413,28 +549,74 @@ async function compileTarget(entryPath: string, target: PluginBuildTarget): Prom
             "zod",
           ]
         : SERVER_HOST_MODULES,
-    plugins: [createRuntimeBoundaryPlugin(target, pluginDirectory)],
     metafile: true,
     logLevel: "silent",
     treeShaking: true,
     write: false,
+  } satisfies BuildOptions;
+  const key = cache
+    ? await cache.key({
+        target,
+        entryPath: entryPoint,
+        pluginDirectory,
+        esbuildVersion: esbuild.version,
+        options,
+      })
+    : null;
+  if (cache && key) {
+    const cached = await cache.lookup(key);
+    if (cached !== null) return cached;
+  }
+  const recorder = cache && key ? await cache.begin(key, pluginDirectory) : null;
+  const lookups: PluginBuildLookups = {
+    readFiles: new Set(),
+    configFiles: new Set(),
+    directories: new Set(),
+    packages: new Map(),
+    loaded: new Map(),
+  };
+  const result = await esbuild.build({
+    ...options,
+    plugins: [
+      createRuntimeBoundaryPlugin(target, pluginDirectory, lookups, onBoundaryCheckFallback),
+    ],
   });
   checkSharedDependencies(result.metafile.inputs, pluginDirectory);
   const output = result.outputFiles[0]?.text;
   if (!output) throw new Error(`Plugin ${target} compilation produced no output`);
-  return wrapCommonJsBundle(makeHermesInteropEager(output));
+  const bundle = wrapCommonJsBundle(makeHermesInteropEager(output));
+  if (recorder && !bundlesGlob(result.metafile.inputs)) {
+    const { readFiles, configFiles } = lookups;
+    const directories = [...lookups.directories, ...(await packageLookups(lookups.packages))];
+    for (const input of Object.keys(result.metafile.inputs)) readFiles.add(path.resolve(input));
+    await recorder.store(bundle, readFiles, configFiles, directories, lookups.loaded);
+  }
+  return bundle;
 }
 
-export async function compilePlugin(entryPaths: {
-  client: string | null;
-  server: string | null;
-}): Promise<{
+export interface CompilePluginOptions {
+  /** Reuses a bundle only while every input it recorded is unchanged. */
+  cache?: PluginBuildCache;
+  /**
+   * Hears why a boundary check runs on the calling thread, which it blocks while parsing,
+   * because its worker could not start or stopped.
+   */
+  onBoundaryCheckFallback?: (reason: string) => void;
+}
+
+export async function compilePlugin(
+  entryPaths: {
+    client: string | null;
+    server: string | null;
+  },
+  options: CompilePluginOptions = {},
+): Promise<{
   clientBundle: string | null;
   serverBundle: string | null;
 }> {
   const [clientBundle, serverBundle] = await Promise.all([
-    entryPaths.client ? compileTarget(entryPaths.client, "client") : null,
-    entryPaths.server ? compileTarget(entryPaths.server, "server") : null,
+    entryPaths.client ? compileTarget(entryPaths.client, "client", options) : null,
+    entryPaths.server ? compileTarget(entryPaths.server, "server", options) : null,
   ]);
   return { clientBundle, serverBundle };
 }

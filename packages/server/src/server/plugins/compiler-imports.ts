@@ -2,23 +2,37 @@ import { readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import type { ImportKind } from "esbuild";
-import type { Node, NamedImportBindings, NamedExportBindings } from "typescript";
+import type {
+  ExtendedConfigCacheEntry,
+  Node,
+  NamedImportBindings,
+  NamedExportBindings,
+} from "typescript";
 
 const nodeRequire = createRequire(import.meta.url);
 
 export type PluginImportKind = ImportKind | "type-reference";
 
-interface ModuleImport {
+export interface ModuleImport {
   specifier: string;
   kind: PluginImportKind;
   typeOnly: boolean;
 }
 
+export interface PluginImportReader {
+  /** The tsconfig this reader resolves with and every config it extends. */
+  readonly configFiles: readonly string[];
+  resolve(specifier: string, importer: string, kind: PluginImportKind): string | undefined;
+  read(file: string): ModuleImport[];
+}
+
 // Keep the TypeScript compiler off daemon startup. esbuild erases these edges, so
 // ownership validation needs the original syntax and declaration-aware resolution.
-export function createPluginImportReader(directory: string) {
+// The daemon calls this through compiler-imports-pool.ts, off its event loop.
+export function createPluginImportReader(directory: string): PluginImportReader {
   const ts = nodeRequire("typescript") as typeof import("typescript");
   const configFile = ts.findConfigFile(directory, ts.sys.fileExists);
+  const extendedConfigs = new Map<string, ExtendedConfigCacheEntry>();
   const config = configFile
     ? ts.getParsedCommandLineOfConfigFile(
         configFile,
@@ -29,6 +43,7 @@ export function createPluginImportReader(directory: string) {
             throw new Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"));
           },
         },
+        extendedConfigs,
       )
     : undefined;
   const options = {
@@ -39,6 +54,7 @@ export function createPluginImportReader(directory: string) {
   };
   const cache = ts.createModuleResolutionCache(directory, (file) => file, options);
   return {
+    configFiles: configFile ? [configFile, ...extendedConfigs.keys()] : [],
     resolve(specifier: string, importer: string, kind: PluginImportKind): string | undefined {
       const resolved =
         kind === "type-reference"

@@ -26,6 +26,8 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import type { PluginLogEntry } from "@getpaseo/protocol/messages";
 import { compilePlugin } from "./compiler.js";
+import { createPluginBuildCache, type PluginBuildCache } from "./plugin-build-cache.js";
+import { createLimiter } from "./ordered-start.js";
 import { readPluginManifest } from "./manifest.js";
 import type { PluginRequirements } from "@getpaseo/protocol/messages";
 import { assertPluginCompatibility } from "@getpaseo/protocol/plugin-requirements";
@@ -54,6 +56,8 @@ const SLOW_HOOK_MS = 500;
  * slow call of a kind gets a line of its own; the ones after it are summed up once per window.
  */
 const SLOW_EVENT_HOOK_WINDOW_MS = 3_600_000;
+// esbuild and the import workers are shared; more parallel builds only queue there.
+const COMPILE_CONCURRENCY = 4;
 
 interface PluginOutputStream {
   on(event: "data", listener: (chunk: Buffer | string) => void): this;
@@ -89,6 +93,8 @@ interface LoadedPlugin {
   providers: readonly PluginProviderMetadata[];
   usageSources: readonly PluginUsageSourceMetadata[];
   child: PluginChild | null;
+  /** The child reported its close; a closed child emits no second one. */
+  childExited: boolean;
   outputCapture: PluginOutputCapture | null;
   pending: Map<string, PendingInvocation>;
   providerConnections: Map<string, RemoteProviderConnection>;
@@ -136,6 +142,8 @@ interface RemoteProviderConnection {
 
 interface PluginRuntimeDependencies {
   settingsDirectory?: string;
+  /** Where compiled bundles are kept between loads; no cache without one. */
+  buildCacheDirectory?: string;
   onSettingsChanged?: (pluginId: string, settingsId: string) => void;
   spawnChild?: () => PluginChild;
   sessionHost?: PluginPaseoSessionHost;
@@ -351,10 +359,17 @@ async function findEntry(directory: string, filenames: readonly string[]): Promi
   return null;
 }
 
-async function resolveEntryPaths(directory: string): Promise<{
+interface PluginEntryPaths {
   client: string | null;
   server: string | null;
-}> {
+}
+
+interface PreparedPlugin {
+  entryPaths: PluginEntryPaths;
+  bundles: Awaited<ReturnType<typeof compilePlugin>>;
+}
+
+async function resolveEntryPaths(directory: string): Promise<PluginEntryPaths> {
   const [client, server] = await Promise.all([
     findEntry(directory, CLIENT_ENTRY_FILENAMES),
     findEntry(directory, SERVER_ENTRY_FILENAMES),
@@ -383,6 +398,10 @@ export class PluginRuntime {
   private slowEventHooksFrom: number | undefined;
   private sessionHost: PluginPaseoSessionHost | null;
   private readonly listeners = new Set<(pluginId: string, error?: string) => void>();
+  private readonly buildCache: PluginBuildCache | undefined;
+  private readonly compileSlot = createLimiter(COMPILE_CONCURRENCY);
+  private readonly prepared = new Map<string, Promise<PreparedPlugin | null>>();
+  private boundaryCheckFallbackReported = false;
 
   constructor(
     logger: pino.Logger,
@@ -393,6 +412,14 @@ export class PluginRuntime {
     this.spawnChild = dependencies.spawnChild ?? spawnPluginChild;
     this.now = dependencies.now ?? (() => performance.now());
     this.sessionHost = dependencies.sessionHost ?? null;
+    this.buildCache = dependencies.buildCacheDirectory
+      ? createPluginBuildCache({
+          directory: dependencies.buildCacheDirectory,
+          daemonVersion,
+          onError: (operation, error) =>
+            this.logger.warn({ err: error, operation }, "Plugin build cache unavailable"),
+        })
+      : undefined;
   }
 
   bindPaseoSessionHost(sessionHost: PluginPaseoSessionHost): void {
@@ -406,10 +433,15 @@ export class PluginRuntime {
     return () => this.listeners.delete(listener);
   }
 
+  /**
+   * `waitTurn` lets plugins load side by side while they still publish in the
+   * caller's order: it is awaited after loading, before the plugin is published.
+   */
   async startPlugin(
     pluginId: string,
     configuredPath: string,
     canPublish: () => boolean = () => true,
+    waitTurn: () => Promise<void> = async () => undefined,
   ): Promise<void> {
     if (this.plugins.has(pluginId)) throw new Error(`Plugin is already running: ${pluginId}`);
     this.appendLog(pluginId, "stdout", "[paseo] Loading plugin");
@@ -417,15 +449,13 @@ export class PluginRuntime {
       this.appendLog(pluginId, "stderr", `[paseo] Plugin failed to load: ${describeError(error)}`);
       throw error;
     });
-    if (!canPublish()) {
-      await this.stopPlugin(loaded);
-      throw new Error(`Plugin start cancelled: ${pluginId}`);
-    }
-    this.plugins.set(pluginId, loaded);
-    this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
+    await this.publish(loaded, waitTurn, canPublish);
   }
 
-  async startBuiltinPlugin(input: { id: string; directory: string }): Promise<void> {
+  async startBuiltinPlugin(
+    input: { id: string; directory: string },
+    waitTurn: () => Promise<void> = async () => undefined,
+  ): Promise<void> {
     if (this.plugins.has(input.id)) throw new Error(`Plugin is already running: ${input.id}`);
     this.appendLog(input.id, "stdout", "[paseo] Loading plugin");
     const directory = path.resolve(input.directory);
@@ -434,7 +464,7 @@ export class PluginRuntime {
       throw new Error(`Built-in plugin ${input.id} has manifest ID ${manifest.id}`);
     }
     assertPluginCompatibility({ ...manifest, version: this.daemonVersion, runtime: "daemon" });
-    const bundles = await compilePlugin(await resolveEntryPaths(directory));
+    const bundles = await this.compile(await resolveEntryPaths(directory));
     if (!bundles.serverBundle) throw new Error(`Built-in plugin ${input.id} needs a server entry`);
     const loaded = await this.launchPlugin({
       pluginId: input.id,
@@ -444,8 +474,33 @@ export class PluginRuntime {
       bundle: "",
       clientBundle: bundles.clientBundle ?? "",
     });
-    this.plugins.set(input.id, loaded);
-    this.appendLog(input.id, "stdout", "[paseo] Plugin ready");
+    await this.publish(loaded, waitTurn, () => true);
+  }
+
+  /**
+   * A loaded plugin may wait for its turn while its child keeps running. A child that
+   * exits meanwhile is not published yet, so its close removed and announced nothing;
+   * it fails here as an exit during initialization instead of being published dead.
+   */
+  private async publish(
+    loaded: LoadedPlugin,
+    waitTurn: () => Promise<void>,
+    canPublish: () => boolean,
+  ): Promise<void> {
+    await waitTurn();
+    if (!canPublish()) {
+      await this.stopPlugin(loaded);
+      throw new Error(`Plugin start cancelled: ${loaded.id}`);
+    }
+    if (loaded.childExited) {
+      loaded.sessionSocket?.peerClosed();
+      await loaded.sessionClosed;
+      const error = new Error(`Plugin ${loaded.id} exited during initialization`);
+      this.appendLog(loaded.id, "stderr", `[paseo] Plugin failed to load: ${error.message}`);
+      throw error;
+    }
+    this.plugins.set(loaded.id, loaded);
+    this.appendLog(loaded.id, "stdout", "[paseo] Plugin ready");
   }
 
   async validatePlugin(configuredPath: string): Promise<void> {
@@ -453,7 +508,60 @@ export class PluginRuntime {
     const manifest = await readPluginManifest(directory);
     assertPluginCompatibility({ ...manifest, version: this.daemonVersion, runtime: "daemon" });
     const entryPaths = await resolveEntryPaths(directory);
-    await compilePlugin(entryPaths);
+    await this.compile(entryPaths);
+  }
+
+  /**
+   * Compiles a directory plugin ahead of its start, which then reuses the bundles
+   * when its entries are unchanged. Compiling runs no plugin code; a failure here
+   * is ignored and the start compiles again, reporting the error as it always did.
+   */
+  preparePlugin(configuredPath: string): void {
+    const directory = path.resolve(configuredPath);
+    if (this.prepared.has(directory)) return;
+    const preparing = resolveEntryPaths(directory)
+      .then(async (entryPaths) => ({ entryPaths, bundles: await this.compile(entryPaths) }))
+      .catch(() => null);
+    this.prepared.set(directory, preparing);
+  }
+
+  discardPreparedPlugins(): void {
+    this.prepared.clear();
+  }
+
+  private compile(entryPaths: PluginEntryPaths): ReturnType<typeof compilePlugin> {
+    return this.compileSlot(() =>
+      compilePlugin(entryPaths, {
+        cache: this.buildCache,
+        onBoundaryCheckFallback: (reason) => this.reportBoundaryCheckFallback(reason),
+      }),
+    );
+  }
+
+  private reportBoundaryCheckFallback(reason: string): void {
+    if (this.boundaryCheckFallbackReported) return;
+    this.boundaryCheckFallbackReported = true;
+    this.logger.warn(
+      { reason },
+      "Plugin boundary checks run on the daemon thread, which stalls while they parse",
+    );
+  }
+
+  private async compileDirectory(
+    directory: string,
+    entryPaths: PluginEntryPaths,
+  ): ReturnType<typeof compilePlugin> {
+    const preparing = this.prepared.get(directory);
+    this.prepared.delete(directory);
+    const prepared = await preparing;
+    if (
+      prepared &&
+      prepared.entryPaths.client === entryPaths.client &&
+      prepared.entryPaths.server === entryPaths.server
+    ) {
+      return prepared.bundles;
+    }
+    return this.compile(entryPaths);
   }
 
   async stopPluginById(pluginId: string): Promise<boolean> {
@@ -785,7 +893,7 @@ export class PluginRuntime {
     const manifest = await readPluginManifest(directory);
     assertPluginCompatibility({ ...manifest, version: this.daemonVersion, runtime: "daemon" });
     const entryPaths = await resolveEntryPaths(directory);
-    const bundles = await compilePlugin(entryPaths);
+    const bundles = await this.compileDirectory(directory, entryPaths);
     const serverBundle = bundles.serverBundle;
     if (!serverBundle) {
       return {
@@ -797,6 +905,7 @@ export class PluginRuntime {
         providers: [],
         usageSources: [],
         child: null,
+        childExited: false,
         outputCapture: null,
         pending: new Map(),
         providerConnections: new Map(),
@@ -842,6 +951,7 @@ export class PluginRuntime {
         throw error;
       });
     let loaded: LoadedPlugin | null = null;
+    let exited = false;
     let ready: Extract<PluginProcessMessage, { type: "ready" }>;
     try {
       ready = await new Promise<Extract<PluginProcessMessage, { type: "ready" }>>(
@@ -891,6 +1001,7 @@ export class PluginRuntime {
             }
           });
           child.on("close", () => {
+            exited = true;
             session.socket.peerClosed();
             if (!loaded) {
               fail(new Error(`Plugin ${pluginId} exited during initialization`));
@@ -925,6 +1036,8 @@ export class PluginRuntime {
       providers: ready.providers ?? [],
       usageSources: ready.usageSources ?? [],
       child,
+      // A close that came between "ready" and here found no plugin to report to.
+      childExited: exited,
       outputCapture,
       pending,
       providerConnections: new Map(),
@@ -1311,6 +1424,7 @@ export class PluginRuntime {
   }
 
   private async handleChildClose(loaded: LoadedPlugin): Promise<void> {
+    loaded.childExited = true;
     loaded.sessionSocket?.peerClosed();
     const wasPublished = this.plugins.get(loaded.id) === loaded;
     if (wasPublished) {
@@ -1341,7 +1455,8 @@ export class PluginRuntime {
       this.appendLog(loaded.id, "stdout", "[paseo] Plugin stopped");
       return;
     }
-    if (child.killed) {
+    // An exited child emits no second close to wait for, whether or not it was killed.
+    if (child.killed || loaded.childExited) {
       sessionSocket.peerClosed();
       await sessionClosed;
       this.appendLog(loaded.id, "stdout", "[paseo] Plugin stopped");
