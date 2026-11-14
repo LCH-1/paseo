@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire, isBuiltin } from "node:module";
 import path from "node:path";
-import { createPluginImportReader, type PluginImportKind } from "./compiler-imports.js";
+import type { PluginImportKind } from "./compiler-imports.js";
+import { openPluginImportReader } from "./compiler-imports-pool.js";
 import type { Metafile, OnResolveResult, Plugin } from "esbuild";
 import {
   isPluginClientOnlySdkSpecifier,
@@ -171,9 +172,10 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
   const linkedDependencyRoots = new Set<string>();
   return {
     name: `paseo-plugin-${target}-runtime-boundary`,
-    setup(buildContext) {
+    async setup(buildContext) {
       const checked = new Set<string>();
-      const imports = createPluginImportReader(pluginDirectory);
+      const imports = await openPluginImportReader(pluginDirectory);
+      buildContext.onDispose(() => imports.close());
       function resolvedBoundaryError(
         resolvedFile: string,
         specifier: string,
@@ -205,7 +207,7 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
         kind: PluginImportKind,
         typeOnly: boolean,
       ): Promise<Set<string>> {
-        const declaration = imports.resolve(specifier, file, kind);
+        const declaration = await imports.resolve(specifier, file, kind);
         const dependencyFiles = new Set<string>();
         if (declaration && (typeOnly || /\.d\.[cm]?ts$/.test(declaration)))
           dependencyFiles.add(declaration);
@@ -235,7 +237,7 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
         const key = `${owner}:${file}`;
         if (checked.has(key) || !/\.[cm]?[jt]sx?$/.test(file)) return null;
         checked.add(key);
-        for (const { specifier, kind, typeOnly } of imports.read(file)) {
+        for (const { specifier, kind, typeOnly } of await imports.read(file)) {
           const packageSpecifier =
             kind === "type-reference"
               ? `@types/${specifier.replace(/^@/, "").replace("/", "__")}`
