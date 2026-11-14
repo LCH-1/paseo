@@ -168,12 +168,29 @@ function lexicalBoundaryError(
   }
 }
 
+/** What a build looked at, for the build cache to tell when the bundle is out of date. */
+interface PluginBuildLookups {
+  readFiles: Set<string>;
+  configFiles: Set<string>;
+  /** Directories relative imports went through before links were followed. */
+  directories: Set<string>;
+}
+
+function recordRelativeLookup(
+  lookups: PluginBuildLookups,
+  specifier: string,
+  resolveDirectory: string,
+): void {
+  if (!specifier.startsWith(".") && !path.isAbsolute(specifier)) return;
+  lookups.directories.add(path.dirname(path.resolve(resolveDirectory, specifier)));
+}
+
 function createRuntimeBoundaryPlugin(
   target: PluginBuildTarget,
   pluginDirectory: string,
-  readFiles: Set<string>,
-  configFiles: Set<string>,
+  lookups: PluginBuildLookups,
 ): Plugin {
+  const { readFiles, configFiles } = lookups;
   const boundaryResolution = {};
   const linkedDependencyRoots = new Set<string>();
   return {
@@ -247,6 +264,7 @@ function createRuntimeBoundaryPlugin(
         checked.add(key);
         readFiles.add(file);
         for (const { specifier, kind, typeOnly } of await imports.read(file)) {
+          recordRelativeLookup(lookups, specifier, path.dirname(file));
           const packageSpecifier =
             kind === "type-reference"
               ? `@types/${specifier.replace(/^@/, "").replace("/", "__")}`
@@ -287,6 +305,7 @@ function createRuntimeBoundaryPlugin(
         const importer =
           args.namespace === "file" ? realpathSync.native(args.importer) : args.importer;
         const resolveDir = args.namespace === "file" ? path.dirname(importer) : args.resolveDir;
+        recordRelativeLookup(lookups, args.path, resolveDir);
         const owner = directoryTarget(importer, pluginDirectory) === "shared" ? "shared" : target;
         const specifierError = runtimeSpecifierError(args.path, owner, importer);
         if (specifierError) return specifierError;
@@ -448,19 +467,23 @@ async function compileTarget(
     if (cached !== null) return cached;
   }
   const recorder = cache && key ? await cache.begin(key, pluginDirectory) : null;
-  const readFiles = new Set<string>();
-  const configFiles = new Set<string>();
+  const lookups: PluginBuildLookups = {
+    readFiles: new Set(),
+    configFiles: new Set(),
+    directories: new Set(),
+  };
   const result = await esbuild.build({
     ...options,
-    plugins: [createRuntimeBoundaryPlugin(target, pluginDirectory, readFiles, configFiles)],
+    plugins: [createRuntimeBoundaryPlugin(target, pluginDirectory, lookups)],
   });
   checkSharedDependencies(result.metafile.inputs, pluginDirectory);
   const output = result.outputFiles[0]?.text;
   if (!output) throw new Error(`Plugin ${target} compilation produced no output`);
   const bundle = wrapCommonJsBundle(makeHermesInteropEager(output));
   if (recorder) {
+    const { readFiles, configFiles, directories } = lookups;
     for (const input of Object.keys(result.metafile.inputs)) readFiles.add(path.resolve(input));
-    await recorder.store(bundle, readFiles, configFiles);
+    await recorder.store(bundle, readFiles, configFiles, directories);
   }
   return bundle;
 }
