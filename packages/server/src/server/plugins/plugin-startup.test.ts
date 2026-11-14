@@ -1,4 +1,4 @@
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -156,6 +156,7 @@ async function createScriptedService(scripts: Record<string, ChildScript>) {
     sources[id] = { source: "directory", path: directory };
   }
   const hookCalls: string[] = [];
+  const closes = new EventEmitter();
   const spawnChild = () => {
     let exited = false;
     let pluginId = "";
@@ -170,6 +171,7 @@ async function createScriptedService(scripts: Record<string, ChildScript>) {
       exited = true;
       child.connected = false;
       child.emit("close", 0, null);
+      closes.emit(`close:${pluginId}`);
     };
     child.send = (message, callback) => {
       if (exited) {
@@ -224,7 +226,9 @@ async function createScriptedService(scripts: Record<string, ChildScript>) {
     "0.4.0",
     { runtime },
   );
-  return { service, runtime, sources, hookCalls };
+  /** Settles once a child of `pluginId` has closed and the runtime has heard it. */
+  const childClosed = (pluginId: string) => once(closes, `close:${pluginId}`).then(() => undefined);
+  return { service, runtime, sources, hookCalls, childClosed };
 }
 
 /** Settles with the promise's outcome, or "hung" when it is still pending after `ms`. */
@@ -276,10 +280,11 @@ describe("plugin startup", () => {
   });
 
   it("cancels a start whose process already exited without waiting for a second close", async () => {
-    const { runtime, sources } = await createScriptedService({
+    const { runtime, sources, childClosed } = await createScriptedService({
       crashy: { readyAfterMs: 0, exitAfterReadyMs: 0 },
     });
-    const exited = new Promise<void>((resolve) => setTimeout(resolve, 100));
+    // Its turn comes only after the close, however long compiling takes.
+    const exited = childClosed("crashy");
 
     const start = runtime
       .startPlugin(
