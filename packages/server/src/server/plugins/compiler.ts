@@ -182,17 +182,6 @@ interface PluginBuildLookups {
   loaded: Map<string, string>;
 }
 
-const SOURCE_LOADERS = {
-  ".ts": "ts",
-  ".mts": "ts",
-  ".cts": "ts",
-  ".tsx": "tsx",
-  ".js": "js",
-  ".mjs": "js",
-  ".cjs": "js",
-  ".jsx": "jsx",
-} as const;
-
 function recordRelativeLookup(
   lookups: PluginBuildLookups,
   specifier: string,
@@ -374,18 +363,19 @@ function createRuntimeBoundaryPlugin(
       buildContext.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
         const boundaryError = await checkSourceImports(args.path, target);
         if (boundaryError) return boundaryError;
-        const extension = path.extname(args.path).toLowerCase() as keyof typeof SOURCE_LOADERS;
-        const loader = SOURCE_LOADERS[extension];
-        if (args.namespace !== "file" || !loader) return null;
+        // Import attributes pick the loader (`with { type: "json" }`) and are checked by esbuild
+        // only when it loads the file itself, so those files keep esbuild's own loading.
+        if (args.namespace !== "file" || Object.keys(args.with ?? {}).length > 0) return null;
         // esbuild bundles exactly these bytes, so the cache records their hash instead of what
         // the file holds after the build: a replacement that keeps the old modification time
-        // can no longer be stored as this bundle's input.
+        // can no longer be stored as this bundle's input. "default" keeps the loader esbuild
+        // picks by extension, including its stricter one for .mts and .cts.
         const contents = await readFile(args.path);
         lookups.loaded.set(
           path.resolve(args.path),
           createHash("sha256").update(contents).digest("hex"),
         );
-        return { contents, loader };
+        return { contents, loader: "default" };
       });
       buildContext.onResolve({ filter: /.*/ }, async (args) => {
         if (args.kind === "entry-point") return null;
