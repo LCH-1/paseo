@@ -10,6 +10,7 @@ import {
   type UsageProblem,
   type UsageReport,
 } from "@getpaseo/protocol/messages";
+import { RepeatDigest } from "../../websocket/repeat-digest.js";
 
 export interface UsageSource {
   id: string;
@@ -110,6 +111,16 @@ interface UsageSourceCall {
 /** Where a slow call is reported: a renewal collects its own into its one line. */
 type SlowCallReport = (call: UsageSourceCall) => void;
 
+/**
+ * A report renewed behind a query's answer, such as an agent's report while the app polls the
+ * host, is renewed every few minutes with nobody waiting. The first slow renewal of a kind gets a
+ * line of its own; the ones after it are summed up in one line for each of these windows.
+ */
+const BACKGROUND_SLOW_CALL_WINDOW_MS = 3_600_000;
+
+/** A kind of slow background call, as summed up. */
+type BackgroundSlowCall = Pick<UsageSourceCall, "sourceId" | "phase" | "ok">;
+
 /** Owns account identity, ordered logins for each account, and the five-minute fetch cache. */
 export class UsageSourceRegistry {
   private readonly sources = new Map<string, UsageSource>();
@@ -123,6 +134,9 @@ export class UsageSourceRegistry {
   private fetchSeq = 0;
   /** When the host queries of the last cache window arrived, oldest first; forced ones excluded. */
   private readonly hostQueries: number[] = [];
+  private readonly backgroundSlowCalls = new RepeatDigest<BackgroundSlowCall>();
+  /** When the current window of `backgroundSlowCalls` opened; unset until a call is noted. */
+  private backgroundSlowCallsFrom: number | undefined;
 
   constructor(
     private readonly now: () => number = Date.now,
@@ -175,6 +189,7 @@ export class UsageSourceRegistry {
     // A forced query shares only fetches started after it was made: an earlier one may still use
     // a token that the login change behind the force replaced.
     const askedAfter = this.fetchSeq;
+    this.flushBackgroundSlowCalls();
     this.pruneAgents();
     let ids: string[];
     let reports = this.known;
@@ -497,6 +512,29 @@ export class UsageSourceRegistry {
     else this.logger.info?.(call, "Usage source call slow");
   }
 
+  /** Collects a slow call nobody waited for; see BACKGROUND_SLOW_CALL_WINDOW_MS. */
+  private readonly noteBackgroundSlowCall: SlowCallReport = (call) => {
+    this.backgroundSlowCallsFrom ??= this.now();
+    const kind: BackgroundSlowCall = { sourceId: call.sourceId, phase: call.phase, ok: call.ok };
+    const key = JSON.stringify([kind.sourceId, kind.phase, kind.ok]);
+    if (this.backgroundSlowCalls.record(key, kind, call.durationMs))
+      this.logger.info?.({ ...call, background: true }, "Usage source call slow");
+  };
+
+  /** Sums up the slow background calls of a window that has ended, on the query after it. */
+  private flushBackgroundSlowCalls(): void {
+    const from = this.backgroundSlowCallsFrom;
+    const now = this.now();
+    if (from === undefined || now - from < BACKGROUND_SLOW_CALL_WINDOW_MS) return;
+    this.backgroundSlowCallsFrom = now;
+    for (const { fields, count, p50Ms, maxMs } of this.backgroundSlowCalls.flush()) {
+      this.logger.info?.(
+        { ...fields, background: true, count, p50Ms, maxMs, windowMs: now - from },
+        "Usage source call slow summary",
+      );
+    }
+  }
+
   /**
    * Whether a host group renewal will fetch this cache entry before it ends. An agent running under
    * a login the host also lists shares the host's entry, and renewing it apart from its group would
@@ -692,7 +730,7 @@ export class UsageSourceRegistry {
         this.now() - cached.at >= this.ttlMs - this.renewAheadMs &&
         !this.renewedByHostGroup(cacheKey)
       )
-        void this.fetchId(id, known, "forced");
+        void this.fetchId(id, known, "forced", false, -1, this.noteBackgroundSlowCall);
       return Promise.resolve(present(cached.entry));
     }
     if (shared) return shared.request.then(present);

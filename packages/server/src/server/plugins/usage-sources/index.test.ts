@@ -1489,6 +1489,69 @@ test("a session discovery or a fetch no renewal started logs its own line when o
   }
 });
 
+test("slow renewals of an agent's report behind the host's polls are folded into a line an hour", async () => {
+  let now = 0;
+  const lines: unknown[][] = [];
+  const registry = new UsageSourceRegistry(
+    () => now,
+    300_000,
+    {
+      warn: () => {},
+      info: (...args: unknown[]) => {
+        lines.push(args);
+      },
+    },
+    {
+      hasAgent: () => true,
+      usageSession: () => ({ provider: "claude", env: {}, sessionKey: "launch" }),
+    },
+  );
+  let agentFetches = 0;
+  registry.register({
+    id: "claude",
+    label: "Claude",
+    // The agent runs under a login the host does not list, so no host renewal fetches its report.
+    discover: async (scope) =>
+      scope.kind === "global"
+        ? [{ key: "host", input: { token: "host-token" } }]
+        : [{ key: "agent-only", label: "someone@example.com", input: { token: "agent-token" } }],
+    fetch: async (input) => {
+      if (JSON.stringify(input).includes("agent-token")) {
+        agentFetches++;
+        await settle();
+        now += 700;
+      }
+      return { status: "available", windows: [] };
+    },
+  });
+  await registry.listReports({ agentId: "agent" });
+  // The app's sidebar asks for the host's usage once a minute; each answer renews the agent's
+  // report behind it once the report is in its window's last minute.
+  for (let minute = 1; minute <= 126; minute++) {
+    now = Math.max(now, minute * 60_000);
+    await registry.listReports();
+    for (let step = 0; step < 4; step++) await settle();
+  }
+
+  const fetch = { sourceId: "claude", phase: "fetch", ok: true };
+  expect(agentFetches).toBe(26);
+  expect(lines.filter(([, msg]) => msg !== "Usage source group renewed")).toEqual([
+    // The query that first asked for the agent's report waited for it.
+    [{ ...fetch, durationMs: 700 }, "Usage source call slow"],
+    // Nobody waited for a renewal behind an answer: the first is named, then an hour at a time.
+    [{ ...fetch, durationMs: 700, background: true }, "Usage source call slow"],
+    [
+      { ...fetch, background: true, count: 13, p50Ms: 700, maxMs: 700, windowMs: 3_659_300 },
+      "Usage source call slow summary",
+    ],
+    [
+      { ...fetch, background: true, count: 12, p50Ms: 700, maxMs: 700, windowMs: 3_600_000 },
+      "Usage source call slow summary",
+    ],
+  ]);
+  expect(JSON.stringify(lines)).not.toMatch(/agent-only|someone@example.com|token/);
+});
+
 test("an account added to the host appears on a forced refresh or once the cache window ends", async () => {
   let now = 0;
   const accounts: string[] = [];
