@@ -269,6 +269,39 @@ afterEach(() => {
   useSessionStore.getState().clearSession(SERVER_ID);
 });
 
+describe("AgentStreamView while its window is hidden", () => {
+  it("keeps showing the rows it had and shows the latest ones once the window is visible", () => {
+    const first = [userMessage("m1", "first prompt")];
+    const view = renderInTab(
+      <AgentStreamView
+        agentId={AGENT_ID}
+        serverId={SERVER_ID}
+        context={CONTEXT}
+        streamItems={first}
+        pendingPermissions={NO_PERMISSIONS}
+        turnPresentation={IDLE_TURN}
+      />,
+    );
+    expect(view.shownRows()).toEqual(["first prompt"]);
+
+    act(() => setDocumentVisibility("hidden"));
+    view.rerender(
+      <AgentStreamView
+        agentId={AGENT_ID}
+        serverId={SERVER_ID}
+        context={CONTEXT}
+        streamItems={[...first, userMessage("m2", "arrived while hidden")]}
+        pendingPermissions={NO_PERMISSIONS}
+        turnPresentation={IDLE_TURN}
+      />,
+    );
+    expect(view.shownRows()).toEqual(["first prompt"]);
+
+    act(() => setDocumentVisibility("visible"));
+    expect(view.shownRows()).toEqual(["first prompt", "arrived while hidden"]);
+  });
+});
+
 describe("AgentStreamView releasing a long hidden history", () => {
   it("lets a hidden chat at the live edge drop its rows for the daemon's latest page", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
