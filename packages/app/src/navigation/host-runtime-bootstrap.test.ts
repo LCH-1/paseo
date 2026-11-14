@@ -465,4 +465,22 @@ describe("host runtime app lifecycle", () => {
       expect(subscribed).toBe(false);
     },
   );
+
+  it("treats a closing page as hidden so pending writes start at once", () => {
+    const visibility: boolean[] = [];
+    const page = new EventTarget();
+    const dispose = bindHostRuntimeAppState(
+      { setAppVisible: (visible) => visibility.push(visible) },
+      { currentState: "active", addEventListener: () => ({ remove: () => {} }) },
+      page,
+    );
+    expect(visibility).toEqual([true]);
+
+    page.dispatchEvent(new Event("pagehide"));
+    expect(visibility).toEqual([true, false]);
+
+    dispose();
+    page.dispatchEvent(new Event("pagehide"));
+    expect(visibility).toEqual([true, false]);
+  });
 });

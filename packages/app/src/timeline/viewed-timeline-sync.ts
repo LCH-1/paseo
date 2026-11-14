@@ -376,6 +376,20 @@ export interface ViewedTimelineOwner extends ViewedTimelineSync {
   applyTimelineResponse(payload: TimelineResponsePayload): void;
   enqueueStreamEvent(agentId: string, event: AgentStreamReducerEvent): void;
   flushStreamAgent(agentId: string): void;
+  /**
+   * Marks the chat's rows as read by a view on screen until the returned function runs.
+   * Meanwhile no release starts, and one still waiting for its page applies that page as an
+   * ordinary tail, so a reader who came back keeps every row.
+   */
+  retainHistory(agentId: string): () => void;
+  /**
+   * Replaces the chat's in-memory timeline with the daemon's latest page, so a long stream
+   * nobody is reading stops holding every row it ever received. Older rows stay available
+   * and load again when scrolled to. The caller decides that no one reads the dropped rows.
+   * Resolves to whether the page replaced the timeline. Views asking while a release is on its
+   * way share it, so each of them learns that the rows were replaced.
+   */
+  releaseRetainedHistory(agentId: string): Promise<boolean>;
 }
 
 export function createViewedTimelineOwner(input: {
@@ -387,6 +401,9 @@ export function createViewedTimelineOwner(input: {
 }): ViewedTimelineOwner {
   const forcedTailReplacements = new Set<string>();
   const deletedAgentIds = new Set<string>();
+  const historyHolds = new Map<string, number>();
+  const historyReleases = new Map<string, { replaced: boolean }>();
+  const runningReleases = new Map<string, Promise<boolean>>();
   const sync = createViewedTimelineSync({
     ...input.ports,
     onAgentDeleted: (agentId) => {
@@ -439,7 +456,13 @@ export function createViewedTimelineOwner(input: {
     },
     applyTimelineResponse(receivedPayload) {
       if (sync.isAgentDeleted(receivedPayload.agentId)) return;
-      const payload = consumeForcedTimelineTailReplacement(receivedPayload, forcedTailReplacements);
+      const release =
+        receivedPayload.direction === "tail"
+          ? historyReleases.get(receivedPayload.agentId)
+          : undefined;
+      if (release) historyReleases.delete(receivedPayload.agentId);
+      const forced = consumeForcedTimelineTailReplacement(receivedPayload, forcedTailReplacements);
+      const payload = release ? { ...forced, reset: true } : forced;
       const accepted = applyAuthoritativeTimelineResponse({
         serverId: input.serverId,
         payload,
@@ -447,6 +470,7 @@ export function createViewedTimelineOwner(input: {
         recoverGap: (agentId, cursor) => sync.recoverGap(agentId, cursor),
         drainQueuedAgentMessage: input.drainQueuedAgentMessage,
       });
+      if (release) release.replaced = accepted;
       if (accepted) input.replica.timelineUpdated(payload.agentId);
     },
     enqueueStreamEvent(agentId, event) {
@@ -455,6 +479,41 @@ export function createViewedTimelineOwner(input: {
     },
     flushStreamAgent(agentId) {
       streamQueue.flushAgent(agentId);
+    },
+    retainHistory(agentId) {
+      historyHolds.set(agentId, (historyHolds.get(agentId) ?? 0) + 1);
+      historyReleases.delete(agentId);
+      let held = true;
+      return () => {
+        if (!held) return;
+        held = false;
+        const holds = (historyHolds.get(agentId) ?? 1) - 1;
+        if (holds > 0) historyHolds.set(agentId, holds);
+        else historyHolds.delete(agentId);
+      };
+    },
+    releaseRetainedHistory(agentId) {
+      if (sync.isAgentDeleted(agentId) || historyHolds.has(agentId)) {
+        return Promise.resolve(false);
+      }
+      const running = runningReleases.get(agentId);
+      if (running) return running;
+      const release = { replaced: false };
+      const replaceWithLatestPage = async () => {
+        streamQueue.flushAgent(agentId);
+        historyReleases.set(agentId, release);
+        try {
+          await input.ports.fetchLatestTail(agentId);
+        } finally {
+          if (historyReleases.get(agentId) === release) historyReleases.delete(agentId);
+        }
+        return release.replaced;
+      };
+      const run = replaceWithLatestPage().finally(() => {
+        if (runningReleases.get(agentId) === run) runningReleases.delete(agentId);
+      });
+      runningReleases.set(agentId, run);
+      return run;
     },
     dispose() {
       streamQueue.dispose({ flush: true });

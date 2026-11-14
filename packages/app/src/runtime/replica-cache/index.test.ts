@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceDescriptorPayload } from "@getpaseo/protocol/messages";
 import {
   normalizeProjectDescriptor,
@@ -8,7 +8,7 @@ import {
 import type { StreamItem } from "@/types/stream";
 import { normalizeAgentSnapshot } from "@/utils/agent-snapshots";
 import { ReplicaCache } from ".";
-import type { DirectoryCheckpoint } from "@/runtime/replica-cache";
+import type { CachedTimeline, DirectoryCheckpoint } from "@/runtime/replica-cache";
 import type { ReplicaHostRows, ReplicaRow, ReplicaRowChanges, ReplicaRowStore } from "./row-store";
 
 const SERVER_ID = "cached-host";
@@ -1123,4 +1123,198 @@ it("retains semantic agent messages across disk-cache reconstruction", async () 
   writer.commitTimeline(SERVER_ID, "agent-1", value);
   await writer.flush();
   expect(await createCache(storage).readTimeline(SERVER_ID, "agent-1")).toEqual(value);
+});
+
+function shellCall(id: string, seq: number, output: string): StreamItem {
+  return {
+    kind: "tool_call",
+    id,
+    timestamp: new Date("2026-07-18T08:02:00.000Z"),
+    timelineCursor: { epoch: "epoch-1", seq },
+    payload: {
+      source: "agent",
+      data: {
+        provider: "codex",
+        callId: id,
+        name: "shell",
+        status: "completed",
+        error: null,
+        detail: { type: "shell", command: "cat build.log", output },
+      },
+    },
+  };
+}
+
+function storedShellOutput(value: CachedTimeline | undefined, index = 0): string {
+  const item = value?.items[index];
+  if (item?.kind !== "tool_call" || item.payload.source !== "agent") {
+    throw new Error("expected a stored agent tool call");
+  }
+  const detail = item.payload.data.detail;
+  if (detail.type !== "shell") throw new Error("expected shell detail");
+  return detail.output ?? "";
+}
+
+describe("ReplicaCache write pacing", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("waits 30 seconds between writes while the window is hidden", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const storage = new MemoryStorage();
+    const cache = createCache(storage);
+    await cache.setAppVisible(false);
+
+    cache.commitTimeline(SERVER_ID, "agent-1", timeline("Streamed while hidden"));
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(storage.writes).toBe(0);
+    cache.commitTimeline(SERVER_ID, "agent-1", timeline("Streamed later while hidden"));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(storage.writes).toBe(1);
+    expect(await createCache(storage).readTimeline(SERVER_ID, "agent-1")).toEqual(
+      timeline("Streamed later while hidden"),
+    );
+  });
+
+  it("writes at once when the window is shown again or hidden, and paces visible writes by 1 second", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const storage = new MemoryStorage();
+    const cache = createCache(storage);
+    await cache.setAppVisible(false);
+    cache.commitTimeline(SERVER_ID, "agent-1", timeline("While hidden"));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(storage.writes).toBe(0);
+
+    await cache.setAppVisible(true);
+    expect(storage.writes).toBe(1);
+    expect(await createCache(storage).readTimeline(SERVER_ID, "agent-1")).toEqual(
+      timeline("While hidden"),
+    );
+
+    cache.commitTimeline(SERVER_ID, "agent-1", timeline("While visible"));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(storage.writes).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(storage.writes).toBe(2);
+
+    cache.commitTimeline(SERVER_ID, "agent-1", timeline("Just before hiding"));
+    await cache.setAppVisible(false);
+    expect(storage.writes).toBe(3);
+    expect(await createCache(storage).readTimeline(SERVER_ID, "agent-1")).toEqual(
+      timeline("Just before hiding"),
+    );
+  });
+
+  it("does not rewrite a stored row whose payload is unchanged", async () => {
+    const storage = new MemoryStorage();
+    const cache = createCache(storage);
+    cache.commitTimeline(SERVER_ID, "agent-1", timeline("Same"));
+    await cache.flush();
+    cache.commitTimeline(SERVER_ID, "agent-1", timeline("Same"));
+    commitDirectory(cache, SERVER_ID, directory());
+    await cache.flush();
+
+    expect(storage.writes).toBe(2);
+    expect(storage.changes[1]?.upserts.map(({ kind }) => kind).sort()).toEqual([
+      "agent",
+      "checkpoint",
+      "project",
+      "workspace",
+    ]);
+
+    cache.commitTimeline(SERVER_ID, "agent-1", timeline("Same"));
+    commitDirectory(cache, SERVER_ID, directory());
+    await cache.flush();
+    expect(storage.writes).toBe(2);
+
+    cache.commitTimeline(SERVER_ID, "agent-1", timeline("Changed"));
+    await cache.flush();
+    expect(storage.writes).toBe(3);
+    expect(await createCache(storage).readTimeline(SERVER_ID, "agent-1")).toEqual(
+      timeline("Changed"),
+    );
+  });
+});
+
+describe("ReplicaCache oversized tool text", () => {
+  it("stores the end of a tool text over 100KB and leaves the full item to the daemon", async () => {
+    const storage = new MemoryStorage();
+    const cache = createCache(storage);
+    const output = `${"older build output line\n".repeat(6_000)}final summary line`;
+    const value = {
+      agentId: "agent-1",
+      items: [shellCall("build", 12, output)],
+      range: { epoch: "epoch-1", startSeq: 1, endSeq: 12 },
+      hasOlder: true,
+    };
+    cache.commitTimeline(SERVER_ID, "agent-1", value);
+    await cache.flush();
+
+    expect(requireTimelineRow(storage).payload.length).toBeLessThan(20 * 1024);
+    const restored = await createCache(storage).readTimeline(SERVER_ID, "agent-1");
+    // A shortened row claims no coverage, so reopening refetches the item instead of resuming.
+    expect(restored?.range).toBeNull();
+    expect(restored?.hasOlder).toBe(false);
+    const stored = storedShellOutput(restored);
+    expect(stored).toMatch(
+      /^… \d+ earlier characters are not kept in the local cache; the full text reloads from the daemon\.\n/,
+    );
+    expect(stored.split("\n")[1]).toBe("older build output line");
+    expect(stored.endsWith("final summary line")).toBe(true);
+    expect(stored.length).toBeLessThanOrEqual(16 * 1024 + 120);
+    expect(storedShellOutput(value)).toBe(output);
+  });
+
+  it("keeps tool text up to 100KB whole along with its coverage", async () => {
+    const storage = new MemoryStorage();
+    const cache = createCache(storage);
+    const value = {
+      agentId: "agent-1",
+      items: [shellCall("build", 12, "x".repeat(100 * 1024))],
+      range: { epoch: "epoch-1", startSeq: 1, endSeq: 12 },
+      hasOlder: true,
+    };
+    cache.commitTimeline(SERVER_ID, "agent-1", value);
+    await cache.flush();
+
+    expect(await createCache(storage).readTimeline(SERVER_ID, "agent-1")).toEqual(value);
+  });
+
+  it("stores the newest 50 storable rows of a long timeline in order", async () => {
+    const storage = new MemoryStorage();
+    const cache = createCache(storage);
+    const items: StreamItem[] = [];
+    for (let seq = 1; seq <= 120; seq += 1) {
+      if (seq % 7 === 0) {
+        items.push({
+          kind: "tool_call",
+          id: `orchestrator-${seq}`,
+          timestamp: new Date("2026-07-18T08:02:00.000Z"),
+          timelineCursor: { epoch: "epoch-1", seq },
+          payload: {
+            source: "orchestrator",
+            data: { toolCallId: `o${seq}`, toolName: "x", arguments: {}, status: "completed" },
+          },
+        });
+      } else {
+        items.push(shellCall(`shell-${seq}`, seq, `output ${seq}`));
+      }
+    }
+    cache.commitTimeline(SERVER_ID, "agent-1", {
+      agentId: "agent-1",
+      items,
+      range: { epoch: "epoch-1", startSeq: 1, endSeq: 120 },
+      hasOlder: true,
+    });
+    await cache.flush();
+
+    const restored = await createCache(storage).readTimeline(SERVER_ID, "agent-1");
+    const expected = items
+      .filter((item) => item.kind === "tool_call" && item.payload.source === "agent")
+      .slice(-50);
+    expect(restored?.items).toEqual(expected);
+    expect(restored?.range).toBeNull();
+  });
 });

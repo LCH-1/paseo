@@ -269,13 +269,28 @@ export function resolveStartupRoute(input: ResolveStartupRouteInput): StartupRou
   return resolveReadyIndexStartupRoute(input);
 }
 
+type PageLifecycleTarget = Pick<EventTarget, "addEventListener" | "removeEventListener">;
+
+function getPageLifecycleTarget(): PageLifecycleTarget | null {
+  return typeof window !== "undefined" && typeof window.addEventListener === "function"
+    ? window
+    : null;
+}
+
 export function bindHostRuntimeAppState(
   store: { setAppVisible: (visible: boolean) => void },
   appState: Pick<typeof AppState, "currentState" | "addEventListener">,
+  page: PageLifecycleTarget | null = getPageLifecycleTarget(),
 ): () => void {
   const subscription = appState.addEventListener("change", (state) => {
     store.setAppVisible(state === "active");
   });
+  // A closing window is about to lose whatever is still waiting to be written.
+  const handlePageHide = () => store.setAppVisible(false);
+  page?.addEventListener("pagehide", handlePageHide);
   store.setAppVisible(appState.currentState === "active");
-  return () => subscription.remove();
+  return () => {
+    subscription.remove();
+    page?.removeEventListener("pagehide", handlePageHide);
+  };
 }

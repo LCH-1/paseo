@@ -125,6 +125,36 @@ describe("buildAgentStreamRenderModel", () => {
     expect(model.history).not.toContain(head[0]);
   });
 
+  it("virtualizes the older part of a long turn on desktop web while layout sees the whole turn", () => {
+    const at = (seed: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, seed));
+    const tail: StreamItem[] = [
+      { ...userMessage("u-long", 0), timestamp: at(0) },
+      ...Array.from({ length: 600 }, (_, index) => ({
+        ...assistantMessage(`step-${index}`, 0),
+        timestamp: at(index + 1),
+      })),
+    ];
+
+    const model = buildAgentStreamRenderModel({
+      isTurnActive: false,
+      activeTurnStartedAt: null,
+      tail,
+      head: [],
+      platform: "web",
+      isMobileBreakpoint: false,
+    });
+
+    expect(model.segments.historyMounted.length).toBeGreaterThanOrEqual(150);
+    expect(model.segments.historyMounted.length).toBeLessThan(200);
+    expect([...model.segments.historyVirtualized, ...model.segments.historyMounted]).toEqual(tail);
+    expect(model.history).toBe(tail);
+    // The completed turn still measures from its prompt, which is no longer mounted.
+    expect(model.turnTiming.byAssistantId.get("step-599")).toEqual({
+      completedAt: at(600),
+      durationMs: 600_000,
+    });
+  });
+
   it("keeps the full committed tail mounted on mobile web", () => {
     const tail = [userMessage("u1", 1), assistantMessage("a1", 2)];
     const head = [assistantMessage("live-a", 3)];

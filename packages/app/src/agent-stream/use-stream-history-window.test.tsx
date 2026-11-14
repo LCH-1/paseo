@@ -156,4 +156,19 @@ describe("useStreamHistoryWindow", () => {
     expect(result.current.revealLoadedHistory("missing")).toBe(false);
     expect(result.current.revealLoadedHistory("u2")).toBe(false);
   });
+
+  it("keeps a long turn's prompt in the rendered window so the turn footer, copy and rewind see it", () => {
+    const items = [
+      message("u1", "user_message"),
+      message("a1", "assistant_message"),
+      message("u-long", "user_message"),
+      ...Array.from({ length: 600 }, (_, index) => message(`step-${index}`, "assistant_message")),
+    ];
+
+    const { result } = renderHook(() =>
+      useStreamHistoryWindow({ agentId: "agent-1", items, loadRemoteOlder: vi.fn() }),
+    );
+
+    expect(result.current.start).toBe(2);
+  });
 });

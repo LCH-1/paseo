@@ -28,6 +28,7 @@ import {
   type HostRuntimeStorage,
 } from "./host-runtime";
 import type { ReplicaRow, ReplicaRowStore } from "./replica-cache/row-store";
+import type { TimelineResponsePayload } from "@/timeline/viewed-timeline-sync";
 
 import { subscriptionFixture } from "./subscription-fixture";
 import { readDesktopManagedLocalCredential } from "@/desktop/daemon/local-credential";
@@ -2009,6 +2010,103 @@ describe("HostRuntimeStore", () => {
       store.syncHosts([]);
     },
   );
+
+  it("paces replica writes by 30 seconds while the window is hidden and writes them at once when it is shown", async () => {
+    const connection = makeHost().connections[0]!;
+    const host = makeHost({
+      serverId: "srv_replica_pacing",
+      connections: [connection],
+      preferredConnectionId: connection.id,
+    });
+    const client = new FakeDaemonClient();
+    client.setConnectionState({ status: "connected" });
+    const backingStore = createMemoryReplicaRowStore();
+    const timelineWrites: string[] = [];
+    const replicaRowStore: ReplicaRowStore = {
+      ...backingStore,
+      apply: async (changes) => {
+        for (const row of changes.upserts) if (row.kind === "timeline") timelineWrites.push(row.id);
+        await backingStore.apply(changes);
+      },
+    };
+    const store = new HostRuntimeStore({
+      storage: createMemoryHostRuntimeStorage(),
+      replicaRowStore,
+      deps: {
+        createClient: () => {
+          throw new Error("the initial client is supplied");
+        },
+        connectToDaemon: async () => {
+          throw new Error("a single-connection host reuses its active client");
+        },
+        getClientId: async () => "cid_test_runtime",
+      },
+    });
+    store.syncHosts([host], {
+      initialConnectionByServerId: new Map([
+        [
+          host.serverId,
+          { connectionId: connection.id, existingClient: client as unknown as DaemonClient },
+        ],
+      ]),
+    });
+    await waitForHostOnline(store, host.serverId);
+    const owner = store.createViewedTimelineOwner(host.serverId, {
+      observe: () => ({ ready: Promise.resolve(), release: async () => undefined }),
+      readCursor: () => undefined,
+      fetchPage: async () => ({ hasNewer: false, endCursor: null }),
+      fetchLatestTail: async () => ({ hasNewer: false, endCursor: null }),
+      reportError: () => undefined,
+      schedule: () => () => undefined,
+    });
+    const tailPage = (agentId: string): TimelineResponsePayload => ({
+      requestId: `tail-${agentId}`,
+      agentId,
+      agent: null,
+      direction: "tail",
+      projection: "projected",
+      reset: false,
+      epoch: "epoch-1",
+      window: { minSeq: 1, maxSeq: 1, nextSeq: 2 },
+      startCursor: { epoch: "epoch-1", seq: 1 },
+      endCursor: { epoch: "epoch-1", seq: 1 },
+      entries: [
+        {
+          provider: "codex",
+          item: { type: "assistant_message", text: "reply", messageId: `reply-${agentId}` },
+          timestamp: "2026-11-14T00:00:00.000Z",
+          seqStart: 1,
+          seqEnd: 1,
+          sourceSeqRanges: [{ startSeq: 1, endSeq: 1 }],
+          collapsed: [],
+        },
+      ],
+      error: null,
+      hasNewer: false,
+      hasOlder: false,
+      staleCursor: false,
+      gap: false,
+    });
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      store.setAppVisible(false);
+      owner.applyTimelineResponse(tailPage("agent-hidden"));
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(timelineWrites).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(timelineWrites).toEqual(["agent-hidden"]);
+
+      owner.applyTimelineResponse(tailPage("agent-shown"));
+      store.setAppVisible(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(timelineWrites).toEqual(["agent-hidden", "agent-shown"]);
+    } finally {
+      vi.useRealTimers();
+      owner.dispose();
+      store.syncHosts([]);
+    }
+  });
 
   it("revokes push notifications before removing a host", async () => {
     const host = makeHost({ connections: [makeHost().connections[0]!] });

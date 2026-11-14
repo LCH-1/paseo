@@ -103,6 +103,11 @@ import type { Theme } from "@/styles/theme";
 import { recordRenderProfileReasons } from "@/utils/render-profiler";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { useStreamHistoryWindow } from "./use-stream-history-window";
+import {
+  useReleaseHiddenSessionStreamHistory,
+  useRetainedValue,
+  useStreamPresentationLive,
+} from "./presentation-liveness";
 import { PluginTimelineItemView, useInstalledTimelineTransform } from "@/plugins/timeline";
 
 function renderLiveAuxiliaryNode(input: {
@@ -295,14 +300,6 @@ const AGENT_CAPABILITY_FLAG_KEYS: (keyof AgentCapabilityFlags)[] = [
 ];
 
 const EMPTY_STREAM_HEAD: StreamItem[] = [];
-
-function useRetainedValue<T>(value: T, active: boolean): T {
-  const retainedRef = useRef(value);
-  if (active) {
-    retainedRef.current = value;
-  }
-  return active ? value : retainedRef.current;
-}
 const EMPTY_PENDING_MESSAGE_SUBMISSIONS: readonly PendingMessageSubmission[] = [];
 const GROUPED_TOOL_CALL_DETAIL_MAX_HEIGHT = 200;
 
@@ -310,8 +307,58 @@ function resolveBottomOverlayControlOffset(clearance: number | undefined): numbe
   return Math.max(16, clearance ?? 0);
 }
 
+interface AgentStreamBodyProps extends AgentStreamViewProps {
+  /** Whether the body recomputes what it shows; a frozen body keeps showing its last rows. */
+  isPresentationLive: boolean;
+  isNearBottom: boolean;
+  onNearBottomChange: (isNearBottom: boolean) => void;
+  isTimelineDetached: boolean;
+}
+
+/**
+ * Freezes the stream body while it is not shown (an inactive tab slot or a hidden window),
+ * and lets a long stream left hidden at its live edge drop its older rows to the daemon's
+ * latest page. The body is then mounted again with that page: every callback, listener and
+ * memo it built while it held the old rows would otherwise keep them all reachable.
+ */
 const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamViewProps>(
-  function AgentStreamView(
+  function AgentStreamView(props, ref) {
+    const { agentId, context } = props;
+    const resolvedServerId = props.serverId ?? context.serverId ?? "";
+    const isPresentationLive = useStreamPresentationLive();
+    const [isNearBottom, setIsNearBottom] = useState(true);
+    const isTimelineDetached = useSessionStore(
+      (state) => state.sessions[resolvedServerId]?.agentTimelineHasNewer.get(agentId) === true,
+    );
+    const hiddenHistoryReleases = useReleaseHiddenSessionStreamHistory({
+      serverId: resolvedServerId,
+      agentId,
+      live: isPresentationLive,
+      isNearBottom,
+      isTimelineDetached,
+      itemCount: props.streamItems.length,
+      ownSource: {
+        historyPagination: props.historyPagination,
+        readOnly: props.readOnly ?? false,
+        streamHead: props.streamHead,
+      },
+    });
+    return (
+      <AgentStreamBody
+        key={hiddenHistoryReleases}
+        ref={ref}
+        {...props}
+        isPresentationLive={isPresentationLive}
+        isNearBottom={isNearBottom}
+        onNearBottomChange={setIsNearBottom}
+        isTimelineDetached={isTimelineDetached}
+      />
+    );
+  },
+);
+
+const AgentStreamBody = forwardRef<AgentStreamViewHandle, AgentStreamBodyProps>(
+  function AgentStreamBody(
     {
       agentId,
       serverId,
@@ -329,6 +376,10 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       onOpenWorkspaceFile,
       readOnly = false,
       historyPagination,
+      isPresentationLive,
+      isNearBottom,
+      onNearBottomChange,
+      isTimelineDetached,
     },
     ref,
   ) {
@@ -351,7 +402,6 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         }),
       [isMobile],
     );
-    const [isNearBottom, setIsNearBottom] = useState(true);
     const [expandedInlineToolCallIds, setExpandedInlineToolCallIds] = useState<Set<string>>(
       new Set(),
     );
@@ -379,9 +429,6 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     );
     const timelineEpoch = useSessionStore(
       (state) => state.sessions[resolvedServerId]?.agentTimelineCursor.get(agentId)?.epoch ?? null,
-    );
-    const isTimelineDetached = useSessionStore(
-      (state) => state.sessions[resolvedServerId]?.agentTimelineHasNewer.get(agentId) === true,
     );
 
     const workspaceRoot = context.cwd?.trim() || "";
@@ -424,10 +471,10 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       : FadeOut.duration(200);
 
     useEffect(() => {
-      setIsNearBottom(true);
+      onNearBottomChange(true);
       setExpandedInlineToolCallIds(new Set());
       setExpandedToolCallGroupIds(new Set());
-    }, [agentId]);
+    }, [agentId, onNearBottomChange]);
 
     const isActive = useRetainedPanelActive();
     const openInlineFile = useStableEvent(
@@ -508,13 +555,13 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       });
     });
 
-    // Freeze stream presentation while this tab slot is hidden to prevent offscreen
-    // cell-window and turn-lifecycle renders from background agents.
-    // When isActive flips back to true, the context change triggers a re-render and
+    // Freeze stream presentation while this tab slot or the whole window is hidden to
+    // prevent offscreen cell-window and turn-lifecycle renders from background agents.
+    // When it is shown again, the context or visibility change triggers a re-render and
     // the component reads the current (fresh) streamItems/streamHead from props.
-    const effectiveStreamItems = useRetainedValue(streamItems, isActive);
-    const effectiveStreamHead = useRetainedValue(streamHead, isActive);
-    const effectiveTurnPresentation = useRetainedValue(turnPresentation, isActive);
+    const effectiveStreamItems = useRetainedValue(streamItems, isPresentationLive);
+    const effectiveStreamHead = useRetainedValue(streamHead, isPresentationLive);
+    const effectiveTurnPresentation = useRetainedValue(turnPresentation, isPresentationLive);
     const isTurnActive = effectiveTurnPresentation.isActive;
     const presentStream = useMemo(() => createStreamPresentation(), []);
     const presentation = useMemo(
@@ -1117,7 +1164,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
                 viewportRef,
                 routeBottomAnchorRequest,
                 isAuthoritativeHistoryReady,
-                onNearBottomChange: setIsNearBottom,
+                onNearBottomChange,
                 onReadingPositionChange: handleReadingPositionChange,
                 onNearHistoryStart: loadOlder,
                 isLoadingOlderHistory: isLoadingOlder,

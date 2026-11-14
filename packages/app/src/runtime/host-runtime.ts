@@ -2619,10 +2619,11 @@ export class HostRuntimeStore {
   }
 
   setAppVisible(visible: boolean): void {
+    // Hidden windows batch replica writes; either transition writes what is pending at once.
+    void this.replicaCache.setAppVisible(visible);
     // Keep normal reconnect backoff running while hidden, for as long as the OS
     // lets us execute. Foregrounding bypasses that backoff without closing healthy sockets.
     if (!visible) {
-      void this.replicaCache.flush();
       return;
     }
 
