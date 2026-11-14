@@ -26,6 +26,7 @@ import { expandTilde } from "../../utils/path.js";
 import { runPluginBuild } from "./preparation.js";
 import { PluginRuntime } from "./runtime.js";
 import { BuiltinPluginLoader, type BuiltinPlugin } from "./builtin/index.js";
+import { startInOrder } from "./ordered-start.js";
 import type { PluginProviderMetadata } from "./plugin-process-protocol.js";
 import { readPluginProviderIcon } from "./provider-icon.js";
 import {
@@ -36,6 +37,9 @@ import {
 import type { PluginUsageSourceMetadata } from "./plugin-process-protocol.js";
 
 const BUILTIN_PROVIDER_ID_SET: ReadonlySet<string> = new Set(BUILTIN_PROVIDER_IDS);
+// Startup loads (compiles and launches) this many plugins at once; they still publish,
+// register providers and usage sources, and notify in list order.
+const PLUGIN_LOAD_CONCURRENCY = 4;
 
 interface PluginRuntimePort {
   emit?: PluginLifecycle["emit"];
@@ -54,8 +58,15 @@ interface PluginRuntimePort {
   getProviderCatalogCacheKey?: PluginRuntime["getProviderCatalogCacheKey"];
   getProviderStatus?: PluginRuntime["getProviderStatus"];
   validatePlugin?(path: string): Promise<void>;
-  startPlugin(pluginId: string, path: string, canPublish: () => boolean): Promise<void>;
-  startBuiltinPlugin?(plugin: BuiltinPlugin): Promise<void>;
+  preparePlugin?(path: string): void;
+  discardPreparedPlugins?(): void;
+  startPlugin(
+    pluginId: string,
+    path: string,
+    canPublish: () => boolean,
+    waitTurn?: () => Promise<void>,
+  ): Promise<void>;
+  startBuiltinPlugin?(plugin: BuiltinPlugin, waitTurn?: () => Promise<void>): Promise<void>;
   stopPluginById(pluginId: string): Promise<boolean>;
   stopAll(): Promise<void>;
   subscribe(listener: (pluginId: string, error?: string) => void): () => void;
@@ -185,21 +196,45 @@ export class PluginService {
     this.started = true;
     const config = this.configStore.get();
     this.globalStartsBlocked = config.pluginsEnabled !== true;
-    await this.builtinPlugins.load(async (plugin) => {
-      try {
-        await this.runtime.startBuiltinPlugin?.(plugin);
-        await this.publishProviderRegistrations(plugin.id, plugin.directory);
-        this.publishUsageSources(plugin.id);
-      } catch (error) {
-        this.logger.error({ err: error, pluginId: plugin.id }, "Failed to start built-in plugin");
-      }
-    });
-    if (config.pluginsEnabled === true) {
-      for (const [pluginId, source] of Object.entries(config.plugins ?? {})) {
-        if (source.enabled === false) continue;
-        await this.startConfigured(pluginId);
+    const configured =
+      config.pluginsEnabled === true
+        ? Object.entries(config.plugins ?? {})
+            .filter(([, source]) => source.enabled !== false)
+            .map(([pluginId]) => pluginId)
+        : [];
+    // Compiling runs no plugin code, so configured plugins compile while built-ins load.
+    for (const pluginId of configured) {
+      const source = config.plugins?.[pluginId];
+      if (source && !this.builtinPluginIds.has(pluginId)) this.runtime.preparePlugin?.(source.path);
+    }
+    try {
+      // Built-ins all publish before configured plugins start, as they did one by one.
+      await startInOrder(
+        this.builtinPlugins.plugins(),
+        PLUGIN_LOAD_CONCURRENCY,
+        async (plugin, turn) => {
+          try {
+            await this.runtime.startBuiltinPlugin?.(plugin, turn);
+            await turn();
+            await this.publishProviderRegistrations(plugin.id, plugin.directory);
+            this.publishUsageSources(plugin.id);
+          } catch (error) {
+            await turn();
+            this.logger.error(
+              { err: error, pluginId: plugin.id },
+              "Failed to start built-in plugin",
+            );
+          }
+        },
+      );
+      await startInOrder(configured, PLUGIN_LOAD_CONCURRENCY, async (pluginId, turn) => {
+        await this.startConfigured(pluginId, turn);
+        await turn();
         this.notify(pluginId);
-      }
+      });
+    } finally {
+      // A later reload must compile what is on disk then, not what startup saw.
+      this.runtime.discardPreparedPlugins?.();
     }
     this.configStore.onFieldChange("pluginsEnabled", (value) => {
       this.handleGlobalSwitch(value === true);
@@ -516,7 +551,7 @@ export class PluginService {
     }).catch((error) => this.logger.error({ err: error }, "Failed to enable plugins"));
   }
 
-  private async startConfigured(pluginId: string): Promise<void> {
+  private async startConfigured(pluginId: string, turn?: () => Promise<void>): Promise<void> {
     // A formerly external plugin may now ship as a built-in. Its old source
     // must never override or start a second copy of the built-in registration.
     if (this.builtinPluginIds.has(pluginId)) return;
@@ -524,8 +559,9 @@ export class PluginService {
     if (!source || source.enabled === false || !this.canPublish(pluginId)) return;
     this.errors.delete(pluginId);
     try {
-      await this.startPlugin(pluginId, source.path);
+      await this.startPlugin(pluginId, source.path, turn);
     } catch (error) {
+      await turn?.();
       if (this.canPublish(pluginId)) this.recordFailure(pluginId, error);
     }
   }
@@ -552,8 +588,13 @@ export class PluginService {
     );
   }
 
-  private async startPlugin(pluginId: string, sourcePath: string): Promise<void> {
-    await this.runtime.startPlugin(pluginId, sourcePath, () => this.canPublish(pluginId));
+  private async startPlugin(
+    pluginId: string,
+    sourcePath: string,
+    turn?: () => Promise<void>,
+  ): Promise<void> {
+    await this.runtime.startPlugin(pluginId, sourcePath, () => this.canPublish(pluginId), turn);
+    await turn?.();
     try {
       await this.publishProviderRegistrations(pluginId, sourcePath);
       this.publishUsageSources(pluginId);

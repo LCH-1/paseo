@@ -25,6 +25,7 @@ import {
 import type { PluginLogEntry } from "@getpaseo/protocol/messages";
 import { compilePlugin } from "./compiler.js";
 import { createPluginBuildCache, type PluginBuildCache } from "./plugin-build-cache.js";
+import { createLimiter } from "./ordered-start.js";
 import { readPluginManifest } from "./manifest.js";
 import type { PluginRequirements } from "@getpaseo/protocol/messages";
 import { assertPluginCompatibility } from "@getpaseo/protocol/plugin-requirements";
@@ -46,6 +47,8 @@ const MAX_LOG_ENTRIES = 500;
 const MAX_LOG_BYTES = 256 * 1024;
 const MAX_LOG_LINE_BYTES = 16 * 1024;
 const SOFT_SHUTDOWN_TIMEOUT_MS = 2_000;
+// esbuild and the import workers are shared; more parallel builds only queue there.
+const COMPILE_CONCURRENCY = 4;
 
 interface PluginOutputStream {
   on(event: "data", listener: (chunk: Buffer | string) => void): this;
@@ -281,10 +284,17 @@ async function findEntry(directory: string, filenames: readonly string[]): Promi
   return null;
 }
 
-async function resolveEntryPaths(directory: string): Promise<{
+interface PluginEntryPaths {
   client: string | null;
   server: string | null;
-}> {
+}
+
+interface PreparedPlugin {
+  entryPaths: PluginEntryPaths;
+  bundles: Awaited<ReturnType<typeof compilePlugin>>;
+}
+
+async function resolveEntryPaths(directory: string): Promise<PluginEntryPaths> {
   const [client, server] = await Promise.all([
     findEntry(directory, CLIENT_ENTRY_FILENAMES),
     findEntry(directory, SERVER_ENTRY_FILENAMES),
@@ -310,6 +320,8 @@ export class PluginRuntime {
   private sessionHost: PluginPaseoSessionHost | null;
   private readonly listeners = new Set<(pluginId: string, error?: string) => void>();
   private readonly buildCache: PluginBuildCache | undefined;
+  private readonly compileSlot = createLimiter(COMPILE_CONCURRENCY);
+  private readonly prepared = new Map<string, Promise<PreparedPlugin | null>>();
 
   constructor(
     logger: pino.Logger,
@@ -340,10 +352,15 @@ export class PluginRuntime {
     return () => this.listeners.delete(listener);
   }
 
+  /**
+   * `waitTurn` lets plugins load side by side while they still publish in the
+   * caller's order: it is awaited after loading, before the plugin is published.
+   */
   async startPlugin(
     pluginId: string,
     configuredPath: string,
     canPublish: () => boolean = () => true,
+    waitTurn: () => Promise<void> = async () => undefined,
   ): Promise<void> {
     if (this.plugins.has(pluginId)) throw new Error(`Plugin is already running: ${pluginId}`);
     this.appendLog(pluginId, "stdout", "[paseo] Loading plugin");
@@ -351,6 +368,7 @@ export class PluginRuntime {
       this.appendLog(pluginId, "stderr", `[paseo] Plugin failed to load: ${describeError(error)}`);
       throw error;
     });
+    await waitTurn();
     if (!canPublish()) {
       await this.stopPlugin(loaded);
       throw new Error(`Plugin start cancelled: ${pluginId}`);
@@ -359,7 +377,10 @@ export class PluginRuntime {
     this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
   }
 
-  async startBuiltinPlugin(input: { id: string; directory: string }): Promise<void> {
+  async startBuiltinPlugin(
+    input: { id: string; directory: string },
+    waitTurn: () => Promise<void> = async () => undefined,
+  ): Promise<void> {
     if (this.plugins.has(input.id)) throw new Error(`Plugin is already running: ${input.id}`);
     this.appendLog(input.id, "stdout", "[paseo] Loading plugin");
     const directory = path.resolve(input.directory);
@@ -368,9 +389,7 @@ export class PluginRuntime {
       throw new Error(`Built-in plugin ${input.id} has manifest ID ${manifest.id}`);
     }
     assertPluginCompatibility({ ...manifest, version: this.daemonVersion, runtime: "daemon" });
-    const bundles = await compilePlugin(await resolveEntryPaths(directory), {
-      cache: this.buildCache,
-    });
+    const bundles = await this.compile(await resolveEntryPaths(directory));
     if (!bundles.serverBundle) throw new Error(`Built-in plugin ${input.id} needs a server entry`);
     const loaded = await this.launchPlugin({
       pluginId: input.id,
@@ -380,6 +399,7 @@ export class PluginRuntime {
       bundle: "",
       clientBundle: bundles.clientBundle ?? "",
     });
+    await waitTurn();
     this.plugins.set(input.id, loaded);
     this.appendLog(input.id, "stdout", "[paseo] Plugin ready");
   }
@@ -389,7 +409,46 @@ export class PluginRuntime {
     const manifest = await readPluginManifest(directory);
     assertPluginCompatibility({ ...manifest, version: this.daemonVersion, runtime: "daemon" });
     const entryPaths = await resolveEntryPaths(directory);
-    await compilePlugin(entryPaths, { cache: this.buildCache });
+    await this.compile(entryPaths);
+  }
+
+  /**
+   * Compiles a directory plugin ahead of its start, which then reuses the bundles
+   * when its entries are unchanged. Compiling runs no plugin code; a failure here
+   * is ignored and the start compiles again, reporting the error as it always did.
+   */
+  preparePlugin(configuredPath: string): void {
+    const directory = path.resolve(configuredPath);
+    if (this.prepared.has(directory)) return;
+    const preparing = resolveEntryPaths(directory)
+      .then(async (entryPaths) => ({ entryPaths, bundles: await this.compile(entryPaths) }))
+      .catch(() => null);
+    this.prepared.set(directory, preparing);
+  }
+
+  discardPreparedPlugins(): void {
+    this.prepared.clear();
+  }
+
+  private compile(entryPaths: PluginEntryPaths): ReturnType<typeof compilePlugin> {
+    return this.compileSlot(() => compilePlugin(entryPaths, { cache: this.buildCache }));
+  }
+
+  private async compileDirectory(
+    directory: string,
+    entryPaths: PluginEntryPaths,
+  ): ReturnType<typeof compilePlugin> {
+    const preparing = this.prepared.get(directory);
+    this.prepared.delete(directory);
+    const prepared = await preparing;
+    if (
+      prepared &&
+      prepared.entryPaths.client === entryPaths.client &&
+      prepared.entryPaths.server === entryPaths.server
+    ) {
+      return prepared.bundles;
+    }
+    return this.compile(entryPaths);
   }
 
   async stopPluginById(pluginId: string): Promise<boolean> {
@@ -664,7 +723,7 @@ export class PluginRuntime {
     const manifest = await readPluginManifest(directory);
     assertPluginCompatibility({ ...manifest, version: this.daemonVersion, runtime: "daemon" });
     const entryPaths = await resolveEntryPaths(directory);
-    const bundles = await compilePlugin(entryPaths, { cache: this.buildCache });
+    const bundles = await this.compileDirectory(directory, entryPaths);
     const serverBundle = bundles.serverBundle;
     if (!serverBundle) {
       return {
