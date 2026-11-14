@@ -282,13 +282,14 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
 function describeHookSubject(name: string, input: unknown): HookSubject {
   if (!isObjectRecord(input)) return {};
   if (name === "agent.session_open") {
-    return {
-      agentId: readText(input.agentId),
+    const fields = {
       provider: readText(input.provider),
       reason: readText(input.reason),
       purpose: readText(input.purpose),
-      ...(input.preflight === true ? { preflight: true } : {}),
     };
+    // A preflight's agent id is made up for the dry run and names no agent.
+    if (input.preflight === true) return { ...fields, preflight: true };
+    return { agentId: readText(input.agentId), ...fields };
   }
   // Lifecycle events carry the agent; a workspace.create request may carry its first agent.
   if (isObjectRecord(input.agent)) {

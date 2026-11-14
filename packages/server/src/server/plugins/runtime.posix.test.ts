@@ -997,6 +997,44 @@ export default function contribute(server: any) { server.registerProvider(provid
     await runtime.stopAll();
   });
 
+  it("logs a slow preflight session open without the agent id made up for its dry run", async () => {
+    let now = 0;
+    const { logger, lines } = createCapturingLogger();
+    const runtime = await startBeforeHookPlugin(
+      createBeforeHookChild("gate", (hook) => {
+        now += 1_020;
+        return { type: "result", requestId: hook.requestId, output: hook.input };
+      }),
+      { logger, now: () => now },
+    );
+
+    await runtime.before("agent.session_open", {
+      ...sessionOpenRequest,
+      agentId: "4f1c2a9e-0d3b-4c55-9a7e-1b2c3d4e5f60",
+      workspaceId: "workspace-1",
+      reason: "create",
+      purpose: "interactive",
+      preflight: true,
+    });
+
+    const slow = slowHookLines(lines);
+    expect(slow).toEqual([
+      expect.objectContaining({
+        pluginId: "gate",
+        hook: "agent.session_open",
+        kind: "before",
+        durationMs: 1_020,
+        ok: true,
+        provider: "claude",
+        reason: "create",
+        purpose: "interactive",
+        preflight: true,
+      }),
+    ]);
+    expect(slow[0]).not.toHaveProperty("agentId");
+    await runtime.stopAll();
+  });
+
   it("logs a slow before hook that turned the request down without the plugin's reason", async () => {
     let now = 0;
     const reason = "Aster: someone@example.com 계정의 사용 한도가 소진되었습니다.";
