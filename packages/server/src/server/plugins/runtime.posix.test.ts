@@ -1157,6 +1157,52 @@ export default function contribute(server: any) { server.registerProvider(provid
     await runtime.stopAll();
   });
 
+  // agent.create and workspace.create hooks run before the daemon checks the requested provider.
+  it("leaves a requested provider that is not shaped like a provider id out of a slow hook line", async () => {
+    let now = 0;
+    const { logger, lines, raw } = createCapturingLogger();
+    const runtime = await startBeforeHookPlugin(
+      createBeforeHookChild("gate", (hook) => {
+        now += 900;
+        return { type: "result", requestId: hook.requestId, output: hook.input };
+      }),
+      {
+        logger,
+        now: () => now,
+        hooks: { events: [], before: ["agent.create", "workspace.create"] },
+      },
+    );
+    const providerOverLimit = `p${"x".repeat(64)}`;
+    const source = { kind: "directory" as const, path: "/tmp/project" };
+
+    await runtime.before("agent.create", {
+      config: { provider: "someone@example.com /home/x", cwd: "/tmp/project" },
+    });
+    await runtime.before("workspace.create", {
+      source,
+      agent: { config: { provider: providerOverLimit, cwd: "/tmp/project" } },
+    });
+    await runtime.before("agent.create", { config: { provider: "codex", cwd: "/tmp/project" } });
+    await runtime.before("workspace.create", {
+      source,
+      agent: { config: { provider: "claude", cwd: "/tmp/project" } },
+    });
+
+    const slow = slowHookLines(lines);
+    expect(slow).toEqual([
+      expect.objectContaining({ hook: "agent.create", kind: "before", durationMs: 900 }),
+      expect.objectContaining({ hook: "workspace.create", kind: "before", durationMs: 900 }),
+      expect.objectContaining({ hook: "agent.create", provider: "codex" }),
+      expect.objectContaining({ hook: "workspace.create", provider: "claude" }),
+    ]);
+    expect(slow[0]).not.toHaveProperty("provider");
+    expect(slow[1]).not.toHaveProperty("provider");
+    const written = raw.join("");
+    expect(written).not.toContain("someone@example.com");
+    expect(written).not.toContain(providerOverLimit);
+    await runtime.stopAll();
+  });
+
   it("tells whether a running plugin handles a before hook", async () => {
     const runtime = await startBeforeHookPlugin(
       createBeforeHookChild("gate", (hook) => ({

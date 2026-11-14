@@ -24,6 +24,11 @@ export interface SlowRequestAgent {
 // Provider ids are client-chosen strings on draft requests; anything else is left out of the log.
 const PROVIDER_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
 
+/** A provider id a request named, when it is shaped like one; anything else stays out of logs. */
+export function loggableProviderId(value: unknown): string | undefined {
+  return typeof value === "string" && PROVIDER_ID_PATTERN.test(value) ? value : undefined;
+}
+
 /**
  * Names the agent behind a slow request so its latency can be tied to a provider and a session.
  * The request's identifier may be an agent title, which is user text: only an id the daemon
@@ -38,8 +43,8 @@ export async function describeSlowRequestAgent(
     const agent = await resolveKnownAgent(identifier.trim(), agents).catch(() => null);
     if (agent) return { agentId: agent.id, provider: agent.provider };
   }
-  const provider = requestedProvider(request);
-  return provider !== undefined && PROVIDER_ID_PATTERN.test(provider) ? { provider } : {};
+  const provider = loggableProviderId(requestedProvider(request));
+  return provider !== undefined ? { provider } : {};
 }
 
 async function resolveKnownAgent(

@@ -7,6 +7,7 @@ import {
 import type { PluginBeforeRequests, PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { validateBeforeRequest, validateBeforeResult } from "./lifecycle/index.js";
 import { PluginHookRefusalError } from "./hook-refusal.js";
+import { loggableProviderId } from "../websocket/slow-request-agent.js";
 import { fork } from "node:child_process";
 import { stat } from "node:fs/promises";
 import path from "node:path";
@@ -277,13 +278,15 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Reads ids and enum fields from a hook's input. The input also holds the agent's directory,
- * title, environment and timeline, which stay out of the log.
+ * title, environment and timeline, which stay out of the log. A provider is kept only when it is
+ * shaped like a provider id: agent.create and workspace.create hooks run before the daemon checks
+ * the provider a client asked for.
  */
 function describeHookSubject(name: string, input: unknown): HookSubject {
   if (!isObjectRecord(input)) return {};
   if (name === "agent.session_open") {
     const fields = {
-      provider: readText(input.provider),
+      provider: loggableProviderId(input.provider),
       reason: readText(input.reason),
       purpose: readText(input.purpose),
     };
@@ -296,10 +299,12 @@ function describeHookSubject(name: string, input: unknown): HookSubject {
     const config = isObjectRecord(input.agent.config) ? input.agent.config : {};
     return {
       agentId: readText(input.agent.id),
-      provider: readText(input.agent.provider) ?? readText(config.provider),
+      provider: loggableProviderId(input.agent.provider) ?? loggableProviderId(config.provider),
     };
   }
-  return isObjectRecord(input.config) ? { provider: readText(input.config.provider) } : {};
+  return isObjectRecord(input.config)
+    ? { provider: loggableProviderId(input.config.provider) }
+    : {};
 }
 
 function readText(value: unknown): string | undefined {
