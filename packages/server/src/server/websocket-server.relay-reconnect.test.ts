@@ -237,6 +237,11 @@ interface CapturedLogLine {
   [field: string]: unknown;
 }
 
+interface KnownAgent {
+  id: string;
+  provider: string;
+}
+
 // Socket identity lives in child-logger bindings, so assertions on it need pino's real output.
 function createCapturingLog(): { log: pino.Logger; lines: CapturedLogLine[]; raw: string[] } {
   const lines: CapturedLogLine[] = [];
@@ -270,6 +275,7 @@ function createServer(options?: {
   log?: pino.Logger;
   startPaused?: boolean;
   auth?: { password: string; localCredential: () => string | null };
+  agents?: { live?: KnownAgent[]; stored?: KnownAgent[] };
 }) {
   const speechReadiness = options?.speechReadiness ?? null;
   const daemonConfigStore = {
@@ -277,6 +283,8 @@ function createServer(options?: {
     onChange: vi.fn(() => () => {}),
   };
   const logger = options?.logger ?? createLogger();
+  const liveAgents = options?.agents?.live ?? [];
+  const storedAgents = options?.agents?.stored ?? [];
   return new VoiceAssistantWebSocketServer(
     createStub<HTTPServer>({}),
     options?.log ?? createStub<pino.Logger>(logger),
@@ -284,7 +292,8 @@ function createServer(options?: {
     createStub<AgentManager>({
       subscribe: vi.fn(() => () => {}),
       setAgentAttentionCallback: vi.fn(),
-      getAgent: vi.fn(() => null),
+      getAgent: vi.fn((id: string) => liveAgents.find((agent) => agent.id === id) ?? null),
+      listAgents: vi.fn(() => liveAgents),
       getMetricsSnapshot: vi.fn(() => ({
         totalAgents: 0,
         idleAgents: 0,
@@ -293,7 +302,10 @@ function createServer(options?: {
         erroredAgents: 0,
       })),
     }),
-    createStub<AgentStorage>({}),
+    createStub<AgentStorage>({
+      get: vi.fn(async (id: string) => storedAgents.find((agent) => agent.id === id) ?? null),
+      list: vi.fn(async () => storedAgents),
+    }),
     createStub<DownloadTokenStore>({}),
     "/tmp/paseo-test",
     createStub<DaemonConfigStore>(daemonConfigStore),
@@ -500,10 +512,30 @@ function pluginRpcRequest(params: { pluginId: string; method: string }) {
   };
 }
 
+const SLOW_AGENT_PROMPT = "rewrite the payroll export";
+
+// The identifier may be a full id, an id prefix, or an agent title.
+function sendAgentMessageRequest(agentIdentifier: string) {
+  return {
+    type: "send_agent_message_request" as const,
+    requestId: "send-request",
+    agentId: agentIdentifier,
+    text: SLOW_AGENT_PROMPT,
+  };
+}
+
+function refreshAgentRequest(agentIdentifier: string) {
+  return {
+    type: "refresh_agent_request" as const,
+    requestId: "refresh-request",
+    agentId: agentIdentifier,
+  };
+}
+
 // Requests are timed with performance.now(), which the fake timers drive.
 async function sendSlowRequest(params: {
   socket: MockSocket;
-  request: ReturnType<typeof pluginRpcRequest>;
+  request: { type: string; [field: string]: unknown };
   durationMs: number;
 }): Promise<void> {
   const held = holdNextSessionMessage(sessionMock.instances[0]);
@@ -1045,6 +1077,129 @@ describe("relay external socket reconnect behavior", () => {
       expect.objectContaining({ method: "usage.snapshot", count: 3 }),
       expect.objectContaining({ method: "usage.snapshot", count: 1, p50Ms: 1_400, maxMs: 1_400 }),
     ]);
+
+    await server.close();
+  });
+
+  test("names the agent and its provider on a slow request aimed at a live agent", async () => {
+    const { log, lines } = createCapturingLog();
+    const agentId = "6f1c2a9e-0b7d-4f43-9a51-3d2e8c4b7a10";
+    const server = createServer({ log, agents: { live: [{ id: agentId, provider: "claude" }] } });
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId: "cid-slow-agent" });
+
+    await sendSlowRequest({ socket, request: sendAgentMessageRequest(agentId), durationMs: 1_654 });
+
+    expect(linesWithMessage(lines, "ws_slow_request")).toEqual([
+      expect.objectContaining({
+        level: 40,
+        requestType: "send_agent_message_request",
+        agentId,
+        provider: "claude",
+        durationMs: 1_654,
+      }),
+    ]);
+
+    await server.close();
+  });
+
+  test("resolves an id prefix to a stored agent and never logs a title or prompt", async () => {
+    const { log, lines, raw } = createCapturingLog();
+    const storedId = "c0ffee00-1111-4222-8333-944455556666";
+    const server = createServer({ log, agents: { stored: [{ id: storedId, provider: "codex" }] } });
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId: "cid-slow-stored-agent" });
+
+    await sendSlowRequest({ socket, request: refreshAgentRequest("c0ffee00"), durationMs: 3_664 });
+    await sendSlowRequest({
+      socket,
+      request: sendAgentMessageRequest("Quarterly payroll fix"),
+      durationMs: 900,
+    });
+
+    const slow = linesWithMessage(lines, "ws_slow_request");
+    expect(slow).toEqual([
+      expect.objectContaining({
+        requestType: "refresh_agent_request",
+        agentId: storedId,
+        provider: "codex",
+        durationMs: 3_664,
+      }),
+      expect.objectContaining({ requestType: "send_agent_message_request", durationMs: 900 }),
+    ]);
+    expect(slow[1]).not.toHaveProperty("agentId");
+    expect(slow[1]).not.toHaveProperty("provider");
+    const written = raw.join("");
+    expect(written).not.toContain("Quarterly payroll fix");
+    expect(written).not.toContain(SLOW_AGENT_PROMPT);
+
+    await server.close();
+  });
+
+  test("keeps the first slow request of each agent on a line of its own", async () => {
+    const { log, lines } = createCapturingLog();
+    const first = { id: "agent-first", provider: "claude" };
+    const second = { id: "agent-second", provider: "codex" };
+    const server = createServer({ log, agents: { live: [first, second] } });
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId: "cid-slow-agents" });
+
+    await sendSlowRequest({
+      socket,
+      request: sendAgentMessageRequest(first.id),
+      durationMs: 1_200,
+    });
+    await sendSlowRequest({ socket, request: sendAgentMessageRequest(second.id), durationMs: 800 });
+    await sendSlowRequest({
+      socket,
+      request: sendAgentMessageRequest(first.id),
+      durationMs: 2_400,
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(linesWithMessage(lines, "ws_slow_request")).toEqual([
+      expect.objectContaining({ agentId: first.id, provider: "claude", durationMs: 1_200 }),
+      expect.objectContaining({ agentId: second.id, provider: "codex", durationMs: 800 }),
+    ]);
+    expect(linesWithMessage(lines, "ws_slow_request_summary")).toEqual([
+      expect.objectContaining({
+        requestType: "send_agent_message_request",
+        agentId: first.id,
+        provider: "claude",
+        count: 2,
+        maxMs: 2_400,
+      }),
+    ]);
+
+    await server.close();
+  });
+
+  test("names the provider of a slow request that drafts an agent", async () => {
+    const { log, lines, raw } = createCapturingLog();
+    const server = createServer({ log });
+    const socket = new MockSocket();
+    await attachRelayAndHello({ server, socket, clientId: "cid-slow-draft" });
+
+    await sendSlowRequest({
+      socket,
+      request: {
+        type: "list_provider_features_request",
+        requestId: "features-1",
+        draftConfig: { provider: "codex", cwd: "/home/someone/private-project" },
+      },
+      durationMs: 1_829,
+    });
+
+    const slow = linesWithMessage(lines, "ws_slow_request");
+    expect(slow).toEqual([
+      expect.objectContaining({
+        requestType: "list_provider_features_request",
+        provider: "codex",
+        durationMs: 1_829,
+      }),
+    ]);
+    expect(slow[0]).not.toHaveProperty("agentId");
+    expect(raw.join("")).not.toContain("private-project");
 
     await server.close();
   });

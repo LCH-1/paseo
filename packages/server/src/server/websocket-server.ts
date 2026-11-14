@@ -96,6 +96,11 @@ import {
   type WebSocketRuntimeDiagnosticSnapshot,
 } from "./websocket/runtime-metrics.js";
 import { RepeatDigest } from "./websocket/repeat-digest.js";
+import {
+  describeSlowRequestAgent,
+  type KnownAgentLookup,
+  type SlowRequestAgent,
+} from "./websocket/slow-request-agent.js";
 import { getProcessMemoryDiagnostics, getProcessUptimeSeconds } from "./process-diagnostics.js";
 import {
   CLIENT_SHUTDOWN_RPC_REASON,
@@ -166,7 +171,7 @@ interface SocketLogState {
   attachLogDeferred: boolean;
 }
 
-interface SlowRequestKind extends SessionRequestDescription {
+interface SlowRequestKind extends SessionRequestDescription, SlowRequestAgent {
   clientId: string;
 }
 
@@ -618,6 +623,18 @@ export class VoiceAssistantWebSocketServer {
   private logDigestInterval: ReturnType<typeof setInterval> | null = null;
   private stopDurableRecordExpiry: (() => void) | null = null;
   private readonly slowRequestDigest = new RepeatDigest<SlowRequestKind>();
+  // Names the agent behind a slow request; read only when a request was slow.
+  private readonly knownAgents: KnownAgentLookup = {
+    get: async (id) => {
+      const agent = this.agentManager.getAgent(id) ?? (await this.agentStorage.get(id));
+      return agent ? { id: agent.id, provider: agent.provider } : null;
+    },
+    list: async () =>
+      [
+        ...this.agentManager.listAgents({ includeInternal: true }),
+        ...(await this.agentStorage.list()),
+      ].map((agent) => ({ id: agent.id, provider: agent.provider })),
+  };
   private readonly unusedSocketDigest = new RepeatDigest<UnusedSocketKind>();
   private readonly socketLogStates = new WeakMap<WebSocketLike, SocketLogState>();
   private applicationSocketLeaseInterval: ReturnType<typeof setInterval> | null = null;
@@ -2467,28 +2484,37 @@ export class VoiceAssistantWebSocketServer {
     this.recordRequestLatency(message.message.type, durationMs);
 
     if (durationMs >= SLOW_REQUEST_THRESHOLD_MS) {
-      this.logSlowRequest(ws, activeConnection, message.message, durationMs);
+      await this.logSlowRequest(ws, activeConnection, message.message, durationMs);
     }
   }
 
   // Polling requests are slow in the same way every minute. After the first report of a kind
   // they are folded into ws_slow_request_summary, which leaves one-off slow requests visible.
-  private logSlowRequest(
+  // A request aimed at an agent is a kind of its own per agent, so each agent's first slow
+  // request keeps its own line.
+  private async logSlowRequest(
     ws: WebSocketLike,
     connection: SessionConnection,
     request: SessionRequest,
     durationMs: number,
-  ): void {
-    const description = describeSessionRequest(request);
+  ): Promise<void> {
+    const inflightRequests = connection.session.getRuntimeMetrics().inflightRequests;
+    const description: SessionRequestDescription & SlowRequestAgent = {
+      ...describeSessionRequest(request),
+      ...(await describeSlowRequestAgent(request, this.knownAgents)),
+    };
     const kind = { ...description, clientId: connection.clientId };
-    const kindKey = JSON.stringify([kind.clientId, kind.requestType, kind.pluginId, kind.method]);
+    const kindKey = JSON.stringify([
+      kind.clientId,
+      kind.requestType,
+      kind.pluginId,
+      kind.method,
+      kind.agentId,
+      kind.provider,
+    ]);
     if (!this.slowRequestDigest.record(kindKey, kind, durationMs)) return;
     this.socketLogger(ws).warn(
-      {
-        ...description,
-        durationMs: Math.round(durationMs),
-        inflightRequests: connection.session.getRuntimeMetrics().inflightRequests,
-      },
+      { ...description, durationMs: Math.round(durationMs), inflightRequests },
       "ws_slow_request",
     );
   }
