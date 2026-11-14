@@ -2244,6 +2244,56 @@ class ClaudeContextUsageState {
   }
 }
 
+/**
+ * A query launch longer than this is logged with each phase's time. Launches happen once per
+ * Claude process (a first turn, a relaunch after a settings change, a restart after an exit), and
+ * the slow ones are those a waiting send feels.
+ */
+const SLOW_QUERY_LAUNCH_MS = 500;
+
+type ClaudeQueryLaunchPhase =
+  | "endInputMs"
+  | "returnMs"
+  | "treeKillMs"
+  | "buildOptionsMs"
+  | "startQueryMs"
+  | "flagSettingsMs";
+
+/**
+ * Times one query launch for its log line. A relaunch first retires the previous process: it ends
+ * the input, waits for the SDK's return, then kills the process tree. Every launch then builds its
+ * options and starts the query, and a fast-mode model waits for the process to take its flag
+ * settings. The line holds durations only, never options, prompts, paths or environment.
+ */
+class ClaudeQueryLaunchTimer {
+  private readonly startedAt = performance.now();
+  private lapStartedAt = this.startedAt;
+  private readonly phases: Partial<Record<ClaudeQueryLaunchPhase, number>> = {};
+  private ok = false;
+
+  constructor(private readonly restart: boolean) {}
+
+  /** Closes the phase that began at the previous lap, or at the start. */
+  lap(phase: ClaudeQueryLaunchPhase): void {
+    const now = performance.now();
+    this.phases[phase] = Math.round(now - this.lapStartedAt);
+    this.lapStartedAt = now;
+  }
+
+  succeeded(): void {
+    this.ok = true;
+  }
+
+  logIfSlow(logger: Logger): void {
+    const totalMs = Math.round(performance.now() - this.startedAt);
+    if (totalMs <= SLOW_QUERY_LAUNCH_MS) return;
+    logger.info(
+      { restart: this.restart, ok: this.ok, ...this.phases, totalMs },
+      "Claude query launch slow",
+    );
+  }
+}
+
 class ClaudeAgentSession implements AgentSession {
   readonly provider = "claude" as const;
   readonly capabilities = CLAUDE_CAPABILITIES;
@@ -3432,6 +3482,21 @@ class ClaudeAgentSession implements AgentSession {
       return this.query;
     }
 
+    const launch = new ClaudeQueryLaunchTimer(this.queryRestartNeeded && this.query !== null);
+    try {
+      const query = await this.launchQuery(launchMode, launch);
+      launch.succeeded();
+      return query;
+    } finally {
+      launch.logIfSlow(this.logger);
+    }
+  }
+
+  /** Retires the previous query when its launch settings changed, then starts a new one. */
+  private async launchQuery(
+    launchMode: PermissionMode,
+    launch: ClaudeQueryLaunchTimer,
+  ): Promise<Query> {
     if (this.queryRestartNeeded && this.query) {
       const oldQuery = this.query;
       const oldInput = this.input;
@@ -3448,6 +3513,7 @@ class ClaudeAgentSession implements AgentSession {
       if (retiredChild) this.failRunningRuntimeTasks();
       oldInput?.end();
       oldQuery.close?.();
+      launch.lap("endInputMs");
       // Once its child exited, a pending SDK next()/return() cannot release a live writer.
       if (!this.exitedQueries.has(oldQuery)) {
         try {
@@ -3456,6 +3522,7 @@ class ClaudeAgentSession implements AgentSession {
           /* ignore */
         }
       }
+      launch.lap("returnMs");
       // Tree-kill the old process tree now that the SDK has cleaned up.
       // If we skip this, MCP children of the previous claude process can
       // survive as orphans when the session spawns a replacement query.
@@ -3467,6 +3534,7 @@ class ClaudeAgentSession implements AgentSession {
           /* process may already be dead */
         });
       }
+      launch.lap("treeKillMs");
     }
 
     // Preserve claudeSessionId across query recreation so buildOptions() passes
@@ -3475,6 +3543,7 @@ class ClaudeAgentSession implements AgentSession {
 
     const input = createAsyncMessageInput<SDKUserMessage>();
     const options = await this.buildOptions(launchMode);
+    launch.lap("buildOptionsMs");
     this.logger.debug({ options: summarizeClaudeOptionsForLog(options) }, "claude query");
     this.input = input;
     // A fresh Claude process has no turn of its own in flight.
@@ -3492,9 +3561,11 @@ class ClaudeAgentSession implements AgentSession {
         },
       },
     );
+    launch.lap("startQueryMs");
     const fastMode = this.resolveFastModeSetting();
     if (fastMode !== null) {
       await this.query.applyFlagSettings({ fastMode });
+      launch.lap("flagSettingsMs");
     }
     // Do not kick off background control-plane queries here. Methods like
     // supportedCommands()/setPermissionMode() may execute immediately after

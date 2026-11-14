@@ -45,6 +45,8 @@ const MAX_LOG_ENTRIES = 500;
 const MAX_LOG_BYTES = 256 * 1024;
 const MAX_LOG_LINE_BYTES = 16 * 1024;
 const SOFT_SHUTDOWN_TIMEOUT_MS = 2_000;
+// A hook call longer than this is logged with its plugin, so a slow session open names its hook.
+const SLOW_HOOK_MS = 500;
 
 interface PluginOutputStream {
   on(event: "data", listener: (chunk: Buffer | string) => void): this;
@@ -130,6 +132,24 @@ interface PluginRuntimeDependencies {
   onSettingsChanged?: (pluginId: string, settingsId: string) => void;
   spawnChild?: () => PluginChild;
   sessionHost?: PluginPaseoSessionHost;
+  /** Milliseconds on a monotonic clock; times hook calls. */
+  now?: () => number;
+}
+
+interface HookCall {
+  pluginId: string;
+  kind: "before" | "event";
+  name: string;
+  input: unknown;
+}
+
+/** What a slow hook line says about the agent a hook was about. */
+interface HookSubject {
+  agentId?: string;
+  provider?: string;
+  reason?: string;
+  purpose?: string;
+  preflight?: true;
 }
 
 interface PluginLogTail {
@@ -251,6 +271,41 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Reads ids and enum fields from a hook's input. The input also holds the agent's directory,
+ * title, environment and timeline, which stay out of the log.
+ */
+function describeHookSubject(name: string, input: unknown): HookSubject {
+  if (!isObjectRecord(input)) return {};
+  if (name === "agent.session_open") {
+    const fields = {
+      provider: readText(input.provider),
+      reason: readText(input.reason),
+      purpose: readText(input.purpose),
+    };
+    // A preflight's agent id is made up for the dry run and names no agent.
+    if (input.preflight === true) return { ...fields, preflight: true };
+    return { agentId: readText(input.agentId), ...fields };
+  }
+  // Lifecycle events carry the agent; a workspace.create request may carry its first agent.
+  if (isObjectRecord(input.agent)) {
+    const config = isObjectRecord(input.agent.config) ? input.agent.config : {};
+    return {
+      agentId: readText(input.agent.id),
+      provider: readText(input.agent.provider) ?? readText(config.provider),
+    };
+  }
+  return isObjectRecord(input.config) ? { provider: readText(input.config.provider) } : {};
+}
+
+function readText(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
 function jsonTransportValue<Value>(value: Value): Value {
   const encoded = JSON.stringify(value);
   if (encoded === undefined) throw new Error("Provider value is not JSON-serializable");
@@ -304,6 +359,7 @@ export class PluginRuntime {
   private readonly logTails = new Map<string, PluginLogTail>();
   private readonly logger: pino.Logger;
   private readonly spawnChild: () => PluginChild;
+  private readonly now: () => number;
   private sessionHost: PluginPaseoSessionHost | null;
   private readonly listeners = new Set<(pluginId: string, error?: string) => void>();
 
@@ -314,6 +370,7 @@ export class PluginRuntime {
   ) {
     this.logger = logger.child({ module: "plugins" });
     this.spawnChild = dependencies.spawnChild ?? spawnPluginChild;
+    this.now = dependencies.now ?? (() => performance.now());
     this.sessionHost = dependencies.sessionHost ?? null;
   }
 
@@ -526,6 +583,8 @@ export class PluginRuntime {
       if (!loaded.hooks.events.includes(name)) {
         continue;
       }
+      const call: HookCall = { pluginId: loaded.id, kind: "event", name, input: event };
+      const startedAt = this.now();
       const request = this.request(loaded, {
         type: "hook",
         requestId: randomUUID(),
@@ -533,8 +592,9 @@ export class PluginRuntime {
         name,
         input: event,
       })
-        .then(() => undefined)
+        .then(() => this.noteHookCall(call, startedAt, true))
         .catch((error) => {
+          this.noteHookCall(call, startedAt, false);
           this.appendLog(
             loaded.id,
             "stderr",
@@ -569,6 +629,9 @@ export class PluginRuntime {
       if (!loaded.hooks.before.includes(name)) {
         continue;
       }
+      const call: HookCall = { pluginId: loaded.id, kind: "before", name, input: request };
+      const startedAt = this.now();
+      let answered = false;
       try {
         const output = await this.request(loaded, {
           type: "hook",
@@ -577,8 +640,11 @@ export class PluginRuntime {
           name,
           input: request,
         });
+        answered = true;
+        this.noteHookCall(call, startedAt, true);
         request = validateBeforeResult(name, request, output);
       } catch (error) {
+        if (!answered) this.noteHookCall(call, startedAt, false);
         if (error instanceof PluginReplyError) {
           throw new PluginHookRefusalError(loaded.id, name, error.message, { cause: error });
         }
@@ -588,6 +654,27 @@ export class PluginRuntime {
       }
     }
     return request;
+  }
+
+  /**
+   * Logs a hook call that took longer than SLOW_HOOK_MS to answer: a before hook holds the request
+   * it gates, and an event hook keeps its plugin busy. Names the agent a hook was about, never the
+   * request's directory, environment, title or a refusal's reason.
+   */
+  private noteHookCall(call: HookCall, startedAt: number, ok: boolean): void {
+    const durationMs = Math.round(this.now() - startedAt);
+    if (durationMs <= SLOW_HOOK_MS) return;
+    this.logger.info(
+      {
+        pluginId: call.pluginId,
+        hook: call.name,
+        kind: call.kind,
+        durationMs,
+        ok,
+        ...describeHookSubject(call.name, call.input),
+      },
+      "Plugin hook slow",
+    );
   }
 
   async getProviderCatalogCacheKey(

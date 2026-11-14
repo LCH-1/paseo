@@ -918,6 +918,9 @@ test("concurrent host queries share one discovery and one fetch per account", as
 /** Lets work a query started behind its answer finish. */
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+/** Resolves after a timer, so fake timers can time a source call. */
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 test("host discovery is reused while its reports are cached and renewed before they are fetched again", async () => {
   let now = 0;
   let login = "first";
@@ -1304,7 +1307,7 @@ test("each renewal logs one line with how long discovery and fetching took", asy
   ]);
 });
 
-test("a renewal that lists no account is logged at debug unless its discovery was slow", async () => {
+test("a renewal that lists no account is logged at debug unless a discovery took over 500ms", async () => {
   let now = 0;
   let discoveryMs = 30;
   const info: unknown[][] = [];
@@ -1332,17 +1335,221 @@ test("a renewal that lists no account is logged at debug unless its discovery wa
   const quiet = { group: "unused", reason: "expired", discoveryMs: 30, fetchMs: 0, reports: 0 };
   expect(debug).toEqual([[quiet, "Usage source group renewed"]]);
   expect(info).toEqual([]);
-  // A store that takes a second to say it holds nothing is still a cost worth reading.
-  discoveryMs = 1_000;
+  // A store that takes over half a second to say it holds nothing is still a cost worth reading.
+  discoveryMs = 600;
   await registry.listReports({ forceRefresh: true });
   await settle();
   expect(info).toEqual([
     [
-      { group: "unused", reason: "forced", discoveryMs: 1_000, fetchMs: 0, reports: 0 },
+      {
+        group: "unused",
+        reason: "forced",
+        discoveryMs: 600,
+        fetchMs: 0,
+        reports: 0,
+        slowCalls: [
+          { sourceId: "unused", phase: "discover", scope: "global", durationMs: 600, ok: true },
+        ],
+      },
       "Usage source group renewed",
     ],
   ]);
   expect(debug).toHaveLength(1);
+});
+
+test("a renewal names the source and phase of each call that took over 500ms", async () => {
+  vi.useFakeTimers({ now: 0 });
+  try {
+    const lines: unknown[][] = [];
+    const registry = new UsageSourceRegistry(() => Date.now(), 300_000, {
+      warn: () => {},
+      info: (...args: unknown[]) => {
+        lines.push(args);
+      },
+    });
+    const available = { status: "available", windows: [] };
+    registry.register({
+      ...source({
+        id: "claude",
+        discover: async () => {
+          await delay(700);
+          return [{ key: "work", label: "someone@example.com", input: { token: "work-token" } }];
+        },
+        fetch: async () => {
+          await delay(900);
+          return available;
+        },
+      }),
+      cacheGroup: "claude-generation",
+    });
+    registry.register({
+      ...source({
+        id: "claude-windows",
+        discover: async () => {
+          await delay(100);
+          return [{ key: "home", input: { token: "home-token" } }];
+        },
+        fetch: async () => {
+          await delay(200);
+          return available;
+        },
+      }),
+      cacheGroup: "claude-generation",
+    });
+
+    const listed = registry.listReports();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await listed;
+
+    expect(lines).toEqual([
+      [
+        {
+          group: "claude-generation",
+          reason: "expired",
+          discoveryMs: 700,
+          fetchMs: 900,
+          reports: 2,
+          slowCalls: [
+            { sourceId: "claude", phase: "discover", scope: "global", durationMs: 700, ok: true },
+            { sourceId: "claude", phase: "fetch", durationMs: 900, ok: true },
+          ],
+        },
+        "Usage source group renewed",
+      ],
+    ]);
+    expect(JSON.stringify(lines)).not.toMatch(/someone@example.com|work-token|home-token/);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a session discovery or a fetch no renewal started logs its own line when over 500ms", async () => {
+  vi.useFakeTimers({ now: 0 });
+  try {
+    const lines: unknown[][] = [];
+    const registry = new UsageSourceRegistry(
+      () => Date.now(),
+      300_000,
+      {
+        warn: () => {},
+        info: (...args: unknown[]) => {
+          lines.push(args);
+        },
+      },
+      {
+        hasAgent: () => true,
+        usageSession: () => ({ provider: "claude", sessionKey: "launch-1", env: {} }),
+      },
+    );
+    registry.register(
+      source({
+        id: "claude",
+        discover: async () => {
+          await delay(650);
+          return [{ key: "acct-7", label: "someone@example.com", input: { token: "secret" } }];
+        },
+        fetch: async () => {
+          await delay(1_200);
+          return { status: "available", windows: [] };
+        },
+      }),
+    );
+    registry.register(
+      source({
+        id: "codex",
+        discover: async () => {
+          await delay(100);
+          return [{ key: "acct-8", input: { token: "other-secret" } }];
+        },
+        fetch: async () => {
+          await delay(800);
+          throw new Error("Usage endpoint rejected token other-secret");
+        },
+      }),
+    );
+
+    const listed = registry.listReports({ agentId: "agent-1" });
+    await vi.advanceTimersByTimeAsync(3_000);
+    await listed;
+
+    expect(lines).toEqual([
+      [
+        { sourceId: "claude", phase: "discover", scope: "session", durationMs: 650, ok: true },
+        "Usage source call slow",
+      ],
+      [{ sourceId: "codex", phase: "fetch", durationMs: 800, ok: false }, "Usage source call slow"],
+      [
+        { sourceId: "claude", phase: "fetch", durationMs: 1_200, ok: true },
+        "Usage source call slow",
+      ],
+    ]);
+    expect(JSON.stringify(lines)).not.toMatch(/acct-|someone@example.com|secret/);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("slow renewals of an agent's report behind the host's polls are folded into a line an hour", async () => {
+  let now = 0;
+  const lines: unknown[][] = [];
+  const registry = new UsageSourceRegistry(
+    () => now,
+    300_000,
+    {
+      warn: () => {},
+      info: (...args: unknown[]) => {
+        lines.push(args);
+      },
+    },
+    {
+      hasAgent: () => true,
+      usageSession: () => ({ provider: "claude", env: {}, sessionKey: "launch" }),
+    },
+  );
+  let agentFetches = 0;
+  registry.register({
+    id: "claude",
+    label: "Claude",
+    // The agent runs under a login the host does not list, so no host renewal fetches its report.
+    discover: async (scope) =>
+      scope.kind === "global"
+        ? [{ key: "host", input: { token: "host-token" } }]
+        : [{ key: "agent-only", label: "someone@example.com", input: { token: "agent-token" } }],
+    fetch: async (input) => {
+      if (JSON.stringify(input).includes("agent-token")) {
+        agentFetches++;
+        await settle();
+        now += 700;
+      }
+      return { status: "available", windows: [] };
+    },
+  });
+  await registry.listReports({ agentId: "agent" });
+  // The app's sidebar asks for the host's usage once a minute; each answer renews the agent's
+  // report behind it once the report is in its window's last minute.
+  for (let minute = 1; minute <= 126; minute++) {
+    now = Math.max(now, minute * 60_000);
+    await registry.listReports();
+    for (let step = 0; step < 4; step++) await settle();
+  }
+
+  const fetch = { sourceId: "claude", phase: "fetch", ok: true };
+  expect(agentFetches).toBe(26);
+  expect(lines.filter(([, msg]) => msg !== "Usage source group renewed")).toEqual([
+    // The query that first asked for the agent's report waited for it.
+    [{ ...fetch, durationMs: 700 }, "Usage source call slow"],
+    // Nobody waited for a renewal behind an answer: the first is named, then an hour at a time.
+    [{ ...fetch, durationMs: 700, background: true }, "Usage source call slow"],
+    [
+      { ...fetch, background: true, count: 13, p50Ms: 700, maxMs: 700, windowMs: 3_659_300 },
+      "Usage source call slow summary",
+    ],
+    [
+      { ...fetch, background: true, count: 12, p50Ms: 700, maxMs: 700, windowMs: 3_600_000 },
+      "Usage source call slow summary",
+    ],
+  ]);
+  expect(JSON.stringify(lines)).not.toMatch(/agent-only|someone@example.com|token/);
 });
 
 test("an account added to the host appears on a forced refresh or once the cache window ends", async () => {
