@@ -836,8 +836,13 @@ describe("releasing retained history", () => {
     };
   }
 
-  function ownerAnsweringLatestTail(): { owner: ViewedTimelineOwner; tailFetches: () => number } {
+  function ownerAnsweringLatestTail(options: { deferred?: boolean } = {}): {
+    owner: ViewedTimelineOwner;
+    tailFetches: () => number;
+    answerTail: () => void;
+  } {
     let fetches = 0;
+    const waiting: (() => void)[] = [];
     let owner!: ViewedTimelineOwner;
     const replica = createTimelineReplica({
       serverId: SERVER_ID,
@@ -855,6 +860,7 @@ describe("releasing retained history", () => {
         fetchPage: async () => ({ hasNewer: false, endCursor: null }),
         fetchLatestTail: async () => {
           fetches += 1;
+          if (options.deferred) await new Promise<void>((resolve) => waiting.push(resolve));
           owner.applyTimelineResponse(latestPage());
           return { hasNewer: false, endCursor: { epoch: "epoch-1", seq: HISTORY_ROWS } };
         },
@@ -862,7 +868,7 @@ describe("releasing retained history", () => {
         schedule: () => () => undefined,
       },
     });
-    return { owner, tailFetches: () => fetches };
+    return { owner, tailFetches: () => fetches, answerTail: () => waiting.shift()?.() };
   }
 
   function timeline() {
@@ -874,7 +880,7 @@ describe("releasing retained history", () => {
     applyLongSyncedHistory();
     const { owner, tailFetches } = ownerAnsweringLatestTail();
 
-    await owner.releaseRetainedHistory(AGENT_ID);
+    await expect(owner.releaseRetainedHistory(AGENT_ID)).resolves.toBe(true);
 
     const released = timeline();
     expect(tailFetches()).toBe(1);
@@ -883,6 +889,61 @@ describe("releasing retained history", () => {
     expect(released.items).toHaveLength(PAGE_ROWS);
     expect(released.items.at(-1)).toMatchObject({ kind: "assistant_message", text: "reply 1200" });
     expect(released.range).toMatchObject({ startSeq: HISTORY_ROWS - PAGE_ROWS + 1 });
+    owner.dispose();
+  });
+
+  it("applies a release's page as an ordinary tail once a view shows the chat again", async () => {
+    useSessionStore.getState().initializeSession(SERVER_ID, null);
+    applyLongSyncedHistory();
+    const { owner, tailFetches, answerTail } = ownerAnsweringLatestTail({ deferred: true });
+
+    const release = owner.releaseRetainedHistory(AGENT_ID);
+    await expect.poll(tailFetches).toBe(1);
+    const letGo = owner.retainHistory(AGENT_ID);
+    answerTail();
+
+    await expect(release).resolves.toBe(false);
+    const current = timeline();
+    if (current.status !== "synced") throw new Error("expected a synced timeline");
+    expect(current.items).toHaveLength(HISTORY_ROWS);
+    letGo();
+    owner.dispose();
+  });
+
+  it("starts no release while a view shows the chat", async () => {
+    useSessionStore.getState().initializeSession(SERVER_ID, null);
+    applyLongSyncedHistory();
+    const { owner, tailFetches } = ownerAnsweringLatestTail();
+    const letGoFirst = owner.retainHistory(AGENT_ID);
+    const letGoSecond = owner.retainHistory(AGENT_ID);
+
+    await expect(owner.releaseRetainedHistory(AGENT_ID)).resolves.toBe(false);
+    letGoFirst();
+    letGoFirst();
+    await expect(owner.releaseRetainedHistory(AGENT_ID)).resolves.toBe(false);
+    expect(tailFetches()).toBe(0);
+
+    letGoSecond();
+    await expect(owner.releaseRetainedHistory(AGENT_ID)).resolves.toBe(true);
+    expect(tailFetches()).toBe(1);
+    owner.dispose();
+  });
+
+  it("shares one release among the views of the same chat that ask while it is on its way", async () => {
+    useSessionStore.getState().initializeSession(SERVER_ID, null);
+    applyLongSyncedHistory();
+    const { owner, tailFetches, answerTail } = ownerAnsweringLatestTail({ deferred: true });
+
+    const first = owner.releaseRetainedHistory(AGENT_ID);
+    const second = owner.releaseRetainedHistory(AGENT_ID);
+    await expect.poll(tailFetches).toBe(1);
+    answerTail();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+    expect(tailFetches()).toBe(1);
+    const released = timeline();
+    if (released.status !== "synced") throw new Error("expected a synced timeline");
+    expect(released.items).toHaveLength(PAGE_ROWS);
     owner.dispose();
   });
 
