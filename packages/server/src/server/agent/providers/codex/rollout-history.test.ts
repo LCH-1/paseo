@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
   CodexHistorySlicer,
@@ -155,4 +155,74 @@ describe("Codex rollout history refuses what it cannot place", () => {
 
     await expect(read(threadId)).rejects.toBeInstanceOf(CodexRolloutUnavailableError);
   });
+});
+
+describe("Codex rollout history skips model context unparsed", () => {
+  const threadId = "01a50000-0000-7000-8000-0000000000cc";
+  const READ_CHUNK_BYTES = 256 * 1024;
+
+  /** One turn among model-context lines; `fillerBytes` moves where the 1MB line starts. */
+  function build(fillerBytes: number) {
+    const builder = new RolloutBuilder(0, 0x01a500000000).line("session_meta", {
+      session_id: threadId,
+      id: threadId,
+      timestamp: "2026-11-04T00:00:00.000Z",
+      cwd: "C:\\fixture\\repo",
+      originator: "paseo_fixture",
+      cli_version: "0.167.0",
+      model_provider: "openai",
+      base_instructions: null,
+      history_mode: "paginated",
+    });
+    builder.turnStarted("turn-1");
+    builder.line("response_item", {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "f".repeat(fillerBytes) }],
+    });
+    const largeLineStart = builder.byteLength;
+    builder.line("response_item", {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "m".repeat(1_000_000) }],
+    });
+    builder.item(threadId, "turn-1", {
+      type: "UserMessage",
+      id: "user-1",
+      content: [{ type: "text", text: "hello", text_elements: [] }],
+    });
+    builder.turnComplete("turn-1");
+    return { builder, largeLineStart };
+  }
+
+  test.each([1, 60])(
+    "does not parse a large line that starts %d bytes before a read chunk ends",
+    async (bytesBeforeChunkEnd) => {
+      const unpadded = build(0).largeLineStart;
+      const target =
+        Math.ceil((unpadded + bytesBeforeChunkEnd) / READ_CHUNK_BYTES) * READ_CHUNK_BYTES -
+        bytesBeforeChunkEnd;
+      const { builder, largeLineStart } = build(target - unpadded);
+      expect(largeLineStart % READ_CHUNK_BYTES).toBe(READ_CHUNK_BYTES - bytesBeforeChunkEnd);
+      const file = fixtureRolloutPath(codexHome, threadId);
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, builder.text());
+
+      const parsedLengths: number[] = [];
+      const parse = vi.spyOn(JSON, "parse");
+      let result: Awaited<ReturnType<typeof read>>;
+      try {
+        result = await read(threadId);
+      } finally {
+        parsedLengths.push(...parse.mock.calls.map(([text]) => String(text).length));
+        parse.mockRestore();
+      }
+
+      expect(result.thread.turns).toHaveLength(1);
+      expect(result.thread.turns[0]?.items).toEqual([
+        expect.objectContaining({ type: "userMessage", id: "user-1" }),
+      ]);
+      expect(Math.max(0, ...parsedLengths)).toBeLessThan(100_000);
+    },
+  );
 });

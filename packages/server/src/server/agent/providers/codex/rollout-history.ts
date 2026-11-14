@@ -489,8 +489,8 @@ const HISTORY_EVENT_TYPES = new Set([
  * context, compaction snapshots and usage records are two thirds of a rollout's bytes and its
  * largest lines; parsing them only to skip them doubled the read.
  */
-function skippedLineRecord(first: Buffer): JsonRecord | null {
-  const match = LINE_PREFIX.exec(first.toString("latin1", 0, LINE_PREFIX_BYTES));
+function skippedLineRecord(prefix: string): JsonRecord | null {
+  const match = LINE_PREFIX.exec(prefix);
   if (!match) return null;
   const [, timestamp, ordinal, type, eventType] = match;
   if (type === "session_meta") return null;
@@ -499,9 +499,22 @@ function skippedLineRecord(first: Buffer): JsonRecord | null {
   return { timestamp, ordinal: Number(ordinal), type, payload: { type: eventType } };
 }
 
+/**
+ * The line's first bytes, one character each. A line that starts just before the end of a read
+ * chunk continues in the next ones, and its prefix must too, or the line is parsed whole.
+ */
+function linePrefix(parts: Buffer[]): string {
+  let prefix = "";
+  for (const part of parts) {
+    prefix += part.toString("latin1", 0, LINE_PREFIX_BYTES - prefix.length);
+    if (prefix.length >= LINE_PREFIX_BYTES) break;
+  }
+  return prefix;
+}
+
 /** A complete line as JSON, or undefined where Codex would skip it as blank or malformed. */
 function decodeLine(parts: Buffer[], parseAll: boolean): unknown {
-  const skipped = parseAll ? null : skippedLineRecord(parts[0]!);
+  const skipped = parseAll ? null : skippedLineRecord(linePrefix(parts));
   if (skipped) return skipped;
   const bytes = parts.length === 1 ? parts[0]! : Buffer.concat(parts);
   let text: string;
