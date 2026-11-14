@@ -181,6 +181,44 @@ describe("plugin build cache", () => {
     expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("from ts");
   });
 
+  // esbuild bundles every file a template or concatenated import may name, a glob such as
+  // ./data/**/*.js, and resolves that glob without asking any plugin.
+  const templateImport = "import(`./data/${name}.js`)";
+  const concatenatedRequire = 'require("./data/" + name + ".js")';
+  it.each([
+    { call: templateImport, existing: "a/first.js", empty: [], added: "b/second.js" },
+    { call: templateImport, existing: "first.js", empty: ["c"], added: "c/second.js" },
+    { call: concatenatedRequire, existing: "first.js", empty: ["c"], added: "c/second.js" },
+  ])(
+    "rebuilds when a file $added appears that $call in a module the entry imports takes in, next to $existing",
+    async ({ call, existing, empty, added }) => {
+      const plugin = await createPlugin();
+      const data = path.join(plugin.directory, "server", "data");
+      for (const directory of [path.dirname(existing), ...empty]) {
+        await mkdir(path.join(data, directory), { recursive: true });
+      }
+      await writeFile(path.join(data, existing), 'export const marker = "first-match";');
+      await writeFile(
+        path.join(plugin.directory, "server", "load.ts"),
+        `export const load = (name: string) => ${call};`,
+      );
+      await writeFile(
+        plugin.server,
+        'import { load } from "./server/load"; export default () => load;',
+      );
+      await settle(plugin.directory);
+      const { cache } = await createCache();
+      expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("first-match");
+
+      await mkdir(path.join(data, path.dirname(added)), { recursive: true });
+      await writeFile(path.join(data, added), 'export const marker = "second-match";');
+      const uncached = await compilePlugin(plugin);
+
+      expect(uncached.serverBundle).toContain("second-match");
+      expect(await compilePlugin(plugin, { cache })).toEqual(uncached);
+    },
+  );
+
   it("rebuilds when the plugin tsconfig appears or changes", async () => {
     const plugin = await createPlugin();
     await writeFile(plugin.server, `${CLASS_FIELD_SOURCE} export default () => box;`);

@@ -25,7 +25,8 @@ import path from "node:path";
 // bundling; any difference, an unreadable or damaged entry, or a different compiler,
 // daemon, esbuild, TypeScript, or Node version falls back to a full build, which also
 // re-runs the boundary check. A build is not kept when a config that applies to it sends
-// imports through directories nothing else records (see REDIRECTING_OPTIONS).
+// imports through directories nothing else records (see REDIRECTING_OPTIONS), nor, by the
+// compiler, when it bundles a glob that a template or concatenated import makes.
 
 const FORMAT = "paseo-plugin-build-cache/2";
 /** Bump when what a cached boundary check accepts changes without a compiler source change. */

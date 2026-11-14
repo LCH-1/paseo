@@ -475,6 +475,18 @@ function checkSharedDependencies(inputs: Metafile["inputs"], pluginDirectory: st
   }
 }
 
+/**
+ * Whether the build bundled a glob. A template or concatenated import such as
+ * import(`./data/${name}.js`) takes in every file that may match (./data/**\/*.js), which
+ * esbuild finds without asking any plugin, so no lookup records the directories searched
+ * and a file added under them would go unseen. Such a build is not cached.
+ */
+function bundlesGlob(inputs: Metafile["inputs"]): boolean {
+  return Object.values(inputs).some(({ imports }) =>
+    imports.some((dependency) => dependency.path.includes("*")),
+  );
+}
+
 async function compileTarget(
   entryPath: string,
   target: PluginBuildTarget,
@@ -545,7 +557,7 @@ async function compileTarget(
   const output = result.outputFiles[0]?.text;
   if (!output) throw new Error(`Plugin ${target} compilation produced no output`);
   const bundle = wrapCommonJsBundle(makeHermesInteropEager(output));
-  if (recorder) {
+  if (recorder && !bundlesGlob(result.metafile.inputs)) {
     const { readFiles, configFiles } = lookups;
     const directories = [...lookups.directories, ...(await packageLookups(lookups.packages))];
     for (const input of Object.keys(result.metafile.inputs)) readFiles.add(path.resolve(input));
