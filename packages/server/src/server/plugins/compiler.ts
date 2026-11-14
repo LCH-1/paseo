@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { lstat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, readFile } from "node:fs/promises";
 import { createRequire, isBuiltin } from "node:module";
 import path from "node:path";
 import type { PluginImportKind } from "./compiler-imports.js";
@@ -177,7 +178,20 @@ interface PluginBuildLookups {
   directories: Set<string>;
   /** Each package directory a package import may be found at, with the subpath directories in it. */
   packages: Map<string, Set<string>>;
+  /** SHA-256 of the exact bytes esbuild bundled for each source file it loaded, by absolute path. */
+  loaded: Map<string, string>;
 }
+
+const SOURCE_LOADERS = {
+  ".ts": "ts",
+  ".mts": "ts",
+  ".cts": "ts",
+  ".tsx": "tsx",
+  ".js": "js",
+  ".mjs": "js",
+  ".cjs": "js",
+  ".jsx": "jsx",
+} as const;
 
 function recordRelativeLookup(
   lookups: PluginBuildLookups,
@@ -357,9 +371,22 @@ function createRuntimeBoundaryPlugin(
         }
         return null;
       }
-      buildContext.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, (args) =>
-        checkSourceImports(args.path, target),
-      );
+      buildContext.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
+        const boundaryError = await checkSourceImports(args.path, target);
+        if (boundaryError) return boundaryError;
+        const extension = path.extname(args.path).toLowerCase() as keyof typeof SOURCE_LOADERS;
+        const loader = SOURCE_LOADERS[extension];
+        if (args.namespace !== "file" || !loader) return null;
+        // esbuild bundles exactly these bytes, so the cache records their hash instead of what
+        // the file holds after the build: a replacement that keeps the old modification time
+        // can no longer be stored as this bundle's input.
+        const contents = await readFile(args.path);
+        lookups.loaded.set(
+          path.resolve(args.path),
+          createHash("sha256").update(contents).digest("hex"),
+        );
+        return { contents, loader };
+      });
       buildContext.onResolve({ filter: /.*/ }, async (args) => {
         if (args.kind === "entry-point") return null;
         if (args.pluginData === boundaryResolution) return null;
@@ -546,6 +573,7 @@ async function compileTarget(
     configFiles: new Set(),
     directories: new Set(),
     packages: new Map(),
+    loaded: new Map(),
   };
   const result = await esbuild.build({
     ...options,
@@ -561,7 +589,7 @@ async function compileTarget(
     const { readFiles, configFiles } = lookups;
     const directories = [...lookups.directories, ...(await packageLookups(lookups.packages))];
     for (const input of Object.keys(result.metafile.inputs)) readFiles.add(path.resolve(input));
-    await recorder.store(bundle, readFiles, configFiles, directories);
+    await recorder.store(bundle, readFiles, configFiles, directories, lookups.loaded);
   }
   return bundle;
 }

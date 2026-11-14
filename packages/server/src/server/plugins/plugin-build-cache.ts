@@ -79,6 +79,11 @@ export interface PluginBuildRecorder {
     files: Iterable<string>,
     probes?: Iterable<string>,
     directories?: Iterable<string>,
+    /**
+     * SHA-256 of the bytes the bundle was built from, by absolute path. A file that now
+     * holds other bytes is not stored, even when its modification time was kept.
+     */
+    loaded?: ReadonlyMap<string, string>,
   ): Promise<boolean>;
 }
 
@@ -496,7 +501,12 @@ export function createPluginBuildCache(options: PluginBuildCacheOptions): Plugin
   async function store(
     key: string,
     bundle: string,
-    recorded: { files: Iterable<string>; probes: Iterable<string>; directories: Iterable<string> },
+    recorded: {
+      files: Iterable<string>;
+      probes: Iterable<string>;
+      directories: Iterable<string>;
+      loaded: ReadonlyMap<string, string>;
+    },
     startedAt: number,
     before: ReadonlyMap<string, string | null>,
   ): Promise<boolean> {
@@ -536,6 +546,15 @@ export function createPluginBuildCache(options: PluginBuildCacheOptions): Plugin
         }),
       );
       if (changed.includes(true)) return false;
+      const recordedDigests = new Map(
+        dependencies.map((dependency, index) => [dependencyId(dependency), current[index]]),
+      );
+      for (const [file, bundled] of recorded.loaded) {
+        const target = path.resolve(file);
+        const id = dependencyId(["file", target, null]);
+        const value = recordedDigests.has(id) ? recordedDigests.get(id) : await fileDigest(target);
+        if (!value || value.slice(0, value.indexOf(":")) !== bundled) return false;
+      }
       const body = Buffer.from(bundle, "utf8");
       const header: CacheHeader = {
         format: FORMAT,
@@ -627,8 +646,8 @@ export function createPluginBuildCache(options: PluginBuildCacheOptions): Plugin
         if (values) before.set(dependencyId(probe), values[index] ?? null);
       });
       return {
-        store: (bundle, files, probes = [], directories = []) =>
-          store(key, bundle, { files, probes, directories }, startedAt, before),
+        store: (bundle, files, probes = [], directories = [], loaded = new Map()) =>
+          store(key, bundle, { files, probes, directories, loaded }, startedAt, before),
       };
     },
   };

@@ -842,6 +842,39 @@ describe("plugin build cache", () => {
     expect(await entries(directory)).toEqual([]);
   });
 
+  it("does not keep a build whose input was replaced mid-build with its old modification time", async () => {
+    const plugin = await createPlugin();
+    const { cache } = await createCache();
+    const labels = path.join(plugin.directory, "shared", "labels.ts");
+    const kept = (await stat(labels)).mtime;
+    let replaced = false;
+    // Copy-Item, cp -p and rsync -a keep the source's times, so this looks like no change.
+    const racing: Cache = {
+      ...cache,
+      async begin(key, pluginDirectory) {
+        const recorder = await cache.begin(key, pluginDirectory);
+        return {
+          async store(...args) {
+            if (!replaced) {
+              replaced = true;
+              await writeFile(labels, 'export const label = "second label";');
+              await utimes(labels, kept, kept);
+            }
+            return recorder.store(...args);
+          },
+        };
+      },
+    };
+
+    await compilePlugin(plugin, { cache: racing });
+    const next = await compilePlugin(plugin, { cache });
+
+    expect(replaced).toBe(true);
+    expect(next.serverBundle).toContain("second label");
+    expect(next.clientBundle).toContain("second label");
+    expect(await compilePlugin(plugin)).toEqual(next);
+  });
+
   it("drops entries past the size cap or age, oldest first, and stale temporary files", async () => {
     const plugin = await createPlugin();
     const directory = await temporaryDirectory("paseo-plugin-builds-");
