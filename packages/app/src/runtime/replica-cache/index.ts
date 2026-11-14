@@ -69,7 +69,15 @@ export interface CachedTimeline {
 }
 
 const PERSIST_DELAY_MS = 1_000;
+// A hidden window paints nothing and may stay hidden for hours while agents stream, so its
+// replica writes are batched. Becoming hidden or visible again, and closing, flush at once.
+const HIDDEN_PERSIST_DELAY_MS = 30_000;
 const MAX_TIMELINE_ITEMS = 50;
+// A tool's text above this size (a long shell output, a sub-agent log that keeps growing) is
+// stored as its last STORED_TOOL_TEXT_KEEP_CHARS characters. The row then claims no coverage,
+// so reopening the agent refetches the full item from the daemon instead of resuming from it.
+const STORED_TOOL_TEXT_LIMIT_CHARS = 100 * 1024;
+const STORED_TOOL_TEXT_KEEP_CHARS = 16 * 1024;
 const MAX_CACHE_BYTES = 32 * 1024 * 1024;
 const IsoDateSchema = z.iso.datetime();
 const TimelinePositionSchema = z.strictObject({
@@ -416,12 +424,68 @@ function timelineBase(item: StreamItem) {
   };
 }
 
+function omittedTextNotice(omittedChars: number): string {
+  return `… ${omittedChars} earlier characters are not kept in the local cache; the full text reloads from the daemon.\n`;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+function truncateStoredToolText(text: string): string {
+  if (text.length <= STORED_TOOL_TEXT_LIMIT_CHARS) return text;
+  let start = text.length - STORED_TOOL_TEXT_KEEP_CHARS;
+  // Start on a line when one begins nearby, and never inside a surrogate pair.
+  const lineStart = text.indexOf("\n", start);
+  if (lineStart >= 0 && lineStart - start < 1024 && lineStart + 1 < text.length) {
+    start = lineStart + 1;
+  } else if (isLowSurrogate(text.charCodeAt(start))) {
+    start += 1;
+  }
+  return omittedTextNotice(start) + text.slice(start);
+}
+
+/** Copies only the containers holding text over the stored limit; returns the input otherwise. */
+function truncateStoredToolValue<Value>(value: Value, depth = 0): Value {
+  if (typeof value === "string") {
+    return truncateStoredToolText(value) as Value;
+  }
+  if (depth >= 8 || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    let next: unknown[] | null = null;
+    value.forEach((entry, index) => {
+      const truncated = truncateStoredToolValue(entry, depth + 1);
+      if (truncated !== entry) {
+        next ??= [...value];
+        next[index] = truncated;
+      }
+    });
+    return (next ?? value) as Value;
+  }
+  let next: Record<string, unknown> | null = null;
+  for (const [key, entry] of Object.entries(value)) {
+    const truncated = truncateStoredToolValue(entry, depth + 1);
+    if (truncated !== entry) {
+      next ??= { ...(value as Record<string, unknown>) };
+      next[key] = truncated;
+    }
+  }
+  return (next ?? value) as Value;
+}
+
+function hasOversizedToolText(value: unknown, depth = 0): boolean {
+  if (typeof value === "string") return value.length > STORED_TOOL_TEXT_LIMIT_CHARS;
+  if (depth >= 8 || value === null || typeof value !== "object") return false;
+  const entries = Array.isArray(value) ? value : Object.values(value);
+  return entries.some((entry) => hasOversizedToolText(entry, depth + 1));
+}
+
 function serializeAgentToolCall(data: AgentToolCallData): StoredToolCall {
   const base = {
     type: "tool_call" as const,
     callId: data.callId,
     name: data.name,
-    detail: data.detail,
+    detail: truncateStoredToolValue(data.detail),
     ...(data.metadata ? { metadata: data.metadata } : {}),
     ...(data.agentMessage ? { agentMessage: data.agentMessage } : {}),
   };
@@ -747,7 +811,7 @@ function isTimelineItemStoredLosslessly(item: StreamItem): boolean {
     case "user_message":
       return (item.images?.length ?? 0) === 0 && (item.attachments?.length ?? 0) === 0;
     case "tool_call":
-      return item.payload.source === "agent";
+      return item.payload.source === "agent" && !hasOversizedToolText(item.payload.data.detail);
     default:
       return true;
   }
@@ -757,7 +821,18 @@ function serializeTimeline(timeline: CachedTimeline): StoredTimeline | null {
   const canonicalItems = timeline.items.filter(
     (item) => item.kind !== "user_message" || !isUnreconciledLocalUserMessage(item),
   );
-  const items = canonicalItems.map(serializeTimelineItem).filter((item) => item !== null);
+  // Only the newest rows are stored, so older ones are never serialized. Coverage needs every
+  // row stored, which only a timeline of at most MAX_TIMELINE_ITEMS rows can satisfy.
+  const items: StoredTimelineItem[] = [];
+  for (
+    let index = canonicalItems.length - 1;
+    index >= 0 && items.length < MAX_TIMELINE_ITEMS;
+    index -= 1
+  ) {
+    const item = serializeTimelineItem(canonicalItems[index]!);
+    if (item) items.push(item);
+  }
+  items.reverse();
   const range = timeline.range;
   const canPersistCoverage =
     range !== null &&
@@ -774,7 +849,7 @@ function serializeTimeline(timeline: CachedTimeline): StoredTimeline | null {
     canonicalItems.some((item) => item.timelineCursor?.seq === range.endSeq);
   return {
     agentId: timeline.agentId,
-    items: items.slice(-MAX_TIMELINE_ITEMS),
+    items,
     range: canPersistCoverage
       ? { epoch: range.epoch, startSeq: range.startSeq, endSeq: range.endSeq }
       : null,
@@ -911,6 +986,7 @@ export class ReplicaCache {
   private readonly maxBytes: number;
   private totalBytes = 0;
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private appVisible = true;
   private writeQueue: Promise<void> = Promise.resolve();
   private preparePromise: Promise<void> | null = null;
   private storedIndexPromise: Promise<void> | null = null;
@@ -1225,6 +1301,15 @@ export class ReplicaCache {
     await this.syncPending();
   }
 
+  /**
+   * Hidden windows batch their writes; the transition itself, either way, writes what is
+   * pending at once so nothing accepted waits on the longer delay.
+   */
+  setAppVisible(visible: boolean): Promise<void> {
+    this.appVisible = visible;
+    return this.flush();
+  }
+
   /** Resolves to whether every pending change reached the store. */
   private async syncPending(): Promise<boolean> {
     const persisted = await this.persist();
@@ -1249,7 +1334,7 @@ export class ReplicaCache {
         try {
           await this.prepareStore();
           await this.ensureStoredIndex();
-          const changes = this.materializePendingChanges(pending);
+          const changes = this.withoutUnchangedRows(this.materializePendingChanges(pending));
           const { changes: boundedChanges, evicted } = await this.fitChangesToBudget(changes);
           if (boundedChanges.upserts.length > 0 || boundedChanges.deletes.length > 0) {
             await this.rowStore.apply(boundedChanges);
@@ -1369,6 +1454,14 @@ export class ReplicaCache {
       }
     }
     return { upserts, deletes: [...deletes.values()] };
+  }
+
+  /** A row whose stored payload is identical is not written again. */
+  private withoutUnchangedRows(changes: ReplicaRowChanges): ReplicaRowChanges {
+    const upserts = changes.upserts.filter(
+      (row) => this.storedRows.get(row.serverId)?.get(rowKey(row))?.payload !== row.payload,
+    );
+    return upserts.length === changes.upserts.length ? changes : { ...changes, upserts };
   }
 
   private materializeUpsert(upsert: StructuredReplicaUpsert): ReplicaRow | null {
@@ -1593,9 +1686,12 @@ export class ReplicaCache {
 
   private schedulePersist(): void {
     if (this.persistTimer) return;
-    this.persistTimer = setTimeout(() => {
-      this.persistTimer = null;
-      void this.flushPending();
-    }, PERSIST_DELAY_MS);
+    this.persistTimer = setTimeout(
+      () => {
+        this.persistTimer = null;
+        void this.flushPending();
+      },
+      this.appVisible ? PERSIST_DELAY_MS : HIDDEN_PERSIST_DELAY_MS,
+    );
   }
 }
