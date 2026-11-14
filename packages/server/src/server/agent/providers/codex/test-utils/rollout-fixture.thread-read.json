@@ -1,0 +1,1762 @@
+{
+  "codexVersion": "0.167.0",
+  "threads": {
+    "01a15744-2088-7000-8000-000000000001": {
+      "turns": [
+        {
+          "id": "turn-r1",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-r1-user",
+              "clientId": "client-message-1",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Fix the failing build [image]",
+                  "text_elements": [
+                    {
+                      "byteRange": {
+                        "start": 22,
+                        "end": 29
+                      },
+                      "placeholder": "[image]"
+                    }
+                  ]
+                },
+                {
+                  "type": "localImage",
+                  "detail": null,
+                  "path": "C:\\fixture\\repo\\screenshot.png"
+                },
+                {
+                  "type": "image",
+                  "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==",
+                  "detail": "high"
+                }
+              ],
+              "startedAtMs": 1792465449000,
+              "completedAtMs": 1792465449500
+            },
+            {
+              "type": "reasoning",
+              "id": "item-r1-reasoning",
+              "summary": ["Reading the build log", "Checking the config"],
+              "content": [],
+              "startedAtMs": 1792465450000,
+              "completedAtMs": 1792465450500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r1-commentary",
+              "text": "Looking at the build first.",
+              "phase": "commentary",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465451000,
+              "completedAtMs": 1792465451500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r1-grep",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "bash -lc \"grep -n \\\"api_key = [REDACTED_SECRET]\" src/app.ts && echo 'done'\"",
+              "cwd": "C:\\fixture\\repo",
+              "processId": "4242",
+              "source": "unifiedExecStartup",
+              "status": "completed",
+              "commandActions": [
+                {
+                  "type": "search",
+                  "command": "grep -n \"api_key = [REDACTED_SECRET]\" src/app.ts",
+                  "query": "api_key = [REDACTED_SECRET]",
+                  "path": "src/app.ts"
+                },
+                {
+                  "type": "unknown",
+                  "command": "echo 'done'"
+                }
+              ],
+              "aggregatedOutput": "src/app.ts:3:api_key\ndone\n",
+              "exitCode": 0,
+              "durationMs": 1250,
+              "startedAtMs": 1792465452000,
+              "completedAtMs": 1792465452500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r1-pwsh",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command \"Get-ChildItem 'C:\\\\fixture\\\\repo' | Select-Object -First 2\"",
+              "cwd": "C:\\fixture\\repo",
+              "processId": "4242",
+              "source": "unifiedExecStartup",
+              "status": "failed",
+              "commandActions": [
+                {
+                  "type": "read",
+                  "command": "type src\\b.ts",
+                  "name": "b.ts",
+                  "path": "C:\\fixture\\repo\\src\\b.ts"
+                },
+                {
+                  "type": "read",
+                  "command": "type D:\\other\\c.ts",
+                  "name": "c.ts",
+                  "path": "D:\\other\\c.ts"
+                },
+                {
+                  "type": "listFiles",
+                  "command": "Get-ChildItem",
+                  "path": null
+                }
+              ],
+              "aggregatedOutput": "Access denied\n",
+              "exitCode": 1,
+              "durationMs": 1250,
+              "startedAtMs": 1792465453000,
+              "completedAtMs": 1792465453500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r1-curl",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "curl -H 'Authorization: Bearer [REDACTED_SECRET]' 'https://example.test/a b?x=1&y=$HOME' '' '^caret' 'naïve' [REDACTED_SECRET] '--token=[REDACTED_SECRET]'",
+              "cwd": "\\\\fileserver\\share\\fixture repo",
+              "processId": null,
+              "source": "agent",
+              "status": "completed",
+              "commandActions": [
+                {
+                  "type": "unknown",
+                  "command": "curl -H Authorization: Bearer [REDACTED_SECRET] https://example.test/a b?x=1&y=$HOME  ^caret naïve [REDACTED_SECRET] --token=[REDACTED_SECRET]"
+                }
+              ],
+              "aggregatedOutput": "{}",
+              "exitCode": 0,
+              "durationMs": 5,
+              "startedAtMs": 1792465454000,
+              "completedAtMs": 1792465454500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r1-cat",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "cat ../lib/x.ts",
+              "cwd": "/home/fixture/repo/",
+              "processId": "4242",
+              "source": "unifiedExecStartup",
+              "status": "completed",
+              "commandActions": [
+                {
+                  "type": "read",
+                  "command": "cat ../lib/x.ts",
+                  "name": "x.ts",
+                  "path": "/home/fixture/lib/x.ts"
+                },
+                {
+                  "type": "listFiles",
+                  "command": "ls src",
+                  "path": "src"
+                },
+                {
+                  "type": "search",
+                  "command": "rg secret",
+                  "query": null,
+                  "path": null
+                }
+              ],
+              "aggregatedOutput": null,
+              "exitCode": 0,
+              "durationMs": 1250,
+              "startedAtMs": 1792465455000,
+              "completedAtMs": 1792465455500
+            },
+            {
+              "type": "fileChange",
+              "id": "call-r1-patch",
+              "changes": [
+                {
+                  "path": "C:\\fixture\\repo\\src\\a.ts",
+                  "kind": {
+                    "type": "update",
+                    "move_path": null
+                  },
+                  "diff": "@@ -1 +1 @@\n-a\n+b\n"
+                },
+                {
+                  "path": "C:\\fixture\\repo\\src\\b.ts",
+                  "kind": {
+                    "type": "update",
+                    "move_path": "C:\\fixture\\repo\\src\\c.ts"
+                  },
+                  "diff": "@@ -1 +1 @@\n-old\n+new\n\n\nMoved to: C:\\fixture\\repo\\src\\c.ts"
+                },
+                {
+                  "path": "C:\\fixture\\repo\\src\\gone.ts",
+                  "kind": {
+                    "type": "delete"
+                  },
+                  "diff": "old\n"
+                },
+                {
+                  "path": "C:\\fixture\\repo\\src\\new.ts",
+                  "kind": {
+                    "type": "add"
+                  },
+                  "diff": "export const x = 1;\n"
+                }
+              ],
+              "status": "completed",
+              "startedAtMs": 1792465456000,
+              "completedAtMs": 1792465456500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r1-final",
+              "text": "The build passes now.",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465457000,
+              "completedAtMs": 1792465457500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792465428,
+          "completedAt": 1792465458,
+          "durationMs": 30000
+        },
+        {
+          "id": "turn-r2",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-r2-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Show me the screenshots",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792465460000,
+              "completedAtMs": 1792465460500
+            },
+            {
+              "type": "imageView",
+              "id": "call-r2-view",
+              "path": "C:\\fixture\\repo\\shot one.png",
+              "startedAtMs": 1792465461000,
+              "completedAtMs": 1792465461500
+            },
+            {
+              "type": "mcpToolCall",
+              "id": "call-r2-mcp",
+              "server": "node_repl",
+              "tool": "js",
+              "status": "completed",
+              "arguments": {
+                "code": "render()",
+                "title": "render"
+              },
+              "appContext": null,
+              "mcpAppUi": null,
+              "pluginId": null,
+              "readOnlyHint": true,
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "rendered"
+                  },
+                  {
+                    "type": "image",
+                    "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==",
+                    "mimeType": "image/png"
+                  }
+                ],
+                "structuredContent": null,
+                "_meta": null
+              },
+              "error": null,
+              "durationMs": 20,
+              "startedAtMs": 1792465462000,
+              "completedAtMs": 1792465462500
+            },
+            {
+              "type": "mcpToolCall",
+              "id": "call-r2-mcp-failed",
+              "server": "node_repl",
+              "tool": "js",
+              "status": "failed",
+              "arguments": {
+                "code": "throw new Error()"
+              },
+              "appContext": null,
+              "mcpAppUi": null,
+              "pluginId": null,
+              "readOnlyHint": null,
+              "result": null,
+              "error": {
+                "message": "tool crashed"
+              },
+              "durationMs": 1,
+              "startedAtMs": 1792465463000,
+              "completedAtMs": 1792465463500
+            },
+            {
+              "type": "webSearch",
+              "id": "call-r2-search",
+              "query": "codex rollout format",
+              "action": {
+                "type": "search",
+                "query": "codex rollout format",
+                "queries": null
+              },
+              "results": [
+                {
+                  "title": "Rollouts",
+                  "url": "https://example.test/rollouts"
+                }
+              ],
+              "startedAtMs": 1792465464000,
+              "completedAtMs": 1792465464500
+            },
+            {
+              "type": "webSearch",
+              "id": "call-r2-open",
+              "query": "",
+              "action": {
+                "type": "openPage",
+                "url": "https://example.test/page"
+              },
+              "results": null,
+              "startedAtMs": 1792465465000,
+              "completedAtMs": 1792465465500
+            },
+            {
+              "type": "sleep",
+              "id": "call-r2-sleep",
+              "durationMs": 1500,
+              "startedAtMs": 1792465466000,
+              "completedAtMs": 1792465466500
+            },
+            {
+              "type": "imageGeneration",
+              "id": "call-r2-imagegen",
+              "status": "completed",
+              "revisedPrompt": "a blue square",
+              "result": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==",
+              "transparentBackground": null,
+              "failure": null,
+              "generationId": null,
+              "startedAtMs": 1792465467000,
+              "completedAtMs": 1792465467500
+            },
+            {
+              "type": "imageGeneration",
+              "id": "call-r2-imagegen-hosted",
+              "status": "failed",
+              "revisedPrompt": "a red circle",
+              "result": "",
+              "transparentBackground": null,
+              "failure": null,
+              "generationId": null,
+              "startedAtMs": 1792465468000,
+              "completedAtMs": 1792465468500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r2-final",
+              "text": "Here they are.",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465469000,
+              "completedAtMs": 1792465469500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792465440,
+          "completedAt": 1792465470,
+          "durationMs": 30000
+        },
+        {
+          "id": "turn-r3",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-r3-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Ask a helper to investigate",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792465472000,
+              "completedAtMs": 1792465472500
+            },
+            {
+              "type": "collabAgentToolCall",
+              "id": "call-r3-spawn",
+              "tool": "spawnAgent",
+              "status": "completed",
+              "senderThreadId": "01a15744-2088-7000-8000-000000000001",
+              "receiverThreadIds": ["01a15745-0ae8-7000-8000-000000000002"],
+              "prompt": "Investigate the flaky test",
+              "model": "gpt-fixture",
+              "reasoningEffort": "high",
+              "agentsStates": {
+                "01a15745-0ae8-7000-8000-000000000002": {
+                  "status": "completed",
+                  "message": "Found it"
+                }
+              },
+              "startedAtMs": 1792465473000,
+              "completedAtMs": 1792465473500
+            },
+            {
+              "type": "subAgentActivity",
+              "model": "gpt-fixture",
+              "reasoningEffort": "high",
+              "id": "activity-r3-started",
+              "kind": "started",
+              "agentThreadId": "01a15745-0ae8-7000-8000-000000000002",
+              "agentPath": "/root/helper",
+              "startedAtMs": 1792465474000,
+              "completedAtMs": 1792465474500
+            },
+            {
+              "type": "subAgentActivity",
+              "model": null,
+              "reasoningEffort": null,
+              "id": "activity-r3-interacted",
+              "kind": "interacted",
+              "agentThreadId": "01a15745-0ae8-7000-8000-000000000002",
+              "agentPath": "/root/helper",
+              "startedAtMs": 1792465475000,
+              "completedAtMs": 1792465475500
+            },
+            {
+              "type": "collabAgentToolCall",
+              "id": "call-r3-wait",
+              "tool": "wait",
+              "status": "completed",
+              "senderThreadId": "01a15744-2088-7000-8000-000000000001",
+              "receiverThreadIds": ["01a15745-0ae8-7000-8000-000000000002"],
+              "prompt": null,
+              "model": null,
+              "reasoningEffort": null,
+              "agentsStates": {},
+              "startedAtMs": 1792465476000,
+              "completedAtMs": 1792465476500
+            },
+            {
+              "type": "subAgentActivity",
+              "model": null,
+              "reasoningEffort": null,
+              "id": "activity-r3-completed",
+              "kind": "completed",
+              "agentThreadId": "01a15745-0ae8-7000-8000-000000000002",
+              "agentPath": "/root/helper",
+              "startedAtMs": 1792465477000,
+              "completedAtMs": 1792465477500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r3-final",
+              "text": "The helper found the flake.",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465478000,
+              "completedAtMs": 1792465478500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792465449,
+          "completedAt": 1792465479,
+          "durationMs": 30000
+        },
+        {
+          "id": "turn-r4",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-r4-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Keep going",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792465481000,
+              "completedAtMs": 1792465481500
+            },
+            {
+              "type": "contextCompaction",
+              "id": "item-r4-compaction",
+              "startedAtMs": 1792465483000,
+              "completedAtMs": 1792465483500
+            },
+            {
+              "type": "plan",
+              "id": "item-r4-plan",
+              "text": "1. Reproduce\n2. Fix  \n3. Verify",
+              "startedAtMs": 1792465484000,
+              "completedAtMs": 1792465484500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r4-question",
+              "text": "Which branch should I use?",
+              "phase": "commentary",
+              "memoryCitation": null,
+              "delivery": "async",
+              "questions": [
+                {
+                  "title": "Which branch should I use?",
+                  "options": ["main", "release"]
+                }
+              ],
+              "startedAtMs": 1792465485000,
+              "completedAtMs": 1792465485500
+            },
+            {
+              "type": "dynamicToolCall",
+              "id": "call-r4-dynamic",
+              "namespace": null,
+              "tool": "lookup",
+              "arguments": {
+                "key": "value"
+              },
+              "status": "completed",
+              "contentItems": [
+                {
+                  "type": "inputText",
+                  "text": "ok"
+                }
+              ],
+              "success": true,
+              "durationMs": 3,
+              "startedAtMs": 1792465486000,
+              "completedAtMs": 1792465486500
+            },
+            {
+              "type": "hookPrompt",
+              "id": "item-r4-hook",
+              "fragments": [
+                {
+                  "text": "Remember the style guide",
+                  "hookRunId": "hook-run-1"
+                }
+              ],
+              "startedAtMs": 1792465487000,
+              "completedAtMs": 1792465487500
+            },
+            {
+              "type": "reasoning",
+              "id": "item-r4-raw-reasoning",
+              "summary": [],
+              "content": ["raw thought"],
+              "startedAtMs": 1792465488000,
+              "completedAtMs": 1792465488500
+            },
+            {
+              "type": "reasoning",
+              "id": "item-r4-empty-reasoning",
+              "summary": [],
+              "content": [],
+              "startedAtMs": 1792465489000,
+              "completedAtMs": 1792465489500
+            }
+          ],
+          "itemsView": "full",
+          "status": "failed",
+          "error": {
+            "message": "Usage limit reached",
+            "codexErrorInfo": "usageLimitExceeded",
+            "additionalDetails": null,
+            "misalignment": null
+          },
+          "startedAt": 1792465460,
+          "completedAt": 1792465490,
+          "durationMs": 30000
+        },
+        {
+          "id": "turn-r5",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-r5-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Actually, stop",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792465492000,
+              "completedAtMs": 1792465492500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r5-commentary",
+              "text": "Stopping.",
+              "phase": "commentary",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465493000,
+              "completedAtMs": 1792465493500
+            }
+          ],
+          "itemsView": "full",
+          "status": "interrupted",
+          "error": null,
+          "startedAt": 1792465489,
+          "completedAt": 1792465494,
+          "durationMs": 5000
+        },
+        {
+          "id": "turn-r6",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-r6-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Final check",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": null,
+              "completedAtMs": 1792465496500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r6-draft",
+              "text": "Second draft replaces the first",
+              "phase": "commentary",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465497000,
+              "completedAtMs": 1792465497500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r6-final",
+              "text": "All checks pass.",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465501000,
+              "completedAtMs": 1792465501500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r6-late",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "echo late",
+              "cwd": "C:\\fixture\\repo",
+              "processId": "4242",
+              "source": "unifiedExecStartup",
+              "status": "completed",
+              "commandActions": [
+                {
+                  "type": "unknown",
+                  "command": "echo late"
+                }
+              ],
+              "aggregatedOutput": "late\n",
+              "exitCode": 0,
+              "durationMs": 1250,
+              "startedAtMs": 1792465503000,
+              "completedAtMs": 1792465503500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792465472,
+          "completedAt": 1792465502,
+          "durationMs": 30000
+        }
+      ]
+    },
+    "01a15745-0ae8-7000-8000-000000000002": {
+      "turns": [
+        {
+          "id": "turn-c1",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-c1-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Investigate the flaky test",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792465510000,
+              "completedAtMs": 1792465510500
+            },
+            {
+              "type": "reasoning",
+              "id": "item-c1-reasoning",
+              "summary": ["Running it in a loop"],
+              "content": [],
+              "startedAtMs": 1792465511000,
+              "completedAtMs": 1792465511500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-c1-loop",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "bash -lc 'for i in 1 2 3; do npm test; done'",
+              "cwd": "C:\\fixture\\repo",
+              "processId": "4242",
+              "source": "unifiedExecStartup",
+              "status": "completed",
+              "commandActions": [
+                {
+                  "type": "unknown",
+                  "command": "bash -lc for i in 1 2 3; do npm test; done"
+                }
+              ],
+              "aggregatedOutput": "ok\n",
+              "exitCode": 0,
+              "durationMs": 1250,
+              "startedAtMs": 1792465512000,
+              "completedAtMs": 1792465512500
+            },
+            {
+              "type": "collabAgentToolCall",
+              "id": "call-c1-spawn",
+              "tool": "spawnAgent",
+              "status": "completed",
+              "senderThreadId": "01a15745-0ae8-7000-8000-000000000002",
+              "receiverThreadIds": ["01a15745-8018-7000-8000-000000000003"],
+              "prompt": "Check the timer mocks",
+              "model": null,
+              "reasoningEffort": null,
+              "agentsStates": {},
+              "startedAtMs": 1792465513000,
+              "completedAtMs": 1792465513500
+            },
+            {
+              "type": "subAgentActivity",
+              "model": null,
+              "reasoningEffort": null,
+              "id": "activity-c1-started",
+              "kind": "started",
+              "agentThreadId": "01a15745-8018-7000-8000-000000000003",
+              "agentPath": "/root/helper/timers",
+              "startedAtMs": 1792465514000,
+              "completedAtMs": 1792465514500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-c1-final",
+              "text": "Found it",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465515000,
+              "completedAtMs": 1792465515500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792465486,
+          "completedAt": 1792465516,
+          "durationMs": 30000
+        }
+      ]
+    },
+    "01a15745-8018-7000-8000-000000000003": {
+      "turns": [
+        {
+          "id": "turn-g1",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-g1-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Check the timer mocks",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792465537000,
+              "completedAtMs": 1792465537500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-g1-final",
+              "text": "Timers are fine.",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465538000,
+              "completedAtMs": 1792465538500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792465509,
+          "completedAt": 1792465539,
+          "durationMs": 30000
+        }
+      ]
+    },
+    "01a1577b-0f08-7000-8000-000000000004": {
+      "turns": [
+        {
+          "id": "turn-r1",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-r1-user",
+              "clientId": "client-message-1",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Fix the failing build [image]",
+                  "text_elements": [
+                    {
+                      "byteRange": {
+                        "start": 22,
+                        "end": 29
+                      },
+                      "placeholder": "[image]"
+                    }
+                  ]
+                },
+                {
+                  "type": "localImage",
+                  "detail": null,
+                  "path": "C:\\fixture\\repo\\screenshot.png"
+                },
+                {
+                  "type": "image",
+                  "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==",
+                  "detail": "high"
+                }
+              ],
+              "startedAtMs": 1792465449000,
+              "completedAtMs": 1792465449500
+            },
+            {
+              "type": "reasoning",
+              "id": "item-r1-reasoning",
+              "summary": ["Reading the build log", "Checking the config"],
+              "content": [],
+              "startedAtMs": 1792465450000,
+              "completedAtMs": 1792465450500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r1-commentary",
+              "text": "Looking at the build first.",
+              "phase": "commentary",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465451000,
+              "completedAtMs": 1792465451500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r1-grep",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "bash -lc \"grep -n \\\"api_key = [REDACTED_SECRET]\" src/app.ts && echo 'done'\"",
+              "cwd": "C:\\fixture\\repo",
+              "processId": "4242",
+              "source": "unifiedExecStartup",
+              "status": "completed",
+              "commandActions": [
+                {
+                  "type": "search",
+                  "command": "grep -n \"api_key = [REDACTED_SECRET]\" src/app.ts",
+                  "query": "api_key = [REDACTED_SECRET]",
+                  "path": "src/app.ts"
+                },
+                {
+                  "type": "unknown",
+                  "command": "echo 'done'"
+                }
+              ],
+              "aggregatedOutput": "src/app.ts:3:api_key\ndone\n",
+              "exitCode": 0,
+              "durationMs": 1250,
+              "startedAtMs": 1792465452000,
+              "completedAtMs": 1792465452500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r1-pwsh",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command \"Get-ChildItem 'C:\\\\fixture\\\\repo' | Select-Object -First 2\"",
+              "cwd": "C:\\fixture\\repo",
+              "processId": "4242",
+              "source": "unifiedExecStartup",
+              "status": "failed",
+              "commandActions": [
+                {
+                  "type": "read",
+                  "command": "type src\\b.ts",
+                  "name": "b.ts",
+                  "path": "C:\\fixture\\repo\\src\\b.ts"
+                },
+                {
+                  "type": "read",
+                  "command": "type D:\\other\\c.ts",
+                  "name": "c.ts",
+                  "path": "D:\\other\\c.ts"
+                },
+                {
+                  "type": "listFiles",
+                  "command": "Get-ChildItem",
+                  "path": null
+                }
+              ],
+              "aggregatedOutput": "Access denied\n",
+              "exitCode": 1,
+              "durationMs": 1250,
+              "startedAtMs": 1792465453000,
+              "completedAtMs": 1792465453500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r1-curl",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "curl -H 'Authorization: Bearer [REDACTED_SECRET]' 'https://example.test/a b?x=1&y=$HOME' '' '^caret' 'naïve' [REDACTED_SECRET] '--token=[REDACTED_SECRET]'",
+              "cwd": "\\\\fileserver\\share\\fixture repo",
+              "processId": null,
+              "source": "agent",
+              "status": "completed",
+              "commandActions": [
+                {
+                  "type": "unknown",
+                  "command": "curl -H Authorization: Bearer [REDACTED_SECRET] https://example.test/a b?x=1&y=$HOME  ^caret naïve [REDACTED_SECRET] --token=[REDACTED_SECRET]"
+                }
+              ],
+              "aggregatedOutput": "{}",
+              "exitCode": 0,
+              "durationMs": 5,
+              "startedAtMs": 1792465454000,
+              "completedAtMs": 1792465454500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r1-cat",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "cat ../lib/x.ts",
+              "cwd": "/home/fixture/repo/",
+              "processId": "4242",
+              "source": "unifiedExecStartup",
+              "status": "completed",
+              "commandActions": [
+                {
+                  "type": "read",
+                  "command": "cat ../lib/x.ts",
+                  "name": "x.ts",
+                  "path": "/home/fixture/lib/x.ts"
+                },
+                {
+                  "type": "listFiles",
+                  "command": "ls src",
+                  "path": "src"
+                },
+                {
+                  "type": "search",
+                  "command": "rg secret",
+                  "query": null,
+                  "path": null
+                }
+              ],
+              "aggregatedOutput": null,
+              "exitCode": 0,
+              "durationMs": 1250,
+              "startedAtMs": 1792465455000,
+              "completedAtMs": 1792465455500
+            },
+            {
+              "type": "fileChange",
+              "id": "call-r1-patch",
+              "changes": [
+                {
+                  "path": "C:\\fixture\\repo\\src\\a.ts",
+                  "kind": {
+                    "type": "update",
+                    "move_path": null
+                  },
+                  "diff": "@@ -1 +1 @@\n-a\n+b\n"
+                },
+                {
+                  "path": "C:\\fixture\\repo\\src\\b.ts",
+                  "kind": {
+                    "type": "update",
+                    "move_path": "C:\\fixture\\repo\\src\\c.ts"
+                  },
+                  "diff": "@@ -1 +1 @@\n-old\n+new\n\n\nMoved to: C:\\fixture\\repo\\src\\c.ts"
+                },
+                {
+                  "path": "C:\\fixture\\repo\\src\\gone.ts",
+                  "kind": {
+                    "type": "delete"
+                  },
+                  "diff": "old\n"
+                },
+                {
+                  "path": "C:\\fixture\\repo\\src\\new.ts",
+                  "kind": {
+                    "type": "add"
+                  },
+                  "diff": "export const x = 1;\n"
+                }
+              ],
+              "status": "completed",
+              "startedAtMs": 1792465456000,
+              "completedAtMs": 1792465456500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r1-final",
+              "text": "The build passes now.",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465457000,
+              "completedAtMs": 1792465457500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792465428,
+          "completedAt": 1792465458,
+          "durationMs": 30000
+        },
+        {
+          "id": "turn-r2",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-r2-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Show me the screenshots",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792465460000,
+              "completedAtMs": 1792465460500
+            },
+            {
+              "type": "imageView",
+              "id": "call-r2-view",
+              "path": "C:\\fixture\\repo\\shot one.png",
+              "startedAtMs": 1792465461000,
+              "completedAtMs": 1792465461500
+            },
+            {
+              "type": "mcpToolCall",
+              "id": "call-r2-mcp",
+              "server": "node_repl",
+              "tool": "js",
+              "status": "completed",
+              "arguments": {
+                "code": "render()",
+                "title": "render"
+              },
+              "appContext": null,
+              "mcpAppUi": null,
+              "pluginId": null,
+              "readOnlyHint": true,
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "rendered"
+                  },
+                  {
+                    "type": "image",
+                    "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==",
+                    "mimeType": "image/png"
+                  }
+                ],
+                "structuredContent": null,
+                "_meta": null
+              },
+              "error": null,
+              "durationMs": 20,
+              "startedAtMs": 1792465462000,
+              "completedAtMs": 1792465462500
+            },
+            {
+              "type": "mcpToolCall",
+              "id": "call-r2-mcp-failed",
+              "server": "node_repl",
+              "tool": "js",
+              "status": "failed",
+              "arguments": {
+                "code": "throw new Error()"
+              },
+              "appContext": null,
+              "mcpAppUi": null,
+              "pluginId": null,
+              "readOnlyHint": null,
+              "result": null,
+              "error": {
+                "message": "tool crashed"
+              },
+              "durationMs": 1,
+              "startedAtMs": 1792465463000,
+              "completedAtMs": 1792465463500
+            },
+            {
+              "type": "webSearch",
+              "id": "call-r2-search",
+              "query": "codex rollout format",
+              "action": {
+                "type": "search",
+                "query": "codex rollout format",
+                "queries": null
+              },
+              "results": [
+                {
+                  "title": "Rollouts",
+                  "url": "https://example.test/rollouts"
+                }
+              ],
+              "startedAtMs": 1792465464000,
+              "completedAtMs": 1792465464500
+            },
+            {
+              "type": "webSearch",
+              "id": "call-r2-open",
+              "query": "",
+              "action": {
+                "type": "openPage",
+                "url": "https://example.test/page"
+              },
+              "results": null,
+              "startedAtMs": 1792465465000,
+              "completedAtMs": 1792465465500
+            },
+            {
+              "type": "sleep",
+              "id": "call-r2-sleep",
+              "durationMs": 1500,
+              "startedAtMs": 1792465466000,
+              "completedAtMs": 1792465466500
+            },
+            {
+              "type": "imageGeneration",
+              "id": "call-r2-imagegen",
+              "status": "completed",
+              "revisedPrompt": "a blue square",
+              "result": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==",
+              "transparentBackground": null,
+              "failure": null,
+              "generationId": null,
+              "startedAtMs": 1792465467000,
+              "completedAtMs": 1792465467500
+            },
+            {
+              "type": "imageGeneration",
+              "id": "call-r2-imagegen-hosted",
+              "status": "failed",
+              "revisedPrompt": "a red circle",
+              "result": "",
+              "transparentBackground": null,
+              "failure": null,
+              "generationId": null,
+              "startedAtMs": 1792465468000,
+              "completedAtMs": 1792465468500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r2-final",
+              "text": "Here they are.",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465469000,
+              "completedAtMs": 1792465469500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792465440,
+          "completedAt": 1792465470,
+          "durationMs": 30000
+        },
+        {
+          "id": "turn-f1",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-f1-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Try a different approach",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792469047000,
+              "completedAtMs": 1792469047500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-f1-final",
+              "text": "Done differently.",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792469048000,
+              "completedAtMs": 1792469048500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792469019,
+          "completedAt": 1792469049,
+          "durationMs": 30000
+        }
+      ]
+    },
+    "01a1577c-95a8-7000-8000-000000000005": {
+      "turns": [
+        {
+          "id": "turn-r1",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-r1-user",
+              "clientId": "client-message-1",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Fix the failing build [image]",
+                  "text_elements": [
+                    {
+                      "byteRange": {
+                        "start": 22,
+                        "end": 29
+                      },
+                      "placeholder": "[image]"
+                    }
+                  ]
+                },
+                {
+                  "type": "localImage",
+                  "detail": null,
+                  "path": "C:\\fixture\\repo\\screenshot.png"
+                },
+                {
+                  "type": "image",
+                  "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==",
+                  "detail": "high"
+                }
+              ],
+              "startedAtMs": 1792465449000,
+              "completedAtMs": 1792465449500
+            },
+            {
+              "type": "reasoning",
+              "id": "item-r1-reasoning",
+              "summary": ["Reading the build log", "Checking the config"],
+              "content": [],
+              "startedAtMs": 1792465450000,
+              "completedAtMs": 1792465450500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r1-commentary",
+              "text": "Looking at the build first.",
+              "phase": "commentary",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465451000,
+              "completedAtMs": 1792465451500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r1-grep",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "bash -lc \"grep -n \\\"api_key = [REDACTED_SECRET]\" src/app.ts && echo 'done'\"",
+              "cwd": "C:\\fixture\\repo",
+              "processId": "4242",
+              "source": "unifiedExecStartup",
+              "status": "completed",
+              "commandActions": [
+                {
+                  "type": "search",
+                  "command": "grep -n \"api_key = [REDACTED_SECRET]\" src/app.ts",
+                  "query": "api_key = [REDACTED_SECRET]",
+                  "path": "src/app.ts"
+                },
+                {
+                  "type": "unknown",
+                  "command": "echo 'done'"
+                }
+              ],
+              "aggregatedOutput": "src/app.ts:3:api_key\ndone\n",
+              "exitCode": 0,
+              "durationMs": 1250,
+              "startedAtMs": 1792465452000,
+              "completedAtMs": 1792465452500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r1-pwsh",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command \"Get-ChildItem 'C:\\\\fixture\\\\repo' | Select-Object -First 2\"",
+              "cwd": "C:\\fixture\\repo",
+              "processId": "4242",
+              "source": "unifiedExecStartup",
+              "status": "failed",
+              "commandActions": [
+                {
+                  "type": "read",
+                  "command": "type src\\b.ts",
+                  "name": "b.ts",
+                  "path": "C:\\fixture\\repo\\src\\b.ts"
+                },
+                {
+                  "type": "read",
+                  "command": "type D:\\other\\c.ts",
+                  "name": "c.ts",
+                  "path": "D:\\other\\c.ts"
+                },
+                {
+                  "type": "listFiles",
+                  "command": "Get-ChildItem",
+                  "path": null
+                }
+              ],
+              "aggregatedOutput": "Access denied\n",
+              "exitCode": 1,
+              "durationMs": 1250,
+              "startedAtMs": 1792465453000,
+              "completedAtMs": 1792465453500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r1-curl",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "curl -H 'Authorization: Bearer [REDACTED_SECRET]' 'https://example.test/a b?x=1&y=$HOME' '' '^caret' 'naïve' [REDACTED_SECRET] '--token=[REDACTED_SECRET]'",
+              "cwd": "\\\\fileserver\\share\\fixture repo",
+              "processId": null,
+              "source": "agent",
+              "status": "completed",
+              "commandActions": [
+                {
+                  "type": "unknown",
+                  "command": "curl -H Authorization: Bearer [REDACTED_SECRET] https://example.test/a b?x=1&y=$HOME  ^caret naïve [REDACTED_SECRET] --token=[REDACTED_SECRET]"
+                }
+              ],
+              "aggregatedOutput": "{}",
+              "exitCode": 0,
+              "durationMs": 5,
+              "startedAtMs": 1792465454000,
+              "completedAtMs": 1792465454500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-r1-cat",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "cat ../lib/x.ts",
+              "cwd": "/home/fixture/repo/",
+              "processId": "4242",
+              "source": "unifiedExecStartup",
+              "status": "completed",
+              "commandActions": [
+                {
+                  "type": "read",
+                  "command": "cat ../lib/x.ts",
+                  "name": "x.ts",
+                  "path": "/home/fixture/lib/x.ts"
+                },
+                {
+                  "type": "listFiles",
+                  "command": "ls src",
+                  "path": "src"
+                },
+                {
+                  "type": "search",
+                  "command": "rg secret",
+                  "query": null,
+                  "path": null
+                }
+              ],
+              "aggregatedOutput": null,
+              "exitCode": 0,
+              "durationMs": 1250,
+              "startedAtMs": 1792465455000,
+              "completedAtMs": 1792465455500
+            },
+            {
+              "type": "fileChange",
+              "id": "call-r1-patch",
+              "changes": [
+                {
+                  "path": "C:\\fixture\\repo\\src\\a.ts",
+                  "kind": {
+                    "type": "update",
+                    "move_path": null
+                  },
+                  "diff": "@@ -1 +1 @@\n-a\n+b\n"
+                },
+                {
+                  "path": "C:\\fixture\\repo\\src\\b.ts",
+                  "kind": {
+                    "type": "update",
+                    "move_path": "C:\\fixture\\repo\\src\\c.ts"
+                  },
+                  "diff": "@@ -1 +1 @@\n-old\n+new\n\n\nMoved to: C:\\fixture\\repo\\src\\c.ts"
+                },
+                {
+                  "path": "C:\\fixture\\repo\\src\\gone.ts",
+                  "kind": {
+                    "type": "delete"
+                  },
+                  "diff": "old\n"
+                },
+                {
+                  "path": "C:\\fixture\\repo\\src\\new.ts",
+                  "kind": {
+                    "type": "add"
+                  },
+                  "diff": "export const x = 1;\n"
+                }
+              ],
+              "status": "completed",
+              "startedAtMs": 1792465456000,
+              "completedAtMs": 1792465456500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-r1-final",
+              "text": "The build passes now.",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792465457000,
+              "completedAtMs": 1792465457500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792465428,
+          "completedAt": 1792465458,
+          "durationMs": 30000
+        },
+        {
+          "id": "turn-r2",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-r2-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Show me the screenshots",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792465460000,
+              "completedAtMs": 1792465460500
+            },
+            {
+              "type": "imageView",
+              "id": "call-r2-view",
+              "path": "C:\\fixture\\repo\\shot one.png",
+              "startedAtMs": 1792465461000,
+              "completedAtMs": 1792465461500
+            },
+            {
+              "type": "mcpToolCall",
+              "id": "call-r2-mcp",
+              "server": "node_repl",
+              "tool": "js",
+              "status": "completed",
+              "arguments": {
+                "code": "render()",
+                "title": "render"
+              },
+              "appContext": null,
+              "mcpAppUi": null,
+              "pluginId": null,
+              "readOnlyHint": true,
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "rendered"
+                  },
+                  {
+                    "type": "image",
+                    "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==",
+                    "mimeType": "image/png"
+                  }
+                ],
+                "structuredContent": null,
+                "_meta": null
+              },
+              "error": null,
+              "durationMs": 20,
+              "startedAtMs": 1792465462000,
+              "completedAtMs": 1792465462500
+            }
+          ],
+          "itemsView": "full",
+          "status": "interrupted",
+          "error": null,
+          "startedAt": null,
+          "completedAt": null,
+          "durationMs": null
+        },
+        {
+          "id": "turn-m1",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-m1-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Branch from the middle",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792469148000,
+              "completedAtMs": 1792469148500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-m1-final",
+              "text": "Branched.",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792469149000,
+              "completedAtMs": 1792469149500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792469120,
+          "completedAt": 1792469150,
+          "durationMs": 30000
+        }
+      ]
+    },
+    "01a15c6a-7c88-7000-8000-000000000006": {
+      "turns": [
+        {
+          "id": "turn-z1",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-z1-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Compressed hello",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792551847000,
+              "completedAtMs": 1792551847500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-z1-final",
+              "text": "Compressed reply",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792551848000,
+              "completedAtMs": 1792551848500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792551819,
+          "completedAt": 1792551849,
+          "durationMs": 30000
+        }
+      ]
+    },
+    "01a16190-d888-7000-8000-000000000007": {
+      "turns": [
+        {
+          "id": "turn-l1",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-l1-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "First question",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792638247000,
+              "completedAtMs": 1792638247500
+            },
+            {
+              "type": "agentMessage",
+              "id": "item-l1-final",
+              "text": "First answer",
+              "phase": "final_answer",
+              "memoryCitation": null,
+              "delivery": null,
+              "questions": null,
+              "startedAtMs": 1792638248000,
+              "completedAtMs": 1792638248500
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1792638219,
+          "completedAt": 1792638249,
+          "durationMs": 30000
+        },
+        {
+          "id": "turn-l2",
+          "rootTurnId": null,
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "item-l2-user",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Still running",
+                  "text_elements": []
+                }
+              ],
+              "startedAtMs": 1792638251000,
+              "completedAtMs": 1792638251500
+            },
+            {
+              "type": "commandExecution",
+              "id": "call-l2-build",
+              "pluginId": null,
+              "scriptPath": null,
+              "command": "npm run build",
+              "cwd": "C:\\fixture\\repo",
+              "processId": "4242",
+              "source": "unifiedExecStartup",
+              "status": "completed",
+              "commandActions": [
+                {
+                  "type": "unknown",
+                  "command": "npm run build"
+                }
+              ],
+              "aggregatedOutput": "building\n",
+              "exitCode": 0,
+              "durationMs": 1250,
+              "startedAtMs": 1792638252000,
+              "completedAtMs": 1792638252500
+            }
+          ],
+          "itemsView": "full",
+          "status": "interrupted",
+          "error": null,
+          "startedAt": 1792638250,
+          "completedAt": null,
+          "durationMs": null
+        }
+      ]
+    }
+  }
+}

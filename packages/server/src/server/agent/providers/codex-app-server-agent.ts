@@ -94,6 +94,14 @@ import {
 } from "./codex/app-server-transport.js";
 import { type CodexUserMessageTurnIndex, revertCodexConversation } from "./codex/rewind.js";
 import {
+  CodexHistoryLoadAbandonedError,
+  CodexHistorySlicer,
+  CodexRolloutUnavailableError,
+  readCodexThreadFromRollouts,
+  type CodexRolloutProjectionCache,
+} from "./codex/rollout-history.js";
+import { CodexRolloutFormatError } from "./codex/rollout-thread-item.js";
+import {
   materializeProviderImage,
   renderProviderImageOutputAsAssistantMarkdown,
   type ProviderImageOutput,
@@ -145,6 +153,9 @@ function isCodexAlreadyUnarchivedError(error: unknown, threadId: string): boolea
 
 const TURN_START_TIMEOUT_MS = 90 * 1000;
 const INTERRUPT_TIMEOUT_MS = 2_000;
+// Another session's app-server that does not answer a history read in time is passed over for
+// the rollout, which reads even a 120MB thread within two seconds.
+const OPEN_THREAD_READ_TIMEOUT_MS = 15_000;
 const CODEX_PROVIDER = "codex" as const;
 // Codex treats most app-server client names as the model-request originator.
 // This reserved Codex name is non-originating, so requests keep Codex's default
@@ -264,7 +275,7 @@ const CODEX_MODES: AgentMode[] = [
 const DEFAULT_CODEX_MODE_ID = "auto";
 
 interface CodexAppServerClientLike {
-  request(method: string, params?: unknown): Promise<unknown>;
+  request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
   forkThread?(params: CodexThreadForkParams): Promise<CodexThreadForkResponse>;
   rollbackThread?(params: CodexThreadRollbackParams): Promise<CodexThreadRollbackResponse>;
   notify(method: string, params?: unknown): void;
@@ -290,6 +301,8 @@ interface CodexAppServerAgentDeps {
   resolveSlashCommandInvocation?: (
     prompt: AgentPromptInput,
   ) => Promise<{ commandName: string; args?: string } | null>;
+  /** Sessions of the same provider client; a history read reuses one that has its thread open. */
+  liveSessions?: Set<CodexAppServerAgentSession>;
 }
 
 interface CodexModePreset {
@@ -489,6 +502,14 @@ export function normalizeCodexOutputSchema(schema: unknown): Record<string, unkn
 interface CodexConfiguredDefaults {
   model?: string;
   thinkingOptionId?: string;
+}
+
+/** Where a history load found each thread it read. */
+interface CodexHistoryReadCounts {
+  live: number;
+  rollout: number;
+  appServer: number;
+  rolloutBytes: number;
 }
 
 interface PersistedTimelineEntry {
@@ -2147,46 +2168,58 @@ function threadItemToTimelineEntries(
   return [timelineItem, ...mcpToolResultImagesToTimeline(item)];
 }
 
-const CodexThreadReadResponseSchema = z
-  .object({
-    thread: z
-      .object({
-        turns: z
-          .array(
-            z
-              .object({
-                items: z.array(z.unknown()).default([]),
-              })
-              .passthrough(),
-          )
-          .default([]),
-      })
-      .passthrough()
-      .default({ turns: [] }),
-  })
-  .passthrough();
-
-type CodexThreadReadResponse = z.infer<typeof CodexThreadReadResponseSchema>;
 type CodexThreadReadRequest = (threadId: string) => Promise<unknown>;
 
-async function requestCodexThreadHistory(
-  requestThread: CodexThreadReadRequest,
-  threadId: string,
-): Promise<CodexThreadReadResponse> {
-  const response = await requestThread(threadId);
-  return CodexThreadReadResponseSchema.parse(response);
+interface CodexThreadHistoryTurn {
+  record: Record<string, unknown>;
+  items: unknown[];
+}
+
+class CodexThreadReadShapeError extends Error {
+  constructor(
+    readonly threadId: string,
+    readonly detail: string,
+  ) {
+    super(`Codex thread/read for ${threadId} returned ${detail}`);
+    this.name = "CodexThreadReadShapeError";
+  }
+}
+
+/**
+ * The turns of a thread/read response, checked only as far as replay reads them. A long thread
+ * has hundreds of thousands of items; validating each with a schema held the event loop.
+ */
+function readCodexThreadTurns(threadId: string, response: unknown): CodexThreadHistoryTurn[] {
+  const root = toObjectRecord(response);
+  if (!root) throw new CodexThreadReadShapeError(threadId, "no object");
+  const thread = root.thread === undefined ? {} : toObjectRecord(root.thread);
+  if (!thread) throw new CodexThreadReadShapeError(threadId, "a thread that is not an object");
+  const turns = thread.turns ?? [];
+  if (!Array.isArray(turns))
+    throw new CodexThreadReadShapeError(threadId, "turns that are not a list");
+  return turns.map((turn) => {
+    const record = toObjectRecord(turn);
+    if (!record) throw new CodexThreadReadShapeError(threadId, "a turn that is not an object");
+    const items = record.items ?? [];
+    if (!Array.isArray(items))
+      throw new CodexThreadReadShapeError(threadId, "turn items that are not a list");
+    return { record, items };
+  });
 }
 
 async function loadCodexThreadHistoryTimeline(params: {
   threadId: string;
   cwd: string | null;
   requestThread: CodexThreadReadRequest;
+  slicer: CodexHistorySlicer;
 }): Promise<CodexThreadHistoryProjection> {
-  const response = await requestCodexThreadHistory(params.requestThread, params.threadId);
+  const response = await params.requestThread(params.threadId);
+  const turns = readCodexThreadTurns(params.threadId, response);
   const timeline: PersistedTimelineEntry[] = [];
   const subAgentTimelineIndexByThreadId = new Map<string, number>();
-  for (const turn of response.thread.turns) {
-    for (const item of turn.items) {
+  for (const { record: turn, items } of turns) {
+    for (const item of items) {
+      if (params.slicer.due) await params.slicer.pause();
       const historicalSubAgentActivity = readCodexSubAgentActivity(item);
       if (historicalSubAgentActivity) {
         const existingIndex = subAgentTimelineIndexByThreadId.get(
@@ -2244,11 +2277,12 @@ function readLatestCodexTurnId(response: unknown): string | null {
   return typeof latest?.id === "string" && latest.id ? latest.id : null;
 }
 
-function readCodexThread(client: CodexAppServerClientLike, threadId: string): Promise<unknown> {
-  return client.request("thread/read", {
-    threadId,
-    includeTurns: true,
-  });
+function readCodexThread(
+  client: CodexAppServerClientLike,
+  threadId: string,
+  timeoutMs?: number,
+): Promise<unknown> {
+  return client.request("thread/read", { threadId, includeTurns: true }, timeoutMs);
 }
 
 export async function forkCodexThread(
@@ -3899,6 +3933,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         throw this.createClosedError();
       }
       this.connectionState = "connected";
+      this.deps.liveSessions?.add(this);
       if (this.releasedWhileIdle) {
         this.releasedWhileIdle = false;
         this.logger.info(
@@ -4188,28 +4223,132 @@ export class CodexAppServerAgentSession implements AgentSession {
     );
   }
 
-  private async readArchivedHistory(): Promise<void> {
+  /** This session's app-server, when it is connected and has `threadId` open. */
+  openThreadClient(threadId: string, codexHome: string): CodexAppServerClientLike | null {
+    const client = this.client;
+    const connected = !this.closed && this.connectionState === "connected";
+    if (!connected || !client || client.isClosed) return null;
+    return this.currentThreadId === threadId && this.codexHome === codexHome ? client : null;
+  }
+
+  private findLiveThreadClient(threadId: string): CodexAppServerClientLike | null {
+    for (const session of this.deps.liveSessions ?? []) {
+      const client = session === this ? null : session.openThreadClient(threadId, this.codexHome);
+      if (client) return client;
+    }
+    return null;
+  }
+
+  private async openHistoryClient(): Promise<CodexAppServerClient> {
     const child = await this.spawnAppServer();
     const client = new CodexAppServerClient(child, this.logger, () => this.traceContext());
     try {
       await client.request("initialize", buildCodexAppServerInitializeParams());
       client.notify("initialized", {});
-      await this.loadPersistedHistory(client);
-    } finally {
+    } catch (error) {
       await client.dispose();
+      throw error;
     }
+    return client;
   }
 
+  /**
+   * Reads a closed thread's history without the app-server a prompt would need. An app-server
+   * that already has the thread open answers first. Otherwise the thread's rollout files are
+   * read directly, and only a thread they cannot describe starts a temporary app-server.
+   */
+  private async readArchivedHistory(): Promise<void> {
+    const threadId = this.currentThreadId;
+    if (!threadId) return;
+    const startedAt = performance.now();
+    const slicer = new CodexHistorySlicer(() => !this.closed);
+    const projections: CodexRolloutProjectionCache = new Map();
+    const reads: CodexHistoryReadCounts = { live: 0, rollout: 0, appServer: 0, rolloutBytes: 0 };
+    const fallback: { client: CodexAppServerClient | null } = { client: null };
+    const readThread = async (threadIdToRead: string): Promise<unknown> => {
+      const live = this.findLiveThreadClient(threadIdToRead);
+      if (live) {
+        try {
+          const read = await readCodexThread(live, threadIdToRead, OPEN_THREAD_READ_TIMEOUT_MS);
+          reads.live += 1;
+          return read;
+        } catch (error) {
+          // That session's app-server may be exiting, closing or busy; the history is on disk too.
+          this.logger.warn(
+            { err: error, threadId: threadIdToRead },
+            "Reading Codex history without the app-server that has it open",
+          );
+        }
+      }
+      try {
+        const read = await readCodexThreadFromRollouts({
+          codexHome: this.codexHome,
+          threadId: threadIdToRead,
+          slicer,
+          projections,
+        });
+        reads.rollout += 1;
+        reads.rolloutBytes += read.rolloutBytes;
+        return read;
+      } catch (error) {
+        if (error instanceof CodexHistoryLoadAbandonedError) throw error;
+        this.logRolloutFallback(threadIdToRead, error);
+      }
+      fallback.client ??= await this.openHistoryClient();
+      reads.appServer += 1;
+      return readCodexThread(fallback.client, threadIdToRead);
+    };
+    try {
+      await this.loadThreadHistory(readThread, slicer);
+    } catch (error) {
+      if (error instanceof CodexHistoryLoadAbandonedError) throw this.createClosedError();
+      throw error;
+    } finally {
+      await fallback.client?.dispose();
+    }
+    this.logger.info(
+      {
+        threadId,
+        durationMs: Math.round(performance.now() - startedAt),
+        ...reads,
+        timelineItems: this.persistedHistory.length,
+      },
+      "Loaded Codex history",
+    );
+  }
+
+  private logRolloutFallback(threadId: string, error: unknown): void {
+    if (error instanceof CodexRolloutUnavailableError || error instanceof CodexRolloutFormatError) {
+      this.logger.info(
+        { threadId, reason: error.message },
+        "Reading Codex history through app-server",
+      );
+      return;
+    }
+    this.logger.warn({ err: error, threadId }, "Reading Codex history through app-server");
+  }
+
+  /** Rereads history through the session's own app-server, which a prompt is about to use. */
   private async loadPersistedHistory(client: CodexAppServerClientLike | null): Promise<void> {
-    if (!client || !this.currentThreadId) return;
+    if (!client) return;
+    await this.loadThreadHistory(
+      (threadIdToRead) => readCodexThread(client, threadIdToRead),
+      new CodexHistorySlicer(),
+    );
+  }
+
+  private async loadThreadHistory(
+    readThread: CodexThreadReadRequest,
+    slicer: CodexHistorySlicer,
+  ): Promise<void> {
+    if (!this.currentThreadId) return;
     const threadId = this.currentThreadId;
 
     const history = await loadCodexThreadHistoryTimeline({
       threadId,
       cwd: this.config.cwd ?? null,
-      requestThread: (threadIdToRead) => {
-        return readCodexThread(client, threadIdToRead);
-      },
+      requestThread: readThread,
+      slicer,
     });
     const { timeline, subAgentRoutes } = history;
     this.rememberLatestRootTurn(history.latestTurnId);
@@ -4219,15 +4358,20 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.persistedProviderSubagentEvents = [];
     this.loadingPersistedHistory = true;
     try {
-      await this.loadPersistedSubAgentHistories(client, subAgentRoutes);
+      await this.loadPersistedSubAgentHistories(readThread, subAgentRoutes, slicer);
     } finally {
       this.loadingPersistedHistory = false;
     }
-    this.resetCodexUserMessageTurns();
     for (const entry of timeline) {
+      if (slicer.due) await slicer.pause();
       if (entry.item.type === "tool_call" && entry.item.name === "request_user_input_async") {
         entry.item = this.asyncQuestions.timeline(entry.item.callId) ?? entry.item;
       }
+    }
+    // Rewind points are rebuilt without a pause, so a live user message handled during one
+    // cannot land between two of the history's.
+    this.resetCodexUserMessageTurns();
+    for (const entry of timeline) {
       if (entry.item.type === "user_message") {
         this.rememberCodexUserMessageTurn(entry.item.messageId, entry.providerTurnId);
       }
@@ -4237,8 +4381,9 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private async loadPersistedSubAgentHistories(
-    client: CodexAppServerClientLike,
+    readThread: CodexThreadReadRequest,
     rootRoutes: readonly PersistedSubAgentRoute[],
+    slicer: CodexHistorySlicer,
   ): Promise<void> {
     const queue = rootRoutes.map((route) => ({
       route,
@@ -4262,9 +4407,11 @@ export class CodexAppServerAgentSession implements AgentSession {
         const childHistory = await loadCodexThreadHistoryTimeline({
           threadId: next.route.childThreadId,
           cwd: this.config.cwd ?? null,
-          requestThread: (childThreadId) => readCodexThread(client, childThreadId),
+          requestThread: readThread,
+          slicer,
         });
         for (const entry of childHistory.timeline) {
+          if (slicer.due) await slicer.pause();
           this.emitProviderSubagentTimeline(next.route.childThreadId, entry.item, entry.timestamp);
         }
         for (const route of childHistory.subAgentRoutes) {
@@ -4275,6 +4422,7 @@ export class CodexAppServerAgentSession implements AgentSession {
           });
         }
       } catch (error) {
+        if (error instanceof CodexHistoryLoadAbandonedError) throw error;
         this.logger.trace(
           { err: error, childThreadId: next.route.childThreadId },
           "Failed to load persisted Codex child history",
@@ -4838,10 +4986,15 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.persistedHistory = [];
     this.persistedProviderSubagentEvents = [];
     this.historyPending = false;
+    // Consumers handle each event before asking for the next; without a pause the whole replay
+    // runs as one chain of microtasks.
+    const slicer = new CodexHistorySlicer();
     for (const event of providerSubagents) {
+      if (slicer.due) await slicer.pause();
       yield event;
     }
     for (const entry of history) {
+      if (slicer.due) await slicer.pause();
       yield {
         type: "timeline",
         provider: CODEX_PROVIDER,
@@ -5397,6 +5550,7 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.deps.liveSessions?.delete(this);
     this.clearPendingPermissions();
     this.pendingSubAgentNotificationsByThreadId.clear();
     this.subscribers.clear();
@@ -7714,6 +7868,7 @@ interface CodexDraftFeatureLists {
 export class CodexAppServerAgentClient implements AgentClient {
   readonly provider = CODEX_PROVIDER;
   readonly capabilities = CODEX_APP_SERVER_CAPABILITIES;
+  private readonly liveSessions = new Set<CodexAppServerAgentSession>();
   private goalsEnabledPromise: Promise<boolean> | null = null;
   private autoReviewEnabledPromise: Promise<boolean> | null = null;
   private draftFeatureLists: {
@@ -7731,6 +7886,7 @@ export class CodexAppServerAgentClient implements AgentClient {
   private sessionDeps(launchEnv: Record<string, string> | undefined): CodexAppServerAgentDeps {
     return {
       ...this.deps,
+      liveSessions: this.liveSessions,
       codexHome: resolveCodexHomeDir(buildCodexAppServerEnv(this.runtimeSettings, launchEnv)),
       customCodexConfig: this.customProviderConfig(),
     };
