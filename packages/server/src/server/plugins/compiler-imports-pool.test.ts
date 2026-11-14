@@ -96,6 +96,49 @@ describe("plugin import workers", () => {
     expect(pluginImportWorkerStats().workerReaders).toBe(before.workerReaders);
   });
 
+  it("finishes a check on the calling thread when its worker dies after opening the reader", async () => {
+    const valid = await createPlugin(VALID_SERVER);
+    const violating = await createPlugin(TYPE_ONLY_VIOLATION);
+    configurePluginImportWorkers({ size: 0 });
+    const expected = await compilePlugin(valid);
+    const expectedError = await compilePlugin(violating).catch((error: Error) => error.message);
+    // Opens readers like the real worker, then exits while the first file is being read.
+    const workerDirectory = await mkdtemp(path.join(tmpdir(), "paseo-dying-import-worker-"));
+    temporaryDirectories.push(workerDirectory);
+    const workerPath = path.join(workerDirectory, "dying-worker.mjs");
+    await writeFile(
+      workerPath,
+      [
+        'import { parentPort } from "node:worker_threads";',
+        "parentPort.on('message', (request) => {",
+        "  if (request.op === 'open') parentPort.postMessage({ id: request.id, ok: true, value: [] });",
+        "  else if (request.op === 'read') process.exit(1);",
+        "  else parentPort.postMessage({ id: request.id, ok: true, value: null });",
+        "});",
+      ].join("\n"),
+    );
+    configurePluginImportWorkers({ workerUrl: pathToFileURL(workerPath) });
+    const before = pluginImportWorkerStats();
+
+    expect(await compilePlugin(valid)).toEqual(expected);
+    expect(await compilePlugin(violating).catch((error: Error) => error.message)).toBe(
+      expectedError,
+    );
+
+    expect(expectedError).toContain("client-only module");
+    // Every reader opened in a worker and then moved to the calling thread.
+    await expect
+      .poll(() => {
+        const after = pluginImportWorkerStats();
+        return [
+          after.workerReaders - before.workerReaders,
+          after.inThreadReaders - before.inThreadReaders,
+          after.openWorkerReaders,
+        ];
+      })
+      .toEqual([4, 4, 0]);
+  });
+
   it("lets an idle worker exit and starts another for the next build", async () => {
     const plugin = await createPlugin(VALID_SERVER);
     configurePluginImportWorkers({ size: 1, idleMs: 10 });
