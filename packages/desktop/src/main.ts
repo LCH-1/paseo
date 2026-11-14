@@ -42,6 +42,8 @@ import {
 import { registerDaemonManager } from "./daemon/daemon-manager.js";
 import { parsePassthroughCliArgsFromArgv, runPassthroughCli } from "./daemon/cli/passthrough.js";
 import { closeAllTransportSessions } from "./daemon/local-transport.js";
+import { refreshCliTrampolines } from "./integrations/cli-install/refresh.js";
+import { getBundledCliShimPath, getLocalBinDir } from "./integrations/cli-install/paths.js";
 import {
   applyDesktopWindowChromeMode,
   restoreWindowBounds,
@@ -1069,6 +1071,23 @@ async function bootstrap(): Promise<void> {
       home,
       isDaemonRunning: async () => (await readDaemonInstance(home)) !== null,
     });
+    if (process.platform === "win32") {
+      // Each Suite install has its own versioned folder, so the installed `paseo` command would
+      // keep calling the previous install after an update.
+      void (async () => {
+        try {
+          const rewritten = await refreshCliTrampolines({
+            binDir: getLocalBinDir(),
+            shimPath: getBundledCliShimPath(),
+          });
+          if (rewritten.length > 0) {
+            log.info("[integrations] Pointed the paseo command at this install", { rewritten });
+          }
+        } catch (error) {
+          log.warn("[integrations] Could not update the paseo command", error);
+        }
+      })();
+    }
   }
 
   const appDistDir = getAppDistDir();
