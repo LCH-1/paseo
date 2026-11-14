@@ -24,7 +24,8 @@ import path from "node:path";
 // every config those tsconfig files extend. A lookup recomputes those digests without
 // bundling; any difference, an unreadable or damaged entry, or a different compiler,
 // daemon, esbuild, TypeScript, or Node version falls back to a full build, which also
-// re-runs the boundary check.
+// re-runs the boundary check. A build is not kept when a config that applies to it sends
+// imports through directories nothing else records (see REDIRECTING_OPTIONS).
 
 const FORMAT = "paseo-plugin-build-cache/2";
 /** Bump when what a cached boundary check accepts changes without a compiler source change. */
@@ -39,6 +40,11 @@ const COMPILER_MODULES = [
 ] as const;
 const PROBED_CONFIG_FILES = ["package.json", "tsconfig.json", "jsconfig.json"] as const;
 const TS_CONFIG_FILES: ReadonlySet<string> = new Set(["tsconfig.json", "jsconfig.json"]);
+// These make esbuild or the boundary check's TypeScript try other directories before the
+// file an import ended up at (`paths` substitutions in order, `baseUrl` before node_modules,
+// other `rootDirs`, earlier `typeRoots`). Those directories hold no input, so a file
+// added there would go unseen; builds under such a config are not kept.
+const REDIRECTING_OPTIONS = ["baseUrl", "paths", "rootDirs", "typeRoots"] as const;
 const MAX_EXTENDS_DEPTH = 32;
 const DEFAULT_MAX_BYTES = 128 * 1024 * 1024;
 const DEFAULT_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
@@ -64,7 +70,8 @@ export interface PluginBuildRecorder {
    * `probes`, files it looked for that may be missing, and `directories`, where
    * relative imports were looked up before links were followed (absolute paths).
    * Resolves false without storing when an input is gone or changed while building,
-   * when a config's `extends` cannot be followed, or when the entry cannot be written.
+   * when a config's `extends` cannot be followed, when a config that applies sets one
+   * of {@link REDIRECTING_OPTIONS}, or when the entry cannot be written.
    */
   store(
     bundle: string,
@@ -343,26 +350,46 @@ async function extendsCandidates(value: string, directory: string): Promise<stri
   return candidates;
 }
 
+function insideNodeModules(file: string): boolean {
+  return path.dirname(file).split(path.sep).includes("node_modules");
+}
+
+function redirectsImports(config: unknown): boolean {
+  const options = (config as { compilerOptions?: unknown } | null | undefined)?.compilerOptions;
+  if (!options || typeof options !== "object") return false;
+  return REDIRECTING_OPTIONS.some((name) => (options as Record<string, unknown>)[name] != null);
+}
+
+interface ConfigRoot {
+  file: string;
+  /** Whether esbuild or the boundary check may resolve imports by this config. */
+  applies: boolean;
+}
+
 /**
- * esbuild applies the tsconfig.json or jsconfig.json nearest each file it bundles, and
- * every config that one extends. Follows `extends` from `configs`, returning each
+ * esbuild applies the tsconfig.json or jsconfig.json nearest each file it bundles, except
+ * one inside node_modules, and every config that one extends; the boundary check's
+ * TypeScript applies the configs it read. Follows `extends` from `roots`, returning each
  * candidate looked for and following every one that exists, so no config esbuild may
- * have read is left out. Null when a config cannot be read or followed here.
+ * have read is left out. Null when a config cannot be read or followed here, or when one
+ * that may apply sets one of {@link REDIRECTING_OPTIONS}.
  */
-async function extendedConfigs(configs: Iterable<string>): Promise<string[] | null> {
+async function extendedConfigs(roots: Iterable<ConfigRoot>): Promise<string[] | null> {
   const candidates = new Set<string>();
   const seen = new Set<string>();
-  const pending = [...configs].map((file) => ({ file, depth: 0 }));
+  const pending = [...roots].map(({ file, applies }) => ({ file, applies, depth: 0 }));
   while (pending.length > 0) {
-    const { file, depth } = pending.pop()!;
-    if (seen.has(file)) continue;
-    seen.add(file);
+    const { file, applies, depth } = pending.pop()!;
+    const id = `${applies}\u0000${file}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
     let config: unknown;
     try {
       config = await readConfig(file);
     } catch {
       return null;
     }
+    if (applies && redirectsImports(config)) return null;
     const value = (config as { extends?: unknown } | null | undefined)?.extends;
     if (value === undefined) continue;
     const values: unknown[] = Array.isArray(value) ? value : [value];
@@ -375,7 +402,7 @@ async function extendedConfigs(configs: Iterable<string>): Promise<string[] | nu
       for (const candidate of found) {
         candidates.add(candidate);
         if (path.basename(candidate) === "package.json" || !(await isFile(candidate))) continue;
-        pending.push({ file: candidate, depth: depth + 1 });
+        pending.push({ file: candidate, applies, depth: depth + 1 });
       }
     }
   }
@@ -476,11 +503,13 @@ export function createPluginBuildCache(options: PluginBuildCacheOptions): Plugin
       const lookups = absolute(recorded.directories);
       // Every tsconfig.json / jsconfig.json near an input, and the configs the boundary
       // check's TypeScript read for the plugin, which may extend files of any name.
-      const configs = [
+      const configs: ConfigRoot[] = [
         ...describeDependencies(inputs, probed, lookups)
           .filter(([kind, target]) => kind === "file" && TS_CONFIG_FILES.has(path.basename(target)))
-          .map(([, target]) => target),
-        ...[...probed].filter((file) => file.endsWith(".json")),
+          .map(([, target]) => ({ file: target, applies: !insideNodeModules(target) })),
+        ...[...probed]
+          .filter((file) => file.endsWith(".json"))
+          .map((file) => ({ file, applies: true })),
       ];
       const extended = await extendedConfigs(configs);
       if (!extended) return false;

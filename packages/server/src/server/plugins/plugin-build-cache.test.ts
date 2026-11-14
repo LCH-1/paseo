@@ -52,8 +52,12 @@ async function settle(directory: string): Promise<void> {
   await utimes(directory, past, past);
 }
 
-async function createPlugin(): Promise<{ directory: string; client: string; server: string }> {
-  const directory = await temporaryDirectory("paseo-plugin-build-cache-");
+async function createPlugin(
+  layout: "alone" | "inside node_modules" = "alone",
+): Promise<{ directory: string; client: string; server: string }> {
+  const root = await temporaryDirectory("paseo-plugin-build-cache-");
+  const directory = layout === "alone" ? root : path.join(root, "node_modules", "fixture-plugin");
+  await mkdir(directory, { recursive: true });
   await Promise.all(
     ["client", "server", "shared"].map((name) => mkdir(path.join(directory, name))),
   );
@@ -80,7 +84,7 @@ import { value } from "./server/value";
 export default function contribute() { const shape: Shape = { name: label }; return () => [shape, value]; }`,
     ),
   ]);
-  await settle(directory);
+  await settle(root);
   return { directory, client, server };
 }
 
@@ -342,6 +346,202 @@ describe("plugin build cache", () => {
     await writeFile(path.join(configPackage, "base.json"), classFields(true));
 
     expect((await compilePlugin(plugin, { cache })).serverBundle).not.toContain(ASSIGNED_FIELD);
+  });
+
+  // Only esbuild reads a nested tsconfig; the boundary check's TypeScript reads the plugin's.
+  it.each(["the plugin tsconfig", "a config a nested tsconfig extends"] as const)(
+    "rebuilds when a new file matches an earlier paths substitution in %s",
+    async (where) => {
+      const plugin = await createPlugin();
+      // shared/a exists, so only its listing, which no input lies in, can show foo.ts appear.
+      await mkdir(path.join(plugin.directory, "shared", "a"));
+      await mkdir(path.join(plugin.directory, "shared", "b"));
+      await writeFile(path.join(plugin.directory, "shared", "a", "other.ts"), "export {};");
+      await writeFile(
+        path.join(plugin.directory, "shared", "b", "foo.ts"),
+        'export const origin = "from-b";',
+      );
+      const paths = (prefix: string) =>
+        JSON.stringify({
+          compilerOptions: { paths: { "@x/*": [`${prefix}shared/a/*`, `${prefix}shared/b/*`] } },
+        });
+      if (where === "the plugin tsconfig") {
+        await writeFile(
+          plugin.server,
+          'import { origin } from "@x/foo"; export default () => () => origin;',
+        );
+        await writeFile(path.join(plugin.directory, "tsconfig.json"), paths("./"));
+      } else {
+        await writeFile(
+          path.join(plugin.directory, "server", "main.ts"),
+          'export { origin } from "@x/foo";',
+        );
+        await writeFile(
+          plugin.server,
+          'import { origin } from "./server/main"; export default () => () => origin;',
+        );
+        // Paths without a baseUrl are relative to the config that sets them.
+        await mkdir(path.join(plugin.directory, "configs"));
+        await writeFile(path.join(plugin.directory, "configs", "paths.json"), paths("../"));
+        await writeFile(
+          path.join(plugin.directory, "server", "tsconfig.json"),
+          JSON.stringify({ extends: "../configs/paths.json" }),
+        );
+      }
+      await settle(plugin.directory);
+      const { cache } = await createCache();
+      expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("from-b");
+
+      await writeFile(
+        path.join(plugin.directory, "shared", "a", "foo.ts"),
+        'export const origin = "from-a";',
+      );
+      const uncached = await compilePlugin(plugin);
+
+      expect(uncached.serverBundle).toContain("from-a");
+      expect(await compilePlugin(plugin, { cache })).toEqual(uncached);
+    },
+  );
+
+  it("rebuilds when a new file under the tsconfig baseUrl shadows a package", async () => {
+    const plugin = await createPlugin();
+    const vendor = path.join(plugin.directory, "server", "vendor");
+    await mkdir(vendor);
+    await writeFile(path.join(vendor, "other.ts"), "export {};");
+    const dependency = path.join(plugin.directory, "node_modules", "thing");
+    await mkdir(dependency, { recursive: true });
+    await writeFile(
+      path.join(dependency, "package.json"),
+      JSON.stringify({ name: "thing", main: "index.js" }),
+    );
+    await writeFile(path.join(dependency, "index.js"), 'exports.origin = "from-node-modules";');
+    await writeFile(
+      plugin.server,
+      'import { origin } from "thing"; export default () => () => origin;',
+    );
+    // Inherited from an extended config, relative to that config.
+    await mkdir(path.join(plugin.directory, "configs"));
+    await writeFile(
+      path.join(plugin.directory, "configs", "base.json"),
+      JSON.stringify({ compilerOptions: { baseUrl: "../server/vendor" } }),
+    );
+    await writeFile(
+      path.join(plugin.directory, "tsconfig.json"),
+      JSON.stringify({ extends: "./configs/base.json" }),
+    );
+    await settle(plugin.directory);
+    const { cache } = await createCache();
+    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("from-node-modules");
+
+    await writeFile(path.join(vendor, "thing.ts"), 'export const origin = "from-vendor";');
+    const uncached = await compilePlugin(plugin);
+
+    expect(uncached.serverBundle).toContain("from-vendor");
+    expect(await compilePlugin(plugin, { cache })).toEqual(uncached);
+  });
+
+  // esbuild ignores a tsconfig inside node_modules; the boundary check's TypeScript does not.
+  it.each(["alone", "inside node_modules"] as const)(
+    "re-runs the boundary check when a declaration appears under an earlier tsconfig typeRoots entry (plugin %s)",
+    async (layout) => {
+      const plugin = await createPlugin(layout);
+      const typeRoot = path.join(plugin.directory, "server", "types");
+      await mkdir(path.join(typeRoot, "unrelated"), { recursive: true });
+      await writeFile(path.join(typeRoot, "unrelated", "index.d.ts"), "export {};");
+      const installed = path.join(plugin.directory, "node_modules", "@types", "thing");
+      await mkdir(installed, { recursive: true });
+      await writeFile(path.join(installed, "index.d.ts"), "declare const thing: string;");
+      await writeFile(
+        plugin.server,
+        ['/// <reference types="thing" />', "export default () => () => 1;"].join("\n"),
+      );
+      await writeFile(
+        path.join(plugin.directory, "tsconfig.json"),
+        JSON.stringify({
+          compilerOptions: { typeRoots: ["./server/types", "./node_modules/@types"] },
+        }),
+      );
+      await settle(plugin.directory);
+      const { cache } = await createCache();
+      await compilePlugin(plugin, { cache });
+
+      await mkdir(path.join(typeRoot, "thing"));
+      await writeFile(
+        path.join(typeRoot, "thing", "index.d.ts"),
+        'import type { PluginClientContext } from "@getpaseo/plugin/client"; export type Thing = PluginClientContext;',
+      );
+
+      await expect(compilePlugin(plugin)).rejects.toThrow("plugin server");
+      await expect(compilePlugin(plugin, { cache })).rejects.toThrow("plugin server");
+    },
+  );
+
+  it("re-runs the boundary check when a declaration appears in an earlier tsconfig rootDirs entry", async () => {
+    const plugin = await createPlugin();
+    for (const name of ["first", "second"]) {
+      await mkdir(path.join(plugin.directory, "shared", name));
+    }
+    await writeFile(path.join(plugin.directory, "shared", "first", "other.d.ts"), "export {};");
+    await writeFile(
+      path.join(plugin.directory, "shared", "second", "shape.d.ts"),
+      "export type Shape = string;",
+    );
+    await writeFile(
+      plugin.server,
+      'import type { Shape } from "./shared/shape"; export default () => (shape: Shape) => shape;',
+    );
+    await rm(path.join(plugin.directory, "shared", "shape.ts"));
+    await writeFile(
+      path.join(plugin.directory, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: { rootDirs: ["shared", "shared/first", "shared/second"] },
+      }),
+    );
+    await settle(plugin.directory);
+    const { cache } = await createCache();
+    await compilePlugin(plugin, { cache });
+
+    await writeFile(
+      path.join(plugin.directory, "shared", "first", "shape.d.ts"),
+      'import type { PluginClientContext } from "@getpaseo/plugin/client"; export type Shape = PluginClientContext;',
+    );
+
+    await expect(compilePlugin(plugin)).rejects.toThrow("plugin shared");
+    await expect(compilePlugin(plugin, { cache })).rejects.toThrow("plugin shared");
+  });
+
+  it("keeps reusing a bundle whose dependency ships a tsconfig with paths, which esbuild ignores", async () => {
+    const plugin = await createPlugin();
+    const modules = path.join(plugin.directory, "node_modules");
+    await mkdir(path.join(modules, "dep"), { recursive: true });
+    await mkdir(path.join(modules, "other"));
+    await writeFile(
+      path.join(modules, "dep", "package.json"),
+      JSON.stringify({ name: "dep", main: "index.js" }),
+    );
+    await writeFile(path.join(modules, "dep", "index.js"), 'module.exports = require("other");');
+    await writeFile(path.join(modules, "dep", "shadow.js"), 'exports.origin = "from-shadow";');
+    await writeFile(
+      path.join(modules, "dep", "tsconfig.json"),
+      JSON.stringify({ compilerOptions: { baseUrl: ".", paths: { other: ["./shadow.js"] } } }),
+    );
+    await writeFile(
+      path.join(modules, "other", "package.json"),
+      JSON.stringify({ name: "other", main: "index.js" }),
+    );
+    await writeFile(path.join(modules, "other", "index.js"), 'exports.origin = "from-other";');
+    await writeFile(
+      plugin.server,
+      'import { origin } from "dep"; export default () => () => origin;',
+    );
+    await settle(plugin.directory);
+    const { cache } = await createCache();
+
+    const built = await compilePlugin(plugin, { cache });
+
+    expect(built.serverBundle).toContain("from-other");
+    expect(built.serverBundle).not.toContain("from-shadow");
+    expect(await reused(plugin, cache)).toEqual(built);
   });
 
   it("re-runs the boundary check when a file reached only through a type import changes", async () => {
