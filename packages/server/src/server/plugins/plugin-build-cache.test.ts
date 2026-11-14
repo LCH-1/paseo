@@ -111,6 +111,25 @@ async function entries(directory: string): Promise<string[]> {
   return (await readdir(directory)).filter((name) => name.endsWith(".build")).sort();
 }
 
+type Plugin = Awaited<ReturnType<typeof createPlugin>>;
+type Cache = Awaited<ReturnType<typeof createCache>>["cache"];
+
+/** Compiles from the cache, failing unless the bundles come back without a boundary check. */
+async function reused(plugin: Plugin, cache: Cache) {
+  const checks = boundaryChecks();
+  const result = await compilePlugin(plugin, { cache });
+  expect(boundaryChecks()).toBe(checks);
+  return result;
+}
+
+// esbuild takes useDefineForClassFields from the tsconfig that applies to each file; false
+// assigns class fields in the constructor, which the bundle shows as `this.label`.
+const CLASS_FIELD_SOURCE =
+  'class Box { label = "boxed"; } export const box = () => new Box().label;';
+const ASSIGNED_FIELD = "this.label";
+const classFields = (define: boolean) =>
+  JSON.stringify({ compilerOptions: { useDefineForClassFields: define } });
+
 describe("plugin build cache", () => {
   it("reuses a bundle without re-running the boundary check while inputs are unchanged", async () => {
     const plugin = await createPlugin();
@@ -160,24 +179,21 @@ describe("plugin build cache", () => {
 
   it("rebuilds when the plugin tsconfig appears or changes", async () => {
     const plugin = await createPlugin();
-    await writeFile(
-      path.join(plugin.directory, "shared", "other.ts"),
-      'export const label = "alias";',
-    );
-    await writeFile(
-      plugin.server,
-      'import { label } from "@labels/current"; export default () => () => label;',
-    );
-    const config = (target: string) =>
-      JSON.stringify({ compilerOptions: { baseUrl: ".", paths: { "@labels/current": [target] } } });
-    await writeFile(path.join(plugin.directory, "tsconfig.json"), config("shared/labels.ts"));
+    await writeFile(plugin.server, `${CLASS_FIELD_SOURCE} export default () => box;`);
     await settle(plugin.directory);
     const { cache } = await createCache();
-    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("first label");
+    expect((await compilePlugin(plugin, { cache })).serverBundle).not.toContain(ASSIGNED_FIELD);
+    expect((await reused(plugin, cache)).serverBundle).not.toContain(ASSIGNED_FIELD);
 
-    await writeFile(path.join(plugin.directory, "tsconfig.json"), config("shared/other.ts"));
+    const tsconfig = path.join(plugin.directory, "tsconfig.json");
+    await writeFile(tsconfig, classFields(false));
+    await settle(plugin.directory);
+    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain(ASSIGNED_FIELD);
+    expect((await reused(plugin, cache)).serverBundle).toContain(ASSIGNED_FIELD);
 
-    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain('"alias"');
+    await writeFile(tsconfig, classFields(true));
+
+    expect((await compilePlugin(plugin, { cache })).serverBundle).not.toContain(ASSIGNED_FIELD);
   });
 
   it("rebuilds when a dependency's package.json points at another entry", async () => {
@@ -255,17 +271,8 @@ describe("plugin build cache", () => {
 
   it("rebuilds when a config extended by the plugin tsconfig changes", async () => {
     const plugin = await createPlugin();
-    await writeFile(
-      path.join(plugin.directory, "shared", "other.ts"),
-      'export const label = "alias";',
-    );
-    await writeFile(
-      plugin.server,
-      'import { label } from "@labels/current"; export default () => () => label;',
-    );
-    const base = (target: string) =>
-      JSON.stringify({ compilerOptions: { paths: { "@labels/current": [target] } } });
-    await writeFile(path.join(plugin.directory, "base.json"), base("./shared/labels.ts"));
+    await writeFile(plugin.server, `${CLASS_FIELD_SOURCE} export default () => box;`);
+    await writeFile(path.join(plugin.directory, "base.json"), classFields(false));
     await writeFile(
       path.join(plugin.directory, "tsconfig.json"),
       [
@@ -277,91 +284,64 @@ describe("plugin build cache", () => {
     );
     await settle(plugin.directory);
     const { cache } = await createCache();
-    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("first label");
+    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain(ASSIGNED_FIELD);
+    expect((await reused(plugin, cache)).serverBundle).toContain(ASSIGNED_FIELD);
 
-    await writeFile(path.join(plugin.directory, "base.json"), base("./shared/other.ts"));
+    await writeFile(path.join(plugin.directory, "base.json"), classFields(true));
 
-    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain('"alias"');
+    expect((await compilePlugin(plugin, { cache })).serverBundle).not.toContain(ASSIGNED_FIELD);
   });
 
   it("rebuilds when a config extended by a nested tsconfig changes", async () => {
     const plugin = await createPlugin();
     // esbuild reads the tsconfig nearest to each file; only server/ has one here.
-    await writeFile(
-      path.join(plugin.directory, "server", "alpha.ts"),
-      'export const pick = "alpha";',
-    );
-    await writeFile(
-      path.join(plugin.directory, "server", "beta.ts"),
-      'export const pick = "beta";',
-    );
-    await writeFile(
-      path.join(plugin.directory, "server", "main.ts"),
-      'export { pick } from "@pick/current";',
-    );
+    await writeFile(path.join(plugin.directory, "server", "main.ts"), CLASS_FIELD_SOURCE);
     await writeFile(
       plugin.server,
-      'import { pick } from "./server/main"; export default () => () => pick;',
+      'import { box } from "./server/main"; export default () => box;',
     );
-    const base = (target: string) =>
-      JSON.stringify({ compilerOptions: { paths: { "@pick/current": [target] } } });
     await mkdir(path.join(plugin.directory, "configs"));
-    await writeFile(
-      path.join(plugin.directory, "configs", "base.json"),
-      base("../server/alpha.ts"),
-    );
+    await writeFile(path.join(plugin.directory, "configs", "base.json"), classFields(false));
     await writeFile(
       path.join(plugin.directory, "server", "tsconfig.json"),
       JSON.stringify({ extends: ["../configs/base.json"] }),
     );
     await settle(plugin.directory);
     const { cache } = await createCache();
-    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("alpha");
+    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain(ASSIGNED_FIELD);
+    expect((await reused(plugin, cache)).serverBundle).toContain(ASSIGNED_FIELD);
 
-    await writeFile(path.join(plugin.directory, "configs", "base.json"), base("../server/beta.ts"));
+    await writeFile(path.join(plugin.directory, "configs", "base.json"), classFields(true));
 
-    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("beta");
+    expect((await compilePlugin(plugin, { cache })).serverBundle).not.toContain(ASSIGNED_FIELD);
   });
 
   it("rebuilds when a config a nested tsconfig extends from a package changes", async () => {
     const plugin = await createPlugin();
-    await writeFile(
-      path.join(plugin.directory, "server", "alpha.ts"),
-      'export const pick = "alpha";',
-    );
-    await writeFile(
-      path.join(plugin.directory, "server", "beta.ts"),
-      'export const pick = "beta";',
-    );
-    await writeFile(
-      path.join(plugin.directory, "server", "main.ts"),
-      'export { pick } from "@pick/current";',
-    );
+    await writeFile(path.join(plugin.directory, "server", "main.ts"), CLASS_FIELD_SOURCE);
     await writeFile(
       plugin.server,
-      'import { pick } from "./server/main"; export default () => () => pick;',
+      'import { box } from "./server/main"; export default () => box;',
     );
-    // Paths in an extended config are relative to that config, here inside node_modules.
-    const base = (target: string) =>
-      JSON.stringify({ compilerOptions: { paths: { "@pick/current": [target] } } });
     const configPackage = path.join(plugin.directory, "node_modules", "fixture-tsconfig");
     await mkdir(configPackage, { recursive: true });
     await writeFile(
       path.join(configPackage, "package.json"),
       JSON.stringify({ name: "fixture-tsconfig" }),
     );
-    await writeFile(path.join(configPackage, "base.json"), base("../../server/alpha.ts"));
+    await writeFile(path.join(configPackage, "base.json"), classFields(false));
     await writeFile(
       path.join(plugin.directory, "server", "tsconfig.json"),
       JSON.stringify({ extends: "fixture-tsconfig/base.json" }),
     );
     await settle(plugin.directory);
     const { cache } = await createCache();
-    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("alpha");
+    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain(ASSIGNED_FIELD);
+    expect((await reused(plugin, cache)).serverBundle).toContain(ASSIGNED_FIELD);
 
-    await writeFile(path.join(configPackage, "base.json"), base("../../server/beta.ts"));
+    await writeFile(path.join(configPackage, "base.json"), classFields(true));
 
-    expect((await compilePlugin(plugin, { cache })).serverBundle).toContain("beta");
+    expect((await compilePlugin(plugin, { cache })).serverBundle).not.toContain(ASSIGNED_FIELD);
   });
 
   it("re-runs the boundary check when a file reached only through a type import changes", async () => {
