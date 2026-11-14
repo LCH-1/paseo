@@ -35,7 +35,7 @@ function createCapturingLogger(): { logger: pino.Logger; lines: CapturedLine[] }
 }
 
 function launchLines(lines: CapturedLine[]): CapturedLine[] {
-  return lines.filter((line) => line.msg === "Claude query launch slow");
+  return lines.filter((line) => line.msg === "Claude query launch");
 }
 
 interface QueryMockOptions {
@@ -165,6 +165,53 @@ describe("Claude query launch timing", () => {
       const written = JSON.stringify(launches);
       expect(written).not.toContain(PROMPT);
       expect(written).not.toContain(process.cwd());
+    } finally {
+      await session.close();
+    }
+  });
+
+  // A relaunch follows a settings change, a rewind or an exit, and is rare. Its line, fast or slow,
+  // tells whether a slow first send after a settings change was spent retiring the old process.
+  test("logs every relaunch, a fast one included", async () => {
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    const { logger, lines } = createCapturingLogger();
+    let capturedOptions: Options | undefined;
+    const queryFactory = vi.fn(({ options }: ClaudeQueryInput) => {
+      capturedOptions = options;
+      return createQueryMock({ onReturn: () => (clock += 120) });
+    });
+    vi.spyOn(spawnUtils, "spawnProcess").mockReturnValue(
+      createChildProcessStub(() => (clock += 80)),
+    );
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession(
+      { provider: "claude", cwd: process.cwd() },
+      { agentId: "agent-claude-2" },
+    );
+
+    try {
+      await session.run(PROMPT);
+      capturedOptions?.spawnClaudeCodeProcess?.(SPAWN_OPTIONS);
+      expect(launchLines(lines)).toEqual([]);
+
+      await session.setThinkingOption?.(null);
+      await session.listCommands?.();
+
+      expect(launchLines(lines)).toEqual([
+        expect.objectContaining({
+          agentId: "agent-claude-2",
+          restart: true,
+          ok: true,
+          endInputMs: 0,
+          returnMs: 120,
+          treeKillMs: 80,
+          totalMs: 200,
+        }),
+      ]);
     } finally {
       await session.close();
     }

@@ -2247,7 +2247,8 @@ class ClaudeContextUsageState {
 /**
  * A query launch longer than this is logged with each phase's time. Launches happen once per
  * Claude process (a first turn, a relaunch after a settings change, a restart after an exit), and
- * the slow ones are those a waiting send feels.
+ * the slow ones are those a waiting send feels. Every relaunch is logged, fast or slow: relaunches
+ * are rare, and a fast one shows that a slow send after a settings change was spent elsewhere.
  */
 const SLOW_QUERY_LAUNCH_MS = 500;
 
@@ -2284,12 +2285,13 @@ class ClaudeQueryLaunchTimer {
     this.ok = true;
   }
 
-  logIfSlow(logger: Logger): void {
+  /** Logs a launch that was slow or retired a previous process; see SLOW_QUERY_LAUNCH_MS. */
+  logIfSlowOrRelaunch(logger: Logger): void {
     const totalMs = Math.round(performance.now() - this.startedAt);
-    if (totalMs <= SLOW_QUERY_LAUNCH_MS) return;
+    if (totalMs <= SLOW_QUERY_LAUNCH_MS && !this.restart) return;
     logger.info(
       { restart: this.restart, ok: this.ok, ...this.phases, totalMs },
-      "Claude query launch slow",
+      "Claude query launch",
     );
   }
 }
@@ -3488,7 +3490,7 @@ class ClaudeAgentSession implements AgentSession {
       launch.succeeded();
       return query;
     } finally {
-      launch.logIfSlow(this.logger);
+      launch.logIfSlowOrRelaunch(this.logger);
     }
   }
 
