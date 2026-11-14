@@ -119,7 +119,179 @@ async function createMarkedService(manifest: object) {
   return { service, directory, bundles };
 }
 
+interface ChildScript {
+  /** How long the child takes to report ready. */
+  readyAfterMs: number;
+  /** The child exits on its own this long after reporting ready. */
+  exitAfterReadyMs?: number;
+  events?: string[];
+}
+
+type ScriptedChild = EventEmitter & {
+  connected: boolean;
+  killed: boolean;
+  stdout: PassThrough;
+  stderr: PassThrough;
+  send(
+    message: { type: string; pluginId?: string; requestId?: string },
+    callback?: (error: Error | null) => void,
+  ): boolean;
+  kill(): boolean;
+  disconnect(): void;
+};
+
+/**
+ * A plugin service on the real runtime and compiler whose children follow `scripts`.
+ * Like a real child process, a child that has exited ignores kill() and never closes again.
+ */
+async function createScriptedService(scripts: Record<string, ChildScript>) {
+  const home = await temporaryDirectory("paseo-plugin-startup-");
+  const sources: PluginSources = {};
+  for (const id of Object.keys(scripts)) {
+    const directory = await temporaryDirectory(`paseo-plugin-startup-${id}-`);
+    await writeFile(path.join(directory, "paseo-plugin.json"), JSON.stringify({ id }));
+    await writeFile(path.join(directory, "index.server.ts"), markerSource(id));
+    sources[id] = { source: "directory", path: directory };
+  }
+  const hookCalls: string[] = [];
+  const spawnChild = () => {
+    let exited = false;
+    let pluginId = "";
+    const child = Object.assign(new EventEmitter(), {
+      connected: true,
+      killed: false,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+    }) as ScriptedChild;
+    const exit = () => {
+      if (exited) return;
+      exited = true;
+      child.connected = false;
+      child.emit("close", 0, null);
+    };
+    child.send = (message, callback) => {
+      if (exited) {
+        callback?.(new Error("Channel closed"));
+        return false;
+      }
+      callback?.(null);
+      if (message.type === "initialize") {
+        pluginId = message.pluginId ?? "";
+        const script = scripts[pluginId]!;
+        setTimeout(() => {
+          child.emit("message", {
+            type: "ready",
+            methods: [],
+            providers: [],
+            hooks: { events: script.events ?? [], before: [] },
+          });
+          if (script.exitAfterReadyMs !== undefined) setTimeout(exit, script.exitAfterReadyMs);
+        }, script.readyAfterMs);
+      } else if (message.type === "hook") {
+        hookCalls.push(pluginId);
+        queueMicrotask(() =>
+          child.emit("message", { type: "result", requestId: message.requestId, output: null }),
+        );
+      } else if (message.type === "shutdown") {
+        queueMicrotask(exit);
+      }
+      return true;
+    };
+    child.kill = () => {
+      if (exited) return false;
+      child.killed = true;
+      queueMicrotask(exit);
+      return true;
+    };
+    child.disconnect = () => {
+      child.connected = false;
+    };
+    return child;
+  };
+  const runtime = new PluginRuntime(pino({ level: "silent" }), "0.4.0", {
+    spawnChild,
+    sessionHost: {
+      async attachPluginSocket(_pluginId: string, socket: PluginSessionSocket) {
+        return { closed: new Promise<void>((resolve) => socket.once("close", () => resolve())) };
+      },
+    },
+  });
+  const service = new PluginService(
+    pino({ level: "silent" }),
+    createStore(home, sources),
+    "0.4.0",
+    { runtime },
+  );
+  return { service, runtime, sources, hookCalls };
+}
+
+/** Settles with the promise's outcome, or "hung" when it is still pending after `ms`. */
+async function within<Value>(promise: Promise<Value>, ms = 3_000): Promise<Value | "hung"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const hung = new Promise<"hung">((resolve) => {
+    timer = setTimeout(() => resolve("hung"), ms);
+  });
+  try {
+    return await Promise.race([promise, hung]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 describe("plugin startup", () => {
+  it("publishes into the runtime in list order, which is the order lifecycle events reach plugins", async () => {
+    const { service, runtime, hookCalls } = await createScriptedService({
+      slow: { readyAfterMs: 300, events: ["agent.turn_started"] },
+      fast: { readyAfterMs: 0, events: ["agent.turn_started"] },
+    });
+    await service.start();
+
+    runtime.emit("agent.turn_started", { agent: {}, turnId: null } as never);
+    await runtime.drainEvents();
+
+    expect(hookCalls).toEqual(["slow", "fast"]);
+    await service.stopAllPlugins();
+  });
+
+  it("fails a plugin whose process exits while it waits to publish, and still stops", async () => {
+    const { service, runtime } = await createScriptedService({
+      slow: { readyAfterMs: 500 },
+      crashy: { readyAfterMs: 0, exitAfterReadyMs: 50 },
+    });
+
+    await service.start();
+
+    expect(await service.listPlugins()).toMatchObject([
+      {
+        id: "crashy",
+        status: "failed",
+        error: expect.stringContaining("Plugin crashy exited during initialization"),
+      },
+      { id: "slow", status: "running" },
+    ]);
+    expect(runtime.catalog().map(({ id }) => id)).toEqual(["slow"]);
+    expect(await within(service.stopAllPlugins())).toBeUndefined();
+  });
+
+  it("cancels a start whose process already exited without waiting for a second close", async () => {
+    const { runtime, sources } = await createScriptedService({
+      crashy: { readyAfterMs: 0, exitAfterReadyMs: 0 },
+    });
+    const exited = new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    const start = runtime
+      .startPlugin(
+        "crashy",
+        sources.crashy!.path,
+        () => false,
+        () => exited,
+      )
+      .catch((error: Error) => error.message);
+
+    expect(await within(start)).toBe("Plugin start cancelled: crashy");
+    expect(runtime.catalog()).toEqual([]);
+  });
+
   it("loads plugins side by side but publishes them in list order, built-ins first", async () => {
     const home = await temporaryDirectory("paseo-plugin-startup-");
     const builtinIds = ["b0", "b1", "b2", "b3", "b4", "b5"];

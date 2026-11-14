@@ -84,6 +84,8 @@ interface LoadedPlugin {
   providers: readonly PluginProviderMetadata[];
   usageSources: readonly PluginUsageSourceMetadata[];
   child: PluginChild | null;
+  /** The child reported its close; a closed child emits no second one. */
+  childExited: boolean;
   outputCapture: PluginOutputCapture | null;
   pending: Map<string, PendingInvocation>;
   providerConnections: Map<string, RemoteProviderConnection>;
@@ -368,13 +370,7 @@ export class PluginRuntime {
       this.appendLog(pluginId, "stderr", `[paseo] Plugin failed to load: ${describeError(error)}`);
       throw error;
     });
-    await waitTurn();
-    if (!canPublish()) {
-      await this.stopPlugin(loaded);
-      throw new Error(`Plugin start cancelled: ${pluginId}`);
-    }
-    this.plugins.set(pluginId, loaded);
-    this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
+    await this.publish(loaded, waitTurn, canPublish);
   }
 
   async startBuiltinPlugin(
@@ -399,9 +395,33 @@ export class PluginRuntime {
       bundle: "",
       clientBundle: bundles.clientBundle ?? "",
     });
+    await this.publish(loaded, waitTurn, () => true);
+  }
+
+  /**
+   * A loaded plugin may wait for its turn while its child keeps running. A child that
+   * exits meanwhile is not published yet, so its close removed and announced nothing;
+   * it fails here as an exit during initialization instead of being published dead.
+   */
+  private async publish(
+    loaded: LoadedPlugin,
+    waitTurn: () => Promise<void>,
+    canPublish: () => boolean,
+  ): Promise<void> {
     await waitTurn();
-    this.plugins.set(input.id, loaded);
-    this.appendLog(input.id, "stdout", "[paseo] Plugin ready");
+    if (!canPublish()) {
+      await this.stopPlugin(loaded);
+      throw new Error(`Plugin start cancelled: ${loaded.id}`);
+    }
+    if (loaded.childExited) {
+      loaded.sessionSocket?.peerClosed();
+      await loaded.sessionClosed;
+      const error = new Error(`Plugin ${loaded.id} exited during initialization`);
+      this.appendLog(loaded.id, "stderr", `[paseo] Plugin failed to load: ${error.message}`);
+      throw error;
+    }
+    this.plugins.set(loaded.id, loaded);
+    this.appendLog(loaded.id, "stdout", "[paseo] Plugin ready");
   }
 
   async validatePlugin(configuredPath: string): Promise<void> {
@@ -735,6 +755,7 @@ export class PluginRuntime {
         providers: [],
         usageSources: [],
         child: null,
+        childExited: false,
         outputCapture: null,
         pending: new Map(),
         providerConnections: new Map(),
@@ -780,6 +801,7 @@ export class PluginRuntime {
         throw error;
       });
     let loaded: LoadedPlugin | null = null;
+    let exited = false;
     let ready: Extract<PluginProcessMessage, { type: "ready" }>;
     try {
       ready = await new Promise<Extract<PluginProcessMessage, { type: "ready" }>>(
@@ -829,6 +851,7 @@ export class PluginRuntime {
             }
           });
           child.on("close", () => {
+            exited = true;
             session.socket.peerClosed();
             if (!loaded) {
               fail(new Error(`Plugin ${pluginId} exited during initialization`));
@@ -863,6 +886,8 @@ export class PluginRuntime {
       providers: ready.providers ?? [],
       usageSources: ready.usageSources ?? [],
       child,
+      // A close that came between "ready" and here found no plugin to report to.
+      childExited: exited,
       outputCapture,
       pending,
       providerConnections: new Map(),
@@ -1249,6 +1274,7 @@ export class PluginRuntime {
   }
 
   private async handleChildClose(loaded: LoadedPlugin): Promise<void> {
+    loaded.childExited = true;
     loaded.sessionSocket?.peerClosed();
     const wasPublished = this.plugins.get(loaded.id) === loaded;
     if (wasPublished) {
@@ -1279,7 +1305,8 @@ export class PluginRuntime {
       this.appendLog(loaded.id, "stdout", "[paseo] Plugin stopped");
       return;
     }
-    if (child.killed) {
+    // An exited child emits no second close to wait for, whether or not it was killed.
+    if (child.killed || loaded.childExited) {
       sessionSocket.peerClosed();
       await sessionClosed;
       this.appendLog(loaded.id, "stdout", "[paseo] Plugin stopped");
